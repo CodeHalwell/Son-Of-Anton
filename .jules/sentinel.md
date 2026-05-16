@@ -12,7 +12,13 @@
 **Vulnerability:** Command injection was possible in `extensions/son-of-anton/src/personality/GitBlameEasterEgg.ts` where unvalidated file paths were directly interpolated into a `child_process.exec` shell command (`git blame --porcelain "${filePath}"`). A workspace path like `"; touch /tmp/pwned; #` would execute the payload.
 **Learning:** Even internal API data that seems safe like file paths from `vscode.Uri` can contain malicious shell metacharacters and should be treated as untrusted input.
 **Prevention:** Always refactor to `child_process.execFile` when executing binaries like git to bypass shell evaluation and safely pass arguments natively.
+
 ## 2024-05-19 - Command Injection in Terminal Suggest
 **Vulnerability:** Command injection vulnerability identified in `extensions/terminal-suggest/src/fig/autocomplete-parser/parseArguments.ts` where user-controlled strings (from the shell context) were interpolated into a bash string argument for `child_process.exec`.
 **Learning:** Even though `command` was wrapped in double quotes `"${command}"`, `bash` command interpolation evaluates any nested commands (e.g., `$()`) inside double quotes, which can lead to command injection.
 **Prevention:** Direct use of `child_process.execFile` instead of `exec` guarantees arguments are properly tokenized before execution and passed as CLI argument arrays instead of a concatenated shell string. Always use `execFile` where execution environment shell parsing is not implicitly required.
+
+## 2025-05-16 - Prevent Command Injection via AppleScript's do shell script with osascript
+**Vulnerability:** Constructing `osascript` commands using string interpolation of paths into an AppleScript `do shell script` string (e.g., ``osascript -e "do shell script \\"rm \'${path}\'\\" with administrator privileges"``) is vulnerable to command injection if the path is user-controlled or malformed, even if escaped with single quotes.
+**Learning:** Migrating to `execFile('osascript', ...)` alone is insufficient if the script payload remains a single interpolated string block.
+**Prevention:** Always refactor the `osascript` payload to use an `on run argv` block, pass the dynamic parameters as trailing array elements after `--`, and strictly evaluate them inside AppleScript using `quoted form of (item N of argv)`.
