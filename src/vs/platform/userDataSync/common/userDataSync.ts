@@ -124,8 +124,11 @@ export function registerConfiguration(): IDisposable {
 	const registerIgnoredSettingsSchema = () => {
 		const disallowedIgnoredSettings = getDisallowedIgnoredSettings();
 		const defaultIgnoredSettings = getDefaultIgnoredSettings();
-		const settings = Object.keys(allSettings.properties).filter(setting => !defaultIgnoredSettings.includes(setting));
-		const ignoredSettings = defaultIgnoredSettings.filter(setting => !disallowedIgnoredSettings.includes(setting));
+		// ⚡ Bolt Optimization: Use sets for O(1) lookups during array filtering
+		const defaultIgnoredSettingsSet = new Set(defaultIgnoredSettings);
+		const disallowedIgnoredSettingsSet = new Set(disallowedIgnoredSettings);
+		const settings = Object.keys(allSettings.properties).filter(setting => !defaultIgnoredSettingsSet.has(setting));
+		const ignoredSettings = defaultIgnoredSettings.filter(setting => !disallowedIgnoredSettingsSet.has(setting));
 		const ignoredSettingsSchema: IJSONSchema = {
 			items: {
 				type: 'string',
