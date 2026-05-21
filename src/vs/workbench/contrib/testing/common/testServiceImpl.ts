@@ -227,12 +227,19 @@ export class TestService extends Disposable implements ITestService {
 		const byController = groupBy(req.targets, (a, b) => a.controllerId.localeCompare(b.controllerId));
 		const requests = byController.map(
 			group => this.getTestController(group[0].controllerId)?.startContinuousRun(
-				group.map(controlReq => ({
-					excludeExtIds: req.exclude!.filter(t => !controlReq.testIds.includes(t)),
-					profileId: controlReq.profileId,
-					controllerId: controlReq.controllerId,
-					testIds: controlReq.testIds,
-				})),
+				group.map(controlReq => {
+					// ⚡ BOLT OPTIMIZATION:
+					// Convert controlReq.testIds to a Set to optimize the O(N*M) nested array traversal during filtering.
+					// `controlReq.testIds.includes` inside `req.exclude!.filter` is O(N*M).
+					// By using a Set, the lookup `testIdSet.has(t)` becomes O(1), making the overall operation O(N+M).
+					const testIdSet = new Set(controlReq.testIds);
+					return {
+						excludeExtIds: req.exclude!.filter(t => !testIdSet.has(t)),
+						profileId: controlReq.profileId,
+						controllerId: controlReq.controllerId,
+						testIds: controlReq.testIds,
+					};
+				}),
 				token,
 			).then(result => {
 				const errs = result.map(r => r.error).filter(isDefined);
@@ -270,13 +277,20 @@ export class TestService extends Disposable implements ITestService {
 			const byController = groupBy(req.targets, (a, b) => a.controllerId.localeCompare(b.controllerId));
 			const requests = byController.map(
 				group => this.getTestController(group[0].controllerId)?.runTests(
-					group.map(controlReq => ({
-						runId: result.id,
-						excludeExtIds: req.exclude!.filter(t => !controlReq.testIds.includes(t)),
-						profileId: controlReq.profileId,
-						controllerId: controlReq.controllerId,
-						testIds: controlReq.testIds,
-					})),
+					group.map(controlReq => {
+						// ⚡ BOLT OPTIMIZATION:
+						// Convert controlReq.testIds to a Set to optimize the O(N*M) nested array traversal during filtering.
+						// `controlReq.testIds.includes` inside `req.exclude!.filter` is O(N*M).
+						// By using a Set, the lookup `testIdSet.has(t)` becomes O(1), making the overall operation O(N+M).
+						const testIdSet = new Set(controlReq.testIds);
+						return {
+							runId: result.id,
+							excludeExtIds: req.exclude!.filter(t => !testIdSet.has(t)),
+							profileId: controlReq.profileId,
+							controllerId: controlReq.controllerId,
+							testIds: controlReq.testIds,
+						};
+					}),
 					cancelSource.token,
 				).then(result => {
 					const errs = result.map(r => r.error).filter(isDefined);
