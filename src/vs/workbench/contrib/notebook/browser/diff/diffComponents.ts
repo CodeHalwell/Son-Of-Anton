@@ -2119,7 +2119,13 @@ export class CollapsedCellOverlayWidget extends Disposable implements IDiffCellM
 				role: 'button',
 				tabindex: 0,
 				'aria-label': localize('showUnchangedCells', 'Show Unchanged Cells'),
-				onclick: () => { this._action.fire(); }
+				onclick: () => { this._action.fire(); },
+				onkeydown: (e: KeyboardEvent) => {
+					if (e.key === 'Enter' || e.key === ' ') {
+						e.preventDefault();
+						this._action.fire();
+					}
+				}
 			},
 				...renderLabelWithIcons('$(unfold)'))]
 		),
@@ -2160,7 +2166,13 @@ export class UnchangedCellOverlayWidget extends Disposable implements IDiffCellM
 				role: 'button',
 				tabindex: 0,
 				'aria-label': localize('hideUnchangedCells', 'Hide Unchanged Cells'),
-				onclick: () => { this._action.fire(); }
+				onclick: () => { this._action.fire(); },
+				onkeydown: (e: KeyboardEvent) => {
+					if (e.key === 'Enter' || e.key === ' ') {
+						e.preventDefault();
+						this._action.fire();
+					}
+				}
 			},
 				...renderLabelWithIcons('$(fold)')
 			),

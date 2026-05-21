@@ -1,0 +1,3 @@
+## 2024-05-21 - Added Keyboard Support to Interactive Elements
+**Learning:** Custom interactive elements (e.g. `<a>` or `<div>`) constructed with `role="button"` and `tabindex="0"` that listen to `onclick` events do not automatically handle keyboard interactions like standard `<button>` elements do. Screen reader users and keyboard navigators expect to trigger these using 'Enter' or 'Space'.
+**Action:** Always attach a corresponding `onkeydown` listener to handle 'Enter' and 'Space' keys, ensuring `e.preventDefault()` is called to prevent unwanted scrolling when these elements have `role="button"`.
