@@ -16,3 +16,8 @@
 **Vulnerability:** Command injection vulnerability identified in `extensions/terminal-suggest/src/fig/autocomplete-parser/parseArguments.ts` where user-controlled strings (from the shell context) were interpolated into a bash string argument for `child_process.exec`.
 **Learning:** Even though `command` was wrapped in double quotes `"${command}"`, `bash` command interpolation evaluates any nested commands (e.g., `$()`) inside double quotes, which can lead to command injection.
 **Prevention:** Direct use of `child_process.execFile` instead of `exec` guarantees arguments are properly tokenized before execution and passed as CLI argument arrays instead of a concatenated shell string. Always use `execFile` where execution environment shell parsing is not implicitly required.
+
+## 2024-05-18 - Fix XSS in webview escapeHtml due to DOM serialization
+**Vulnerability:** XSS vulnerability in webview `escapeHtml` function
+**Learning:** Using DOM serialization (`div.textContent` to `div.innerHTML`) for HTML escaping fails to escape double quotes (`"`), leaving HTML attributes vulnerable to XSS injection.
+**Prevention:** Use explicit regex-based string replacements for HTML entities and quotes instead of DOM serialization.
