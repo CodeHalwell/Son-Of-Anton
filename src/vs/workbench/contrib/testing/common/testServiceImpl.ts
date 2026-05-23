@@ -227,12 +227,15 @@ export class TestService extends Disposable implements ITestService {
 		const byController = groupBy(req.targets, (a, b) => a.controllerId.localeCompare(b.controllerId));
 		const requests = byController.map(
 			group => this.getTestController(group[0].controllerId)?.startContinuousRun(
-				group.map(controlReq => ({
-					excludeExtIds: req.exclude!.filter(t => !controlReq.testIds.includes(t)),
-					profileId: controlReq.profileId,
-					controllerId: controlReq.controllerId,
-					testIds: controlReq.testIds,
-				})),
+				group.map(controlReq => {
+					const testIdsSet = new Set(controlReq.testIds);
+					return {
+						excludeExtIds: req.exclude!.filter(t => !testIdsSet.has(t)),
+						profileId: controlReq.profileId,
+						controllerId: controlReq.controllerId,
+						testIds: controlReq.testIds,
+					};
+				}),
 				token,
 			).then(result => {
 				const errs = result.map(r => r.error).filter(isDefined);
@@ -270,13 +273,16 @@ export class TestService extends Disposable implements ITestService {
 			const byController = groupBy(req.targets, (a, b) => a.controllerId.localeCompare(b.controllerId));
 			const requests = byController.map(
 				group => this.getTestController(group[0].controllerId)?.runTests(
-					group.map(controlReq => ({
-						runId: result.id,
-						excludeExtIds: req.exclude!.filter(t => !controlReq.testIds.includes(t)),
-						profileId: controlReq.profileId,
-						controllerId: controlReq.controllerId,
-						testIds: controlReq.testIds,
-					})),
+					group.map(controlReq => {
+						const testIdsSet = new Set(controlReq.testIds);
+						return {
+							runId: result.id,
+							excludeExtIds: req.exclude!.filter(t => !testIdsSet.has(t)),
+							profileId: controlReq.profileId,
+							controllerId: controlReq.controllerId,
+							testIds: controlReq.testIds,
+						};
+					}),
 					cancelSource.token,
 				).then(result => {
 					const errs = result.map(r => r.error).filter(isDefined);

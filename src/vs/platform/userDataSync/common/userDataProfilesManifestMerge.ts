@@ -111,16 +111,20 @@ export function merge(local: IUserDataProfile[], remote: ISyncUserDataProfile[] 
 }
 
 function compare(from: IUserDataProfileInfo[] | null, to: IUserDataProfileInfo[], ignoredProfiles: string[]): { added: string[]; removed: string[]; updated: string[] } {
-	from = from ? from.filter(({ id }) => !ignoredProfiles.includes(id)) : [];
-	to = to.filter(({ id }) => !ignoredProfiles.includes(id));
+	const ignoredProfilesSet = new Set(ignoredProfiles);
+	from = from ? from.filter(({ id }) => !ignoredProfilesSet.has(id)) : [];
+	to = to.filter(({ id }) => !ignoredProfilesSet.has(id));
 	const fromKeys = from.map(({ id }) => id);
 	const toKeys = to.map(({ id }) => id);
-	const added = toKeys.filter(key => !fromKeys.includes(key));
-	const removed = fromKeys.filter(key => !toKeys.includes(key));
+	const fromKeysSet = new Set(fromKeys);
+	const toKeysSet = new Set(toKeys);
+	const added = toKeys.filter(key => !fromKeysSet.has(key));
+	const removed = fromKeys.filter(key => !toKeysSet.has(key));
 	const updated: string[] = [];
+	const removedSet = new Set(removed);
 
 	for (const { id, name, icon, useDefaultFlags } of from) {
-		if (removed.includes(id)) {
+		if (removedSet.has(id)) {
 			continue;
 		}
 		const toProfile = to.find(p => p.id === id);

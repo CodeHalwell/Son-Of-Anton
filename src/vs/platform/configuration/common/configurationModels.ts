@@ -1247,16 +1247,18 @@ function compare(from: ConfigurationModel | undefined, to: ConfigurationModel | 
 
 	const fromOverrideIdentifiers = from?.getAllOverrideIdentifiers() || [];
 	const toOverrideIdentifiers = to?.getAllOverrideIdentifiers() || [];
+	const fromOverrideIdentifiersSet = new Set(fromOverrideIdentifiers);
+	const toOverrideIdentifiersSet = new Set(toOverrideIdentifiers);
 
 	if (to) {
-		const addedOverrideIdentifiers = toOverrideIdentifiers.filter(key => !fromOverrideIdentifiers.includes(key));
+		const addedOverrideIdentifiers = toOverrideIdentifiers.filter(key => !fromOverrideIdentifiersSet.has(key));
 		for (const identifier of addedOverrideIdentifiers) {
 			overrides.push([identifier, to.getKeysForOverrideIdentifier(identifier)]);
 		}
 	}
 
 	if (from) {
-		const removedOverrideIdentifiers = fromOverrideIdentifiers.filter(key => !toOverrideIdentifiers.includes(key));
+		const removedOverrideIdentifiers = fromOverrideIdentifiers.filter(key => !toOverrideIdentifiersSet.has(key));
 		for (const identifier of removedOverrideIdentifiers) {
 			overrides.push([identifier, from.getKeysForOverrideIdentifier(identifier)]);
 		}
@@ -1264,7 +1266,7 @@ function compare(from: ConfigurationModel | undefined, to: ConfigurationModel | 
 
 	if (to && from) {
 		for (const identifier of fromOverrideIdentifiers) {
-			if (toOverrideIdentifiers.includes(identifier)) {
+			if (toOverrideIdentifiersSet.has(identifier)) {
 				const result = compareConfigurationContents({ contents: from.getOverrideValue(undefined, identifier) || {}, keys: from.getKeysForOverrideIdentifier(identifier) }, { contents: to.getOverrideValue(undefined, identifier) || {}, keys: to.getKeysForOverrideIdentifier(identifier) });
 				overrides.push([identifier, [...result.added, ...result.removed, ...result.updated]]);
 			}
