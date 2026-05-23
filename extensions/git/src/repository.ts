@@ -2644,7 +2644,9 @@ export class Repository implements Disposable {
 		].map(resource => path.relative(this.root, resource.resourceUri.fsPath));
 
 		// Detect overlapping unstaged files in worktree stash and target repository
-		const conflicts = sourceFilePaths.filter(path => targetFilePaths.includes(path));
+		// Use a Set to avoid O(N*M) nested iterations for large numbers of unstaged files
+		const targetPathsSet = new Set(targetFilePaths);
+		const conflicts = sourceFilePaths.filter(path => targetPathsSet.has(path));
 
 		if (conflicts.length > 0) {
 			const maxFilesShown = 5;
