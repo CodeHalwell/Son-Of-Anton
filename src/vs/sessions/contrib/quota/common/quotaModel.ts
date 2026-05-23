@@ -157,6 +157,20 @@ export function formatWindowFraction(fraction: number): string {
 	return `${Math.round(fraction * 100)}%`;
 }
 
+/**
+ * Cache hit rate: fraction of paid input tokens served from cache.
+ * Denominator is inputTokens + cacheReadInputTokens; cacheCreationTokens
+ * are excluded (they represent cache writes, not a hit/miss decision).
+ */
+export function computeCacheHitRate(usage: TokenUsage): number {
+	const total = usage.inputTokens + usage.cacheReadInputTokens;
+	return total === 0 ? 0 : usage.cacheReadInputTokens / total;
+}
+
+export function formatCacheHitRate(rate: number): string {
+	return `${Math.round(rate * 100)}%`;
+}
+
 export function formatDurationSeconds(seconds: number): string {
 	if (seconds < 60) {
 		return `${seconds}s`;
@@ -184,6 +198,11 @@ export function buildCompactSummary(data: QuotaCostData): string {
 	const allTokens = total.inputTokens + total.outputTokens + total.cacheReadInputTokens + total.cacheCreationInputTokens;
 	if (allTokens > 0) {
 		parts.push(`${formatTokenCount(allTokens)} tokens`);
+	}
+
+	const hitRate = computeCacheHitRate(total);
+	if (hitRate > 0) {
+		parts.push(`${formatCacheHitRate(hitRate)} cached`);
 	}
 
 	const subQuota = data.providerQuota.find(q => q.kind === 'subscription');

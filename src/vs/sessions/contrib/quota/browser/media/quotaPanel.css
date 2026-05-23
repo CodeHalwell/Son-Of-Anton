@@ -131,6 +131,12 @@
 	white-space: nowrap;
 }
 
+.quota-panel-cache {
+	color: var(--vscode-charts-green, #4caf50);
+	white-space: nowrap;
+	font-variant-numeric: tabular-nums;
+}
+
 .quota-panel-cost,
 .quota-panel-call-count {
 	white-space: nowrap;

@@ -16,6 +16,8 @@ import {
 	SpendCapConfig,
 	ToolUsageEntry,
 	buildCompactSummary,
+	computeCacheHitRate,
+	formatCacheHitRate,
 	formatCostUsd,
 	formatDurationSeconds,
 	formatTokenCount,
@@ -130,6 +132,7 @@ export class QuotaPanel extends Disposable {
 		const headRow = append(thead, $('tr'));
 		append(headRow, $('th', undefined, localize('quota.col.model', "Model")));
 		append(headRow, $('th', undefined, localize('quota.col.tokens', "Tokens")));
+		append(headRow, $('th', undefined, localize('quota.col.cache', "Cache")));
 		append(headRow, $('th', undefined, localize('quota.col.cost', "Est. cost")));
 
 		const tbody = append(table, $('tbody'));
@@ -137,18 +140,28 @@ export class QuotaPanel extends Disposable {
 			const row = append(tbody, $('tr'));
 			append(row, $('td.quota-panel-model-label', undefined, entry.displayLabel));
 			append(row, $('td.quota-panel-tokens', undefined, this._formatModelTokens(entry)));
+			append(row, $('td.quota-panel-cache', undefined, this._formatModelCache(entry)));
 			append(row, $('td.quota-panel-cost', undefined, formatCostUsd(entry.estimatedCost.usd)));
 		}
 	}
 
 	private _formatModelTokens(entry: ModelUsageEntry): string {
 		const u = entry.usage;
-		const parts = [
-			`${formatTokenCount(u.inputTokens)} in`,
-			`${formatTokenCount(u.outputTokens)} out`,
-		];
-		if (u.cacheReadInputTokens > 0) {
-			parts.push(`${formatTokenCount(u.cacheReadInputTokens)} cached`);
+		return `${formatTokenCount(u.inputTokens)} in · ${formatTokenCount(u.outputTokens)} out`;
+	}
+
+	private _formatModelCache(entry: ModelUsageEntry): string {
+		const u = entry.usage;
+		const hitRate = computeCacheHitRate(u);
+		if (hitRate === 0 && u.cacheCreationInputTokens === 0) {
+			return '—';
+		}
+		const parts: string[] = [];
+		if (hitRate > 0) {
+			parts.push(formatCacheHitRate(hitRate));
+		}
+		if (u.cacheCreationInputTokens > 0) {
+			parts.push(`${formatTokenCount(u.cacheCreationInputTokens)} written`);
 		}
 		return parts.join(' · ');
 	}

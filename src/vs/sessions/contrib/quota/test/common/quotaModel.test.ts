@@ -10,8 +10,10 @@ import {
 	TokenUsage,
 	addUsage,
 	buildCompactSummary,
+	computeCacheHitRate,
 	emptyUsage,
 	estimateCost,
+	formatCacheHitRate,
 	formatCostUsd,
 	formatDurationSeconds,
 	formatTokenCount,
@@ -177,6 +179,51 @@ suite('quotaModel', () => {
 		assert.strictEqual(isSpendCapExceeded({ limitUsd: 5, currentTotalUsd: 5.01 }), true);
 	});
 
+	// ── computeCacheHitRate ───────────────────────────────────────────────────
+
+	test('computeCacheHitRate returns 0 for empty usage', () => {
+		assert.strictEqual(computeCacheHitRate(emptyUsage()), 0);
+	});
+
+	test('computeCacheHitRate returns 0 when only output tokens present', () => {
+		const u: TokenUsage = { inputTokens: 0, outputTokens: 500, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
+		assert.strictEqual(computeCacheHitRate(u), 0);
+	});
+
+	test('computeCacheHitRate returns 1.0 when all input tokens are from cache', () => {
+		const u: TokenUsage = { inputTokens: 0, outputTokens: 100, cacheCreationInputTokens: 0, cacheReadInputTokens: 1000 };
+		assert.strictEqual(computeCacheHitRate(u), 1.0);
+	});
+
+	test('computeCacheHitRate returns 0.5 with equal fresh and cached tokens', () => {
+		const u: TokenUsage = { inputTokens: 1000, outputTokens: 200, cacheCreationInputTokens: 500, cacheReadInputTokens: 1000 };
+		assert.strictEqual(computeCacheHitRate(u), 0.5);
+	});
+
+	test('computeCacheHitRate excludes cacheCreationInputTokens from denominator', () => {
+		const u: TokenUsage = { inputTokens: 200, outputTokens: 0, cacheCreationInputTokens: 800, cacheReadInputTokens: 200 };
+		assert.deepStrictEqual(
+			{ rate: parseFloat(computeCacheHitRate(u).toFixed(4)) },
+			{ rate: 0.5 },
+		);
+	});
+
+	// ── formatCacheHitRate ────────────────────────────────────────────────────
+
+	test('formatCacheHitRate rounds to nearest percent', () => {
+		assert.deepStrictEqual({
+			zero:     formatCacheHitRate(0),
+			seventy8: formatCacheHitRate(0.78),
+			hundred:  formatCacheHitRate(1.0),
+			partial:  formatCacheHitRate(0.333),
+		}, {
+			zero:     '0%',
+			seventy8: '78%',
+			hundred:  '100%',
+			partial:  '33%',
+		});
+	});
+
 	// ── buildCompactSummary ───────────────────────────────────────────────────
 
 	function makeData(overrides: Partial<QuotaCostData> = {}): QuotaCostData {
@@ -223,6 +270,32 @@ suite('quotaModel', () => {
 		});
 		const s = buildCompactSummary(data);
 		assert.ok(s.includes('4 / 30 RPM'), `Expected RPM in summary, got: "${s}"`);
+	});
+
+	test('buildCompactSummary shows cache hit rate when cacheReadInputTokens > 0', () => {
+		const data = makeData({
+			summary: {
+				totalUsage: { inputTokens: 1000, outputTokens: 500, cacheCreationInputTokens: 0, cacheReadInputTokens: 1000 },
+				estimatedCost: { usd: 0 },
+				byModel: [],
+				byTool: [],
+			},
+		});
+		const s = buildCompactSummary(data);
+		assert.ok(s.includes('50% cached'), `Expected cache hit rate in summary, got: "${s}"`);
+	});
+
+	test('buildCompactSummary omits cache hit rate when no cached tokens', () => {
+		const data = makeData({
+			summary: {
+				totalUsage: { inputTokens: 1000, outputTokens: 500, cacheCreationInputTokens: 200, cacheReadInputTokens: 0 },
+				estimatedCost: { usd: 0 },
+				byModel: [],
+				byTool: [],
+			},
+		});
+		const s = buildCompactSummary(data);
+		assert.ok(!s.includes('cached'), `Expected no cache rate in summary, got: "${s}"`);
 	});
 
 	test('buildCompactSummary prefers subscription over api-key when both present', () => {
