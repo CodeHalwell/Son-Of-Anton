@@ -12,3 +12,7 @@
 **Vulnerability:** Command injection was possible in `extensions/son-of-anton/src/personality/GitBlameEasterEgg.ts` where unvalidated file paths were directly interpolated into a `child_process.exec` shell command (`git blame --porcelain "${filePath}"`). A workspace path like `"; touch /tmp/pwned; #` would execute the payload.
 **Learning:** Even internal API data that seems safe like file paths from `vscode.Uri` can contain malicious shell metacharacters and should be treated as untrusted input.
 **Prevention:** Always refactor to `child_process.execFile` when executing binaries like git to bypass shell evaluation and safely pass arguments natively.
+## 2024-05-19 - Command Injection in Terminal Suggest
+**Vulnerability:** Command injection vulnerability identified in `extensions/terminal-suggest/src/fig/autocomplete-parser/parseArguments.ts` where user-controlled strings (from the shell context) were interpolated into a bash string argument for `child_process.exec`.
+**Learning:** Even though `command` was wrapped in double quotes `"${command}"`, `bash` command interpolation evaluates any nested commands (e.g., `$()`) inside double quotes, which can lead to command injection.
+**Prevention:** Direct use of `child_process.execFile` instead of `exec` guarantees arguments are properly tokenized before execution and passed as CLI argument arrays instead of a concatenated shell string. Always use `execFile` where execution environment shell parsing is not implicitly required.
