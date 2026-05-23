@@ -1,22 +1,3 @@
-## 2024-05-18 - Hover Action Focus Styles
-**Learning:** Hover widgets use an interactive `action-container` element for status bar actions (like code links or quick actions). These elements have `tabindex="0"` allowing them to receive keyboard focus, but they lack visual focus indicators. This means users navigating via keyboard can't see which action is currently focused within a hover.
-**Action:** When creating interactive elements inside hovers or popups, ensure they have explicit `:focus` or `:focus-visible` styles using `var(--vscode-focusBorder)` to maintain accessibility.
-
-## 2024-04-22 - Missing focus-visible states on core interactive elements
-**Learning:** The base UI components like `Button` (`src/vs/base/browser/ui/button/button.css`) define focus states using `:focus`, but they are missing `outline` property for `:focus` and explicit styling using `:focus-visible` pseudoclass with `outline: 1px solid var(--vscode-focusBorder)`. Some places use outline-offset without defining the outline itself, or missing outline color entirely.
-**Action:** When working on interactive UI components, ensure that `:focus-visible` or `:focus` states explicitly include the outline style using `outline: 1px solid var(--vscode-focusBorder)` to maintain accessibility for keyboard navigation.
-
-## 2026-04-29 - Adding Accessible Properties to Custom Button roles
-**Learning:** Interactive elements mapped to `role="button"` via standard HTML tags (like `<a>` or `<div>`) inside complex widgets (such as Diff Editor collapsed regions or Preference dropdowns) often omit keyboard accessibility (`tabindex="0"`) and explicit screen reader support (`aria-label`). These UI components are commonly wrapped inside `DOM.` or `h()` helper functions.
-**Action:** Whenever identifying custom interactive elements with `role="button"` built using DOM helper functions, always ensure `tabindex: '0'` and `'aria-label'` properties are explicitly declared alongside the role to enable full accessibility.
-
-## 2026-04-30 - Custom Button Keyboard Navigation
-**Learning:** Custom interactive UI elements (like `<a>` or `<div>`) with `role="button"` created using internal DOM helpers (e.g., `DOM.$()` or `h()`) must explicitly be given a `tabindex: '0'` attribute. Otherwise, they are completely skipped by keyboard navigation, breaking accessibility for a core interaction pattern.
-**Action:** When adding or modifying custom button elements, always ensure they have `tabindex: 0` and an `aria-label` (if icon-only) to guarantee they are reachable and readable by all users.
-## 2026-05-02 - Missing aria-label in custom Notebook Diff Cell Overlay widgets
-**Learning:** The custom  elements used as icon-only buttons in  and  within  define  and  but miss an explicitly localized  attribute, which breaks accessibility for screen readers.
-**Action:** When working on custom icon-only overlay widgets or inline buttons constructed via DOM helper functions, ensure the  attribute is added utilizing the localized title string.
-
-## 2026-05-02 - Missing aria-label in custom Notebook Diff Cell Overlay widgets
-**Learning:** The custom `DOM.$('a')` elements used as icon-only buttons in `CollapsedCellOverlayWidget` and `UnchangedCellOverlayWidget` within `notebook/browser/diff/diffComponents.ts` define `role: 'button'` and `tabindex: 0` but miss an explicitly localized `aria-label` attribute, which breaks accessibility for screen readers.
-**Action:** When working on custom icon-only overlay widgets or inline buttons constructed via DOM helper functions, ensure the `aria-label` attribute is added utilizing the localized title string.
+## 2026-05-17 - Keyboard Accessibility in Custom Overlay Widgets
+**Learning:** In custom overlay widgets (like `CollapsedCodeOverlayWidget` in the diff editor), simply setting `role="button"` and `tabindex="0"` on container `div`s or `a` tags without `href` attributes is insufficient for true accessibility. These elements do not natively handle 'Enter' or 'Space' keypresses. While mouse interactions (`mousedown`/`mouseup`/`click`) work for sighted users, keyboard-only or screen-reader users remain blocked from triggering these actions.
+**Action:** When implementing or modifying custom interactive elements with `role="button"`, always verify that a corresponding `onkeydown` handler is present to intercept `e.key === 'Enter'` and `e.key === ' '`, call `e.preventDefault()`, and trigger the identical logic used in the mouse interaction handler.

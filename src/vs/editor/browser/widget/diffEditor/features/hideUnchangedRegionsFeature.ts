@@ -302,15 +302,55 @@ class CompactCollapsedCodeOverlayWidget extends ViewZoneOverlayWidget {
 
 class CollapsedCodeOverlayWidget extends ViewZoneOverlayWidget {
 	private readonly _nodes = h('div.diff-hidden-lines', [
-		h('div.top@top', { title: localize('diff.hiddenLines.top', 'Click or drag to show more above'), role: 'button', tabindex: 0, 'aria-label': localize('diff.hiddenLines.top', 'Click or drag to show more above') }),
+		h('div.top@top', {
+			title: localize('diff.hiddenLines.top', 'Click or drag to show more above'),
+			role: 'button',
+			tabindex: 0,
+			'aria-label': localize('diff.hiddenLines.top', 'Click or drag to show more above'),
+			onkeydown: (e: KeyboardEvent) => {
+				if (e.key === 'Enter' || e.key === ' ') {
+					e.preventDefault();
+					this._unchangedRegion.showMoreAbove(this._options.hideUnchangedRegionsRevealLineCount.get(), undefined);
+				}
+			}
+		}),
 		h('div.center@content', { style: { display: 'flex' } }, [
 			h('div@first', { style: { display: 'flex', justifyContent: 'center', alignItems: 'center', flexShrink: '0' } },
-				[$('a', { title: localize('showUnchangedRegion', 'Show Unchanged Region'), role: 'button', tabindex: 0, 'aria-label': localize('showUnchangedRegion', 'Show Unchanged Region'), onclick: () => { this._unchangedRegion.showAll(undefined); } },
+				[$('a', {
+					title: localize('showUnchangedRegion', 'Show Unchanged Region'),
+					role: 'button',
+					tabindex: 0,
+					'aria-label': localize('showUnchangedRegion', 'Show Unchanged Region'),
+					onclick: () => { this._unchangedRegion.showAll(undefined); },
+					onkeydown: (e: KeyboardEvent) => {
+						if (e.key === 'Enter' || e.key === ' ') {
+							e.preventDefault();
+							this._unchangedRegion.showAll(undefined);
+						}
+					}
+				},
 					...renderLabelWithIcons('$(unfold)'))]
 			),
 			h('div@others', { style: { display: 'flex', justifyContent: 'center', alignItems: 'center' } }),
 		]),
-		h('div.bottom@bottom', { title: localize('diff.bottom', 'Click or drag to show more below'), role: 'button', tabindex: 0, 'aria-label': localize('diff.bottom', 'Click or drag to show more below') }),
+		h('div.bottom@bottom', {
+			title: localize('diff.bottom', 'Click or drag to show more below'),
+			role: 'button',
+			tabindex: 0,
+			'aria-label': localize('diff.bottom', 'Click or drag to show more below'),
+			onkeydown: (e: KeyboardEvent) => {
+				if (e.key === 'Enter' || e.key === ' ') {
+					e.preventDefault();
+
+					const editor = this._editor;
+					const top = editor.getTopForLineNumber(this._unchangedRegionRange.endLineNumberExclusive);
+
+					this._unchangedRegion.showMoreBelow(this._options.hideUnchangedRegionsRevealLineCount.get(), undefined);
+					const top2 = editor.getTopForLineNumber(this._unchangedRegionRange.endLineNumberExclusive);
+					editor.setScrollTop(editor.getScrollTop() + (top2 - top));
+				}
+			}
+		}),
 	]);
 
 	constructor(
