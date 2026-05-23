@@ -379,7 +379,18 @@ class ActionsContentWidget extends FixedZoneWidget {
 			const title = renderLabelWithIcons(item.text);
 
 			if (item.action) {
-				children.push($('a', { title: item.tooltip, role: 'button', tabindex: 0, onclick: () => item.action!() }, ...title));
+				children.push($('a', {
+					title: item.tooltip,
+					role: 'button',
+					tabindex: 0,
+					onclick: () => item.action!(),
+					onkeydown: (e: KeyboardEvent) => {
+						if (e.key === 'Enter' || e.key === ' ') {
+							e.preventDefault();
+							item.action!();
+						}
+					}
+				}, ...title));
 			} else {
 				children.push($('span', { title: item.tooltip }, ...title));
 			}

@@ -1,0 +1,3 @@
+## 2024-05-23 - Fix Keyboard Accessibility on Custom Buttons
+**Learning:** When creating custom interactive elements with `role="button"` and `tabindex="0"` that rely on `click` event listeners (or `onclick`), always attach corresponding `keydown` event listeners for the 'Enter' and 'Space' keys. Additionally, call `e.preventDefault()` to prevent unwanted scrolling (especially for 'Space') and ensure full keyboard accessibility.
+**Action:** Always verify that custom buttons (`a` without `href`, `div`, `span`) have keydown handlers for Enter and Space when applying `role="button"` and `tabindex="0"`.
