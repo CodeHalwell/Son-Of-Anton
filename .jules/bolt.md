@@ -9,3 +9,8 @@
 ## 2024-05-25 - O(N*M) lookups in Git optimistic updates
 **Learning:** Found nested loops during Git operations (`add`, `revert`, `clean`) when comparing file resource URI paths in array filter closures using `includes()`. This O(N*M) issue is similar to the notebook cells problem, proving this is a recurring codebase-specific performance pattern in extensions when dealing with file resources.
 **Action:** When working on extension host array manipulations, especially with large amounts of workspace resource strings (URIs), instinctively apply the `Set.has()` optimization.
+## 2024-05-26 - O(N*M) nested loop optimization in User Data Sync configuration
+
+**Learning:** Found nested loops during `registerIgnoredSettingsSchema` initialization where `allSettings.properties` (containing thousands of items) is filtered using `includes()` against `defaultIgnoredSettings` and `disallowedIgnoredSettings`. This is the same codebase-specific performance pattern seen in Git resources and notebook cell selections, causing O(N*M) blocking computation.
+
+**Action:** Consistently use `Set` conversion for target arrays before filtering large sequences (reducing complexity to O(N+M)). Look out for `.filter(x => !array.includes(x))` patterns and proactively optimize them.
