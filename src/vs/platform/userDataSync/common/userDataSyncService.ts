@@ -478,14 +478,22 @@ export class UserDataSyncService extends Disposable implements IUserDataSyncServ
 	async cleanUpRemoteData(): Promise<void> {
 		const remoteProfiles = await this.userDataSyncResourceProviderService.getRemoteSyncedProfiles();
 		const remoteProfileCollections = remoteProfiles.map(profile => profile.collection);
+		const remoteProfileCollectionsSet = new Set(remoteProfileCollections);
 		const allCollections = await this.userDataSyncStoreService.getAllCollections();
-		const redundantCollections = allCollections.filter(c => !remoteProfileCollections.includes(c));
+
+		// ⚡ Bolt Optimization: Use Set.has instead of Array.includes to prevent O(N*M) lookup when checking remote profile collections against all collections.
+		const redundantCollections = allCollections.filter(c => !remoteProfileCollectionsSet.has(c));
+
 		if (redundantCollections.length) {
 			this.logService.info(`Deleting ${redundantCollections.length} redundant collections on server`);
 			await Promise.allSettled(redundantCollections.map(collectionId => this.userDataSyncStoreService.deleteCollection(collectionId)));
 			this.logService.info(`Deleted redundant collections on server`);
 		}
-		const updatedRemoteProfiles = remoteProfiles.filter(profile => allCollections.includes(profile.collection));
+
+		const allCollectionsSet = new Set(allCollections);
+		// ⚡ Bolt Optimization: Use Set.has instead of Array.includes for matching existing collections.
+		const updatedRemoteProfiles = remoteProfiles.filter(profile => allCollectionsSet.has(profile.collection));
+
 		if (updatedRemoteProfiles.length !== remoteProfiles.length) {
 			const profileManifestSynchronizer = this.instantiationService.createInstance(UserDataProfilesManifestSynchroniser, this.userDataProfilesService.defaultProfile, undefined);
 			try {
