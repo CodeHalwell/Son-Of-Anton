@@ -615,7 +615,7 @@ Three sprints to land the subscription-integration foundation, then the existing
 - [x] **Shared metrics library** + `/metrics` on every service (§11.1, F-9, F-24).
 - [x] **Cache-hit-rate instrumentation** (§11.2, F-10).
 - [ ] **Cross-service tracing** (§11.3, F-25).
-- [ ] **`buildCachedRequest()` helper** (§8.1, F-12).
+- [x] **`buildCachedRequest()` helper** (§8.1, F-12).
 - [ ] **Cancellation end-to-end** (§10.2).
 - [ ] **Hooks validator** (F-21) and **`anton-pentest` resolution** (F-20).
 

@@ -6,7 +6,8 @@
 	"types": "dist/index.d.ts",
 	"scripts": {
 		"build": "tsc -p tsconfig.json && node -e \"require('fs').mkdirSync('dist/agents/prompts',{recursive:true}); for (const f of require('fs').readdirSync('src/agents/prompts')) { require('fs').copyFileSync('src/agents/prompts/'+f,'dist/agents/prompts/'+f); }\"",
-		"watch": "tsc -p tsconfig.json --watch"
+		"watch": "tsc -p tsconfig.json --watch",
+		"test": "node --test dist/llm/buildCachedRequest.test.js"
 	},
 	"dependencies": {
 		"@aws-sdk/client-bedrock-runtime": "^3.700.0",
