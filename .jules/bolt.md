@@ -14,3 +14,7 @@
 **Learning:** Found nested loops during `registerIgnoredSettingsSchema` initialization where `allSettings.properties` (containing thousands of items) is filtered using `includes()` against `defaultIgnoredSettings` and `disallowedIgnoredSettings`. This is the same codebase-specific performance pattern seen in Git resources and notebook cell selections, causing O(N*M) blocking computation.
 
 **Action:** Consistently use `Set` conversion for target arrays before filtering large sequences (reducing complexity to O(N+M)). Look out for `.filter(x => !array.includes(x))` patterns and proactively optimize them.
+
+## 2024-05-24 - Optimize array filtering over large extension lists
+**Learning:** Found nested iteration bottleneck O(N*M) where `.includes()` is called inside `.filter()` repeatedly, especially in extension lists (e.g. `getAllRecommendationsModel` where N=extensions and M=local extensions).
+**Action:** Convert the filter condition lists into `Set` structures and utilize `.has()` before doing `.filter()`, mitigating complexity to O(N+M) and improving extension discovery/view rendering performance.

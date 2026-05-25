@@ -644,8 +644,8 @@ export class ExtensionsListView extends AbstractExtensionsListView<IExtension> {
 	private async filterDeprecatedExtensions(local: IExtension[], query: Query, options: IQueryOptions): Promise<IExtension[]> {
 		const value = query.value.replace(/@deprecated/g, '').replace(/@sort:(\w+)(-\w*)?/g, '').trim().toLowerCase();
 		const extensionsControlManifest = await this.extensionManagementService.getExtensionsControlManifest();
-		const deprecatedExtensionIds = Object.keys(extensionsControlManifest.deprecated);
-		local = local.filter(e => deprecatedExtensionIds.includes(e.identifier.id) && (!value || e.name.toLowerCase().indexOf(value) > -1 || e.displayName.toLowerCase().indexOf(value) > -1));
+		const deprecatedExtensionIds = new Set(Object.keys(extensionsControlManifest.deprecated));
+		local = local.filter(e => deprecatedExtensionIds.has(e.identifier.id) && (!value || e.name.toLowerCase().indexOf(value) > -1 || e.displayName.toLowerCase().indexOf(value) > -1));
 		return this.sortExtensions(local, options);
 	}
 
@@ -1017,10 +1017,10 @@ export class ExtensionsListView extends AbstractExtensionsListView<IExtension> {
 	}
 
 	private async getOtherRecommendations(): Promise<string[]> {
-		const local = (await this.extensionsWorkbenchService.queryLocal(this.options.server))
-			.map(e => e.identifier.id.toLowerCase());
-		const workspaceRecommendations = (await this.getWorkspaceRecommendations())
-			.map(extensionId => isString(extensionId) ? extensionId.toLowerCase() : extensionId);
+		const local = new Set((await this.extensionsWorkbenchService.queryLocal(this.options.server))
+			.map(e => e.identifier.id.toLowerCase()));
+		const workspaceRecommendations = new Set((await this.getWorkspaceRecommendations())
+			.map(extensionId => isString(extensionId) ? extensionId.toLowerCase() : extensionId));
 
 		return distinct(
 			(await Promise.all([
@@ -1028,14 +1028,14 @@ export class ExtensionsListView extends AbstractExtensionsListView<IExtension> {
 				this.extensionRecommendationsService.getImportantRecommendations(),
 				this.extensionRecommendationsService.getFileBasedRecommendations(),
 				this.extensionRecommendationsService.getOtherRecommendations()
-			])).flat().filter(extensionId => !local.includes(extensionId.toLowerCase()) && !workspaceRecommendations.includes(extensionId.toLowerCase())
+			])).flat().filter(extensionId => !local.has(extensionId.toLowerCase()) && !workspaceRecommendations.has(extensionId.toLowerCase())
 			), extensionId => extensionId.toLowerCase());
 	}
 
 	// Get All types of recommendations, trimmed to show a max of 8 at any given time
 	private async getAllRecommendationsModel(options: IQueryOptions, token: CancellationToken): Promise<IPagedModel<IExtension>> {
 		const localExtensions = await this.extensionsWorkbenchService.queryLocal(this.options.server);
-		const localExtensionIds = localExtensions.map(e => e.identifier.id.toLowerCase());
+		const localExtensionIds = new Set(localExtensions.map(e => e.identifier.id.toLowerCase()));
 
 		const allRecommendations = distinct(
 			(await Promise.all([
@@ -1046,7 +1046,7 @@ export class ExtensionsListView extends AbstractExtensionsListView<IExtension> {
 				this.extensionRecommendationsService.getOtherRecommendations()
 			])).flat().filter(extensionId => {
 				if (isString(extensionId)) {
-					return !localExtensionIds.includes(extensionId.toLowerCase());
+					return !localExtensionIds.has(extensionId.toLowerCase());
 				}
 				return !localExtensions.some(localExtension => localExtension.local && this.uriIdentityService.extUri.isEqual(localExtension.local.location, extensionId));
 			}));
