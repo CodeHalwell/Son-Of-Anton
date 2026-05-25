@@ -4,3 +4,6 @@
 ## 2024-05-21 - Added Keyboard Support to Interactive Elements
 **Learning:** Custom interactive elements (e.g. `<a>` or `<div>`) constructed with `role="button"` and `tabindex="0"` that listen to `onclick` events do not automatically handle keyboard interactions like standard `<button>` elements do. Screen reader users and keyboard navigators expect to trigger these using 'Enter' or 'Space'.
 **Action:** Always attach a corresponding `onkeydown` listener to handle 'Enter' and 'Space' keys, ensuring `e.preventDefault()` is called to prevent unwanted scrolling when these elements have `role="button"`.
+## 2024-05-25 - Added Keyboard Support to CodeLens Commands
+**Learning:** Even when interactive elements are dynamically generated as Content Widgets (e.g. CodeLens `<a>` tags with `role="button"`), they require explicit `onkeydown` event handlers to respond to 'Enter' and 'Space' keys. While the primary action may be handled by global mouse listeners (like `onMouseDown` in the controller), keyboard events don't bubble up in the same way for these custom buttons without explicit triggering.
+**Action:** Always include an `onkeydown` handler directly on dynamically generated `role="button"` elements that calls `.click()` on the target element (after `e.preventDefault()`) to ensure the global mouse handlers process the action properly for keyboard users.
