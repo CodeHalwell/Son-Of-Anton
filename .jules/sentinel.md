@@ -22,3 +22,8 @@
 **Vulnerability:** Constructing `osascript` commands using string interpolation of paths into an AppleScript `do shell script` string (e.g., ``osascript -e "do shell script \\"rm \'${path}\'\\" with administrator privileges"``) is vulnerable to command injection if the path is user-controlled or malformed, even if escaped with single quotes.
 **Learning:** Migrating to `execFile('osascript', ...)` alone is insufficient if the script payload remains a single interpolated string block.
 **Prevention:** Always refactor the `osascript` payload to use an `on run argv` block, pass the dynamic parameters as trailing array elements after `--`, and strictly evaluate them inside AppleScript using `quoted form of (item N of argv)`.
+
+## 2025-05-26 - Eliminate Command Injection Risk in ptyService
+**Vulnerability:** Found `child_process.exec` being used with string interpolation for `netstat` and `lsof` commands.
+**Learning:** Even when inputs are validated (e.g. `!/^\d+$/.test(port)`), using `exec` exposes the system to potential shell expansion and injection risks.
+**Prevention:** Replace `child_process.exec` with `child_process.execFile` whenever possible to avoid shell execution. For shell pipes (like `| findstr` or `| grep`), implement the filtering in JS or use specific command flags (like `lsof -iTCP:<port>`).
