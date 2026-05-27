@@ -348,8 +348,8 @@ export class FileBasedRecommendations extends ExtensionRecommendations {
 	}
 
 	private filterIgnoredOrNotAllowed(recommendationsToSuggest: string[]): string[] {
-		const ignoredRecommendations = [...this.extensionIgnoredRecommendationsService.ignoredRecommendations, ...this.extensionRecommendationNotificationService.ignoredRecommendations];
-		return recommendationsToSuggest.filter(id => !ignoredRecommendations.includes(id));
+		const ignoredRecommendations = new Set([...this.extensionIgnoredRecommendationsService.ignoredRecommendations, ...this.extensionRecommendationNotificationService.ignoredRecommendations]);
+		return recommendationsToSuggest.filter(id => !ignoredRecommendations.has(id));
 	}
 
 	private filterInstalled(recommendationsToSuggest: string[], installed: IExtension[]): string[] {

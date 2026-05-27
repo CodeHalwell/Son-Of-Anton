@@ -152,8 +152,8 @@ export class ExtensionRecommendationNotificationService extends Disposable imple
 	}
 
 	async promptImportantExtensionsInstallNotification(extensionRecommendations: IExtensionRecommendations): Promise<RecommendationsNotificationResult> {
-		const ignoredRecommendations = [...this.extensionIgnoredRecommendationsService.ignoredRecommendations, ...this.ignoredRecommendations];
-		const extensions = extensionRecommendations.extensions.filter(id => !ignoredRecommendations.includes(id));
+		const ignoredRecommendations = new Set([...this.extensionIgnoredRecommendationsService.ignoredRecommendations, ...this.ignoredRecommendations]);
+		const extensions = extensionRecommendations.extensions.filter(id => !ignoredRecommendations.has(id));
 		if (!extensions.length) {
 			return RecommendationsNotificationResult.Ignored;
 		}
