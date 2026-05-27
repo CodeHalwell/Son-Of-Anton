@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { execFile, exec } from 'child_process';
+import { execFile, ExecFileException } from 'child_process';
 import { AutoOpenBarrier, ProcessTimeRunOnceScheduler, Promises, Queue, timeout } from '../../../base/common/async.js';
 import { Emitter, Event } from '../../../base/common/event.js';
 import { Disposable, toDisposable } from '../../../base/common/lifecycle.js';
@@ -207,12 +207,25 @@ export class PtyService extends Disposable implements IPtyService {
 		}
 
 		const stdout = await new Promise<string>((resolve, reject) => {
-			exec(isWindows ? `netstat -ano | findstr "${port}"` : `lsof -nP -iTCP -sTCP:LISTEN | grep ${port}`, {}, (err, stdout) => {
-				if (err) {
-					return reject('Problem occurred when listing active processes');
-				}
-				resolve(stdout);
-			});
+			if (isWindows) {
+				execFile('netstat', ['-ano'], {}, (err: ExecFileException | null, stdout: string) => {
+					if (err) {
+						return reject('Problem occurred when listing active processes');
+					}
+					const matches = stdout.split(/\r?\n/).filter(line => line.includes(port));
+					if (matches.length === 0) {
+						return reject('Problem occurred when listing active processes');
+					}
+					resolve(matches.join('\n'));
+				});
+			} else {
+				execFile('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN'], {}, (err: ExecFileException | null, stdout: string) => {
+					if (err) {
+						return reject('Problem occurred when listing active processes');
+					}
+					resolve(stdout);
+				});
+			}
 		});
 		const processesForPort = stdout.split(/\r?\n/).filter(s => !!s.trim());
 		if (processesForPort.length >= 1) {
