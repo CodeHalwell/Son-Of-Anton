@@ -21,3 +21,6 @@
 ## 2025-02-12 - O(N*M) nested iterations in array filtering for extension recommendations
 **Learning:** Found nested loops during extension recommendation list building, where `includes()` is called inside `filter()` using `ignoredRecommendations`. This is similar to previous O(N*M) lookups.
 **Action:** Convert the `ignoredRecommendations` arrays to `Set` and use `.has()` instead of `.includes()`, reducing time complexity from O(N*M) to O(N+M). This pattern is especially important for extension lists which can grow large.
+## 2025-02-12 - O(N*M) nested iterations in array filtering for extension recommendations
+**Learning:** Found nested loops during extension recommendation list building, where `includes()` is called inside `filter()` using `ignoredRecommendations`. This is similar to previous O(N*M) lookups.
+**Action:** Convert the `ignoredRecommendations` arrays to `Set` and use `.has()` instead of `.includes()`, reducing time complexity from O(N*M) to O(N+M). This pattern is especially important for extension lists which can grow large.
