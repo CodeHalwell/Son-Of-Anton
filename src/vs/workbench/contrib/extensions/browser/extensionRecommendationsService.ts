@@ -50,6 +50,14 @@ export class ExtensionRecommendationsService extends Disposable implements IExte
 	private _onDidChangeRecommendations = this._register(new Emitter<void>());
 	readonly onDidChangeRecommendations = this._onDidChangeRecommendations.event;
 
+	private _ignoredRecommendationsSet: Set<string> | undefined;
+	private get ignoredRecommendationsSet(): Set<string> {
+		if (!this._ignoredRecommendationsSet) {
+			this._ignoredRecommendationsSet = new Set(this.extensionRecommendationsManagementService.ignoredRecommendations.map(id => id.toLowerCase()));
+		}
+		return this._ignoredRecommendationsSet;
+	}
+
 	constructor(
 		@IInstantiationService instantiationService: IInstantiationService,
 		@ILifecycleService private readonly lifecycleService: ILifecycleService,
@@ -107,7 +115,12 @@ export class ExtensionRecommendationsService extends Disposable implements IExte
 			this.remoteRecommendations.activate()
 		]);
 
-		this._register(Event.any(this.workspaceRecommendations.onDidChangeRecommendations, this.configBasedRecommendations.onDidChangeRecommendations, this.extensionRecommendationsManagementService.onDidChangeIgnoredRecommendations)(() => this._onDidChangeRecommendations.fire()));
+		this._register(Event.any(this.workspaceRecommendations.onDidChangeRecommendations, this.configBasedRecommendations.onDidChangeRecommendations, this.extensionRecommendationsManagementService.onDidChangeIgnoredRecommendations)(() => {
+			this._onDidChangeRecommendations.fire();
+		}));
+		this._register(this.extensionRecommendationsManagementService.onDidChangeIgnoredRecommendations(() => {
+			this._ignoredRecommendationsSet = undefined;
+		}));
 
 		this.promptWorkspaceRecommendations();
 	}
@@ -255,7 +268,7 @@ export class ExtensionRecommendationsService extends Disposable implements IExte
 	}
 
 	private isExtensionAllowedToBeRecommended(extensionId: string): boolean {
-		return !this.extensionRecommendationsManagementService.ignoredRecommendations.includes(extensionId.toLowerCase());
+		return !this.ignoredRecommendationsSet.has(extensionId.toLowerCase());
 	}
 
 	private async promptWorkspaceRecommendations(): Promise<void> {
