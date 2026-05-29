@@ -11,6 +11,7 @@ import { MetricsCollector, calculateCost } from './metrics.js';
 import { toAnthropicFormat, toOpenAIFormat, fromAnthropicResponse, fromOpenAIResponse } from './translators.js';
 import type { FailoverConfig } from './failover/types.js';
 import { counter, gauge, histogram, expressMetricsMiddleware, prometheusHandler } from '../_lib/metrics/dist/index.js';
+import { expressTracingMiddleware, extractOrCreateTraceContext, addTraceHeaders } from '../_lib/tracing/dist/index.js';
 import type { UsageObserver } from './providers/types.js';
 
 function loadConfig(): ModelRoutesConfig {
@@ -146,6 +147,7 @@ export function createServer() {
 	const app = express();
 
 	app.use(express.json({ limit: '10mb' }));
+	app.use(expressTracingMiddleware('model-router'));
 	app.use(expressMetricsMiddleware('model-router'));
 
 	// Health endpoint
@@ -161,6 +163,7 @@ export function createServer() {
 			taskId: req.headers['x-task-id'] as string | undefined,
 		};
 
+		const traceCtx = extractOrCreateTraceContext(req);
 		const isStreaming = req.body.stream === true;
 		const startTime = Date.now();
 		const messages = req.body.messages ?? [];
@@ -182,7 +185,7 @@ export function createServer() {
 					? toAnthropicFormat(messages, systemPrompt, maxTokens, model, isStreaming)
 					: toOpenAIFormat(messages, systemPrompt, maxTokens, model, isStreaming);
 
-				const headers = buildRequestHeaders(providerConfig);
+				const headers = addTraceHeaders(buildRequestHeaders(providerConfig), traceCtx);
 				const endpoint = buildEndpoint(providerConfig);
 
 				const fetchResponse = await fetch(endpoint, {

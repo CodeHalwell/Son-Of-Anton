@@ -1,0 +1,14 @@
+{
+	"name": "@son-of-anton/tracing",
+	"version": "1.0.0",
+	"description": "W3C trace-context propagation and optional OTLP span export for Son of Anton services",
+	"main": "dist/index.js",
+	"scripts": {
+		"build": "tsc",
+		"test": "node --test dist/test/*.js"
+	},
+	"devDependencies": {
+		"@types/node": "^25.9.1",
+		"typescript": "^6.0.3"
+	}
+}

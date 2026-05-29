@@ -7,6 +7,7 @@ import { FalkorDBClient } from './clients/falkordb';
 import { QdrantClient } from './clients/qdrant';
 import { createMcpServer } from './server';
 import { prometheusHandler } from '../_lib/metrics/dist/index.js';
+import { extractOrCreateTraceContext, formatTraceparent, logHttpRequest, exportHttpSpan } from '../_lib/tracing/dist/index.js';
 
 const PORT = parseInt(process.env.MCP_PORT ?? '3100', 10);
 
@@ -20,6 +21,16 @@ const activeTransports = new Map<string, SSEServerTransport>();
 
 const httpServer = http.createServer(async (req, res) => {
 	const url = new URL(req.url ?? '/', `http://localhost:${PORT}`);
+	const traceCtx = extractOrCreateTraceContext(req);
+	const startEpochNs = BigInt(Date.now()) * 1_000_000n;
+	const startHr = process.hrtime.bigint();
+	res.setHeader('traceparent', formatTraceparent(traceCtx));
+
+	res.on('finish', () => {
+		const durationNs = process.hrtime.bigint() - startHr;
+		logHttpRequest('mcp-gateway', traceCtx, req.method ?? 'GET', url.pathname, res.statusCode, Number(durationNs) / 1_000_000);
+		exportHttpSpan('mcp-gateway', traceCtx, req.method ?? 'GET', url.pathname, res.statusCode, startEpochNs, durationNs);
+	});
 
 	// Health endpoint
 	if (url.pathname === '/health') {

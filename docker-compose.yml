@@ -458,6 +458,28 @@ services:
       start_period: 15s
     restart: unless-stopped
 
+  # --- Optional tracing stack ---
+  # Start with: docker compose --profile tracing up -d
+  # Then set OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 in your .env.
+  # Jaeger UI: http://localhost:16686
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    container_name: soa-jaeger
+    profiles:
+      - tracing
+    ports:
+      - "${JAEGER_UI_PORT:-16686}:16686"
+      - "${JAEGER_OTLP_PORT:-4318}:4318"
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:16686/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
 networks:
   sandbox-net:
     driver: bridge
