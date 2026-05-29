@@ -114,7 +114,15 @@ export class ExtensionsResource implements IProfileResource {
 	}
 
 	toContent(extensions: IProfileExtension[], exclude?: string[]): string {
-		return JSON.stringify(exclude?.length ? extensions.filter(e => !exclude.includes(e.identifier.id.toLowerCase())) : extensions);
+		let excludeSet: Set<string> | undefined;
+		if (exclude?.length) {
+			// ⚡ BOLT OPTIMIZATION:
+			// Convert exclude array to a Set to optimize the O(N*M) nested array traversal during filtering.
+			// `exclude.includes` inside `extensions.filter` is O(N*M).
+			// By using a Set, the lookup `excludeSet.has(current)` becomes O(1), making the overall operation O(N+M).
+			excludeSet = new Set(exclude);
+		}
+		return JSON.stringify(excludeSet ? extensions.filter(e => !excludeSet!.has(e.identifier.id.toLowerCase())) : extensions);
 	}
 
 	async apply(content: string, profile: IUserDataProfile, progress?: (message: string) => void, token?: CancellationToken): Promise<void> {

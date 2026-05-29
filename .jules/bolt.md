@@ -21,6 +21,6 @@
 ## 2025-02-12 - O(N*M) nested iterations in array filtering for extension recommendations
 **Learning:** Found nested loops during extension recommendation list building, where `includes()` is called inside `filter()` using `ignoredRecommendations`. This is similar to previous O(N*M) lookups.
 **Action:** Convert the `ignoredRecommendations` arrays to `Set` and use `.has()` instead of `.includes()`, reducing time complexity from O(N*M) to O(N+M). This pattern is especially important for extension lists which can grow large.
-## 2025-02-12 - O(N*M) nested iterations in array filtering for extension recommendations
-**Learning:** Found nested loops during extension recommendation list building, where `includes()` is called inside `filter()` using `ignoredRecommendations`. This is similar to previous O(N*M) lookups.
-**Action:** Convert the `ignoredRecommendations` arrays to `Set` and use `.has()` instead of `.includes()`, reducing time complexity from O(N*M) to O(N+M). This pattern is especially important for extension lists which can grow large.
+## 2024-05-29 - O(N*M) bottlenecks during array filtering in extension lists
+**Learning:** When filtering extension arrays against an exclusion list (e.g. `exclude?.length ? extensions.filter(e => !exclude.includes(e.identifier.id.toLowerCase()))`), a nested `Array.prototype.includes()` inside `Array.prototype.filter()` introduces an O(N*M) time complexity bottleneck.
+**Action:** Convert the secondary/target array to a `Set` before filtering to reduce time complexity to O(N+M) using `Set.has()`. Apply this optimization especially in components that process extension or notebook recommendations/selections where arrays can become large.
