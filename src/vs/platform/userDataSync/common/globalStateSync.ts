@@ -304,7 +304,10 @@ export class GlobalStateSynchroniser extends AbstractSynchroniser implements IUs
 			}
 		}
 		const registered = [...user, ...machine];
-		const unregistered = lastSyncGlobalState?.storage ? Object.keys(lastSyncGlobalState.storage).filter(key => !key.startsWith(argvStoragePrefx) && !registered.includes(key) && storageData.get(key) !== undefined) : [];
+		// ⚡ BOLT OPTIMIZATION: Convert the registered keys array to a Set before filtering.
+		// This mitigates an O(N*M) nested loop when processing storage keys.
+		const registeredSet = new Set(registered);
+		const unregistered = lastSyncGlobalState?.storage ? Object.keys(lastSyncGlobalState.storage).filter(key => !key.startsWith(argvStoragePrefx) && !registeredSet.has(key) && storageData.get(key) !== undefined) : [];
 
 		if (!isWeb) {
 			// Following keys are synced only in web. Do not sync these keys in other platforms

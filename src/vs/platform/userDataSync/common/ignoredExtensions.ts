@@ -78,7 +78,10 @@ export class IgnoredExtensionsManagementService implements IIgnoredExtensionsMan
 				}
 			}
 		}
-		return distinct([...defaultIgnoredExtensions, ...added,].filter(setting => !removed.includes(setting)));
+		// ⚡ BOLT OPTIMIZATION: Convert the exclusion array to a Set before filtering.
+		// This mitigates an O(N*M) nested loop when processing extension keys.
+		const removedSet = new Set(removed);
+		return distinct([...defaultIgnoredExtensions, ...added,].filter(setting => !removedSet.has(setting)));
 	}
 
 	private getConfiguredIgnoredExtensions(): ReadonlyArray<string> {
