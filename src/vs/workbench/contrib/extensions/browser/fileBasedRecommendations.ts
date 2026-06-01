@@ -317,7 +317,9 @@ export class FileBasedRecommendations extends ExtensionRecommendations {
 
 		const promptedRecommendations = language !== PLAINTEXT_LANGUAGE_ID ? this.getPromptedRecommendations()[language] : undefined;
 		if (promptedRecommendations) {
-			recommendations = recommendations.filter(extensionId => !promptedRecommendations.includes(extensionId));
+			// Bolt ⚡ - Convert to Set for O(1) lookup in filter
+			const promptedSet = new Set(promptedRecommendations);
+			recommendations = recommendations.filter(extensionId => !promptedSet.has(extensionId));
 		}
 
 		if (recommendations.length === 0) {
