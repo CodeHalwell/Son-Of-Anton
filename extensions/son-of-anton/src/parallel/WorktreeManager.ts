@@ -15,7 +15,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { promisify } from 'util';
 
-const exec = promisify(cp.exec);
+const execFile = promisify(cp.execFile);
 
 export interface WorktreeInfo {
 	/** Unique agent ID that owns this worktree */
@@ -81,7 +81,7 @@ export class WorktreeManager {
 		const worktreePath = path.join(this.tempDir, `sota-agent-${agentId}`);
 
 		// Create the worktree with a new branch from HEAD
-		await this.git(`worktree add "${worktreePath}" -b "${branch}" HEAD`);
+		await this.git(['worktree', 'add', worktreePath, '-b', branch, 'HEAD']);
 
 		const info: WorktreeInfo = {
 			agentId,
@@ -118,7 +118,7 @@ export class WorktreeManager {
 			throw new Error(`No worktree for agent ${agentId}`);
 		}
 
-		const { stdout } = await exec('git diff --name-only HEAD', {
+		const { stdout } = await execFile('git', ['diff', '--name-only', 'HEAD'], {
 			cwd: info.worktreePath,
 		});
 
@@ -152,7 +152,7 @@ export class WorktreeManager {
 
 		try {
 			// Attempt a dry-run merge
-			await this.git(`merge-tree HEAD HEAD "${info.branch}"`);
+			await this.git(['merge-tree', 'HEAD', 'HEAD', info.branch]);
 			return { success: true, conflicts: [], summary: 'Clean merge predicted.' };
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
@@ -187,23 +187,25 @@ export class WorktreeManager {
 
 		try {
 			// Stage and commit changes in the worktree
-			await exec('git add -A', { cwd: info.worktreePath });
+			await execFile('git', ['add', '-A'], { cwd: info.worktreePath });
 
-			const { stdout: status } = await exec('git status --porcelain', {
+			const { stdout: status } = await execFile('git', ['status', '--porcelain'], {
 				cwd: info.worktreePath,
 			});
 
 			if (status.trim()) {
-				await exec(
-					`git commit -m "${commitMessage.replace(/"/g, '\\"')}"`,
-					{ cwd: info.worktreePath },
+				await execFile(
+					'git',
+					['commit', '-m', commitMessage],
+					{ cwd: info.worktreePath }
 				);
 			}
 
 			// Merge the agent branch into the current branch in the main repo
-			const { stdout } = await exec(
-				`git merge "${info.branch}" --no-edit`,
-				{ cwd: this.repoRoot },
+			const { stdout } = await execFile(
+				'git',
+				['merge', info.branch, '--no-edit'],
+				{ cwd: this.repoRoot }
 			);
 
 			return {
@@ -224,7 +226,7 @@ export class WorktreeManager {
 
 			// Abort the failed merge
 			try {
-				await exec('git merge --abort', { cwd: this.repoRoot });
+				await execFile('git', ['merge', '--abort'], { cwd: this.repoRoot });
 			} catch {
 				// May not need aborting if merge didn't start
 			}
@@ -247,13 +249,13 @@ export class WorktreeManager {
 		}
 
 		try {
-			await this.git(`worktree remove "${info.worktreePath}" --force`);
+			await this.git(['worktree', 'remove', info.worktreePath, '--force']);
 		} catch {
 			// Worktree may already be removed
 		}
 
 		try {
-			await this.git(`branch -D "${info.branch}"`);
+			await this.git(['branch', '-D', info.branch]);
 		} catch {
 			// Branch may already be deleted
 		}
@@ -272,8 +274,8 @@ export class WorktreeManager {
 	/**
 	 * Run a git command in the main repository.
 	 */
-	private async git(args: string): Promise<string> {
-		const { stdout } = await exec(`git ${args}`, { cwd: this.repoRoot });
+	private async git(args: string[]): Promise<string> {
+		const { stdout } = await execFile('git', args, { cwd: this.repoRoot });
 		return stdout.trim();
 	}
 }

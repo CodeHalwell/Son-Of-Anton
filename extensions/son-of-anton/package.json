@@ -619,13 +619,13 @@
 				},
 				"sota.spendLimit.session": {
 					"type": "number",
-					"default": 5.0,
+					"default": 5,
 					"minimum": 0,
 					"markdownDescription": "Per-session USD spend cap. When the session's cumulative cost exceeds this number, the next chat turn is blocked with a modal. Increase the cap or start a new conversation to reset. Advisory unless `sota.spendLimit.enabled` is `true`."
 				},
 				"sota.spendLimit.task": {
 					"type": "number",
-					"default": 1.0,
+					"default": 1,
 					"minimum": 0,
 					"markdownDescription": "Per-task USD spend cap. When a single user turn (one message → all subtasks → all tool calls) exceeds this cost, Anton aborts mid-turn. Use `/continue` to retry once the cap is raised. Advisory unless `sota.spendLimit.enabled` is `true`."
 				},
@@ -1075,7 +1075,7 @@
 		"@types/react": "^18.3.28",
 		"@types/react-dom": "^18.3.7",
 		"@types/vscode": "^1.96.0",
-		"esbuild": "^0.24.0",
+		"esbuild": "^0.24.2",
 		"react": "^18.3.1",
 		"react-dom": "^18.3.1"
 	}
