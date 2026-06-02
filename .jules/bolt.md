@@ -28,3 +28,7 @@
 ## 2024-05-30 - O(N*M) nested iteration bottlenecks
 **Learning:** Checking for elements from one large array within a `.filter()` loop of another array using `.includes()` creates an O(N*M) time complexity bottleneck.
 **Action:** Convert the target array being checked into a `Set` before the `.filter()` loop, and use `Set.has()` instead of `Array.prototype.includes()` inside the `.filter()` loop. This changes the lookup time to O(1) and reduces the overall complexity to O(N+M).
+
+## 2024-05-29 - O(N*M) lookups in User Data Sync components
+**Learning:** Discovered O(N*M) nested iterations in `src/vs/platform/userDataSync/common/ignoredExtensions.ts`, `src/vs/platform/userDataSync/common/settingsMerge.ts`, and `src/vs/platform/userDataSync/common/globalStateSync.ts`. When syncing, we filter settings/extensions keys using `.includes()` against arrays (`removed`, `registered`), which blocks the main thread for large user configurations.
+**Action:** Always wrap target arrays in a `Set` before passing them into `.filter(x => !array.includes(x))` structures, reducing time complexity to O(N+M) with `Set.has()`. This directly improves User Data Sync performance during startup or manual sync execution.

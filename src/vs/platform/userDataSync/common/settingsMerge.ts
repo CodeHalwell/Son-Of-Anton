@@ -37,7 +37,10 @@ export function getIgnoredSettings(defaultIgnoredSettings: string[], configurati
 			}
 		}
 	}
-	return distinct([...defaultIgnoredSettings, ...added,].filter(setting => !removed.includes(setting)));
+	// ⚡ BOLT OPTIMIZATION: Convert the exclusion array to a Set before filtering.
+	// This mitigates an O(N*M) nested loop when processing settings keys.
+	const removedSet = new Set(removed);
+	return distinct([...defaultIgnoredSettings, ...added,].filter(setting => !removedSet.has(setting)));
 }
 
 function getIgnoredSettingsFromConfig(configurationService: IConfigurationService): ReadonlyArray<string> {
