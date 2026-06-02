@@ -78,7 +78,9 @@ export class IgnoredExtensionsManagementService implements IIgnoredExtensionsMan
 				}
 			}
 		}
-		return distinct([...defaultIgnoredExtensions, ...added,].filter(setting => !removed.includes(setting)));
+		// Optimization: Use Set for O(1) lookup to prevent O(N*M) nested iterations
+		const removedSet = new Set(removed);
+		return distinct([...defaultIgnoredExtensions, ...added,].filter(setting => !removedSet.has(setting)));
 	}
 
 	private getConfiguredIgnoredExtensions(): ReadonlyArray<string> {
