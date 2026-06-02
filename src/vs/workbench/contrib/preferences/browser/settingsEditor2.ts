@@ -957,10 +957,16 @@ export class SettingsEditor2 extends EditorPane {
 		this.clearFilterLinkContainer = $('span.clear-search-filters');
 
 		this.clearFilterLinkContainer.textContent = ' - ';
-		const clearFilterLink = DOM.append(this.clearFilterLinkContainer, $('a.pointer.prominent', { tabindex: 0 }, localize('clearSearchFilters', 'Clear Filters')));
+		const clearFilterLink = DOM.append(this.clearFilterLinkContainer, $('a.pointer.prominent', { role: 'button', tabindex: 0 }, localize('clearSearchFilters', 'Clear Filters')));
 		this._register(DOM.addDisposableListener(clearFilterLink, DOM.EventType.CLICK, (e: MouseEvent) => {
 			DOM.EventHelper.stop(e, false);
 			this.clearSearchFilters();
+		}));
+		this._register(DOM.addStandardDisposableListener(clearFilterLink, DOM.EventType.KEY_DOWN, (e: StandardKeyboardEvent) => {
+			if (e.equals(KeyCode.Enter) || e.equals(KeyCode.Space)) {
+				DOM.EventHelper.stop(e, true);
+				this.clearSearchFilters();
+			}
 		}));
 
 		DOM.append(this.noResultsMessage, this.clearFilterLinkContainer);
