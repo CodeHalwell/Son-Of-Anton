@@ -382,11 +382,11 @@ export class TraceViewerPanel {
 				const width = Math.max(1, ((end - span.startTime) / totalDuration) * 100);
 				const duration = end - span.startTime;
 
-				return '<div class="span-row" data-span-id="' + span.id + '">' +
+					return '<div class="span-row" data-span-id="' + escapeHtml(span.id) + '">' +
 					'<div class="span-name">' + escapeHtml(span.name) + '</div>' +
-					'<div class="span-type">' + span.type + '</div>' +
+						'<div class="span-type">' + escapeHtml(span.type) + '</div>' +
 					'<div class="span-bar-container">' +
-					'<div class="span-bar ' + span.type + '" style="left:' + start + '%;width:' + width + '%"></div>' +
+						'<div class="span-bar ' + escapeHtml(span.type) + '" style="left:' + start + '%;width:' + width + '%"></div>' +
 					'</div>' +
 					'<div class="span-duration">' + formatDuration(duration) + '</div>' +
 					'</div>';

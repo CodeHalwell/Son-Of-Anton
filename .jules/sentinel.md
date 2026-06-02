@@ -31,3 +31,8 @@
 **Vulnerability:** Found `child_process.exec` being used to execute git commands in `extensions/son-of-anton/src/parallel/WorktreeManager.ts` where string inputs like `agentId`, `branch`, and `commitMessage` were interpolated into the command strings.
 **Learning:** Even if developers attempt to escape quotes (e.g., `commitMessage.replace(/"/g, '\\"')`), using shell interpolation for arguments like git branch names or commit messages is inherently unsafe, as an attacker could inject shell operators to achieve command execution.
 **Prevention:** Always refactor to use `child_process.execFile` instead of `exec`, passing variables as an array of discrete arguments, which completely bypasses the shell parser and eliminates command injection risks natively.
+
+## 2024-05-31 - TraceViewerPanel XSS Fix
+**Vulnerability:** Found unsanitized dynamic fields (`span.id` and `span.type`) directly embedded into the webview's HTML generation in `TraceViewerPanel.ts`.
+**Learning:** Even internal backend IDs and types can contain malicious payloads if compromised or manipulated before display, leading to XSS inside VS Code webviews.
+**Prevention:** Always use the internal `escapeHtml` string sanitizer function on all dynamic data injected into HTML strings, even for supposedly "safe" fields like identifiers or types.
