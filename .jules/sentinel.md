@@ -27,3 +27,7 @@
 **Vulnerability:** Found `child_process.exec` being used with string interpolation for `netstat` and `lsof` commands.
 **Learning:** Even when inputs are validated (e.g. `!/^\d+$/.test(port)`), using `exec` exposes the system to potential shell expansion and injection risks.
 **Prevention:** Replace `child_process.exec` with `child_process.execFile` whenever possible to avoid shell execution. For shell pipes (like `| findstr` or `| grep`), implement the filtering in JS or use specific command flags (like `lsof -iTCP:<port>`).
+## 2026-06-01 - Command Injection in WorktreeManager
+**Vulnerability:** Found `child_process.exec` being used to execute git commands in `extensions/son-of-anton/src/parallel/WorktreeManager.ts` where string inputs like `agentId`, `branch`, and `commitMessage` were interpolated into the command strings.
+**Learning:** Even if developers attempt to escape quotes (e.g., `commitMessage.replace(/"/g, '\\"')`), using shell interpolation for arguments like git branch names or commit messages is inherently unsafe, as an attacker could inject shell operators to achieve command execution.
+**Prevention:** Always refactor to use `child_process.execFile` instead of `exec`, passing variables as an array of discrete arguments, which completely bypasses the shell parser and eliminates command injection risks natively.
