@@ -24,3 +24,7 @@
 ## 2024-05-29 - O(N*M) bottlenecks during array filtering in extension lists
 **Learning:** When filtering extension arrays against an exclusion list (e.g. `exclude?.length ? extensions.filter(e => !exclude.includes(e.identifier.id.toLowerCase()))`), a nested `Array.prototype.includes()` inside `Array.prototype.filter()` introduces an O(N*M) time complexity bottleneck.
 **Action:** Convert the secondary/target array to a `Set` before filtering to reduce time complexity to O(N+M) using `Set.has()`. Apply this optimization especially in components that process extension or notebook recommendations/selections where arrays can become large.
+
+## 2024-05-30 - O(N*M) nested iteration bottlenecks
+**Learning:** Checking for elements from one large array within a `.filter()` loop of another array using `.includes()` creates an O(N*M) time complexity bottleneck.
+**Action:** Convert the target array being checked into a `Set` before the `.filter()` loop, and use `Set.has()` instead of `Array.prototype.includes()` inside the `.filter()` loop. This changes the lookup time to O(1) and reduces the overall complexity to O(N+M).
