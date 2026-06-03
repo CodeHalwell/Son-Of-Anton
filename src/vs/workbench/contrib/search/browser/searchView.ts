@@ -484,18 +484,13 @@ export class SearchView extends ViewPane {
 			dom.EventHelper.stop(e);
 			this.toggleQueryDetails(!this.accessibilityService.isScreenReaderOptimized());
 		}));
-		this._register(dom.addDisposableListener(this.toggleQueryDetailsButton, dom.EventType.KEY_UP, (e: KeyboardEvent) => {
+		this._register(dom.addDisposableListener(this.toggleQueryDetailsButton, dom.EventType.KEY_DOWN, (e: KeyboardEvent) => {
 			const event = new StandardKeyboardEvent(e);
 
 			if (event.equals(KeyCode.Enter) || event.equals(KeyCode.Space)) {
 				dom.EventHelper.stop(e);
 				this.toggleQueryDetails(false);
-			}
-		}));
-		this._register(dom.addDisposableListener(this.toggleQueryDetailsButton, dom.EventType.KEY_DOWN, (e: KeyboardEvent) => {
-			const event = new StandardKeyboardEvent(e);
-
-			if (event.equals(KeyMod.Shift | KeyCode.Tab)) {
+			} else if (event.equals(KeyMod.Shift | KeyCode.Tab)) {
 				if (this.searchWidget.isReplaceActive()) {
 					this.searchWidget.focusReplaceAllAction();
 				} else {
