@@ -13,3 +13,6 @@
 ## 2024-06-25 - Add keyboard and screen reader support to interactive element
 **Learning:** Found an interactive pseudo-button (`<a>` tag with class `pointer`) for clearing search filters in `SettingsEditor2` that lacked an ARIA role (`role: 'button'`), an explicit `aria-label`, and `keydown` event handling for keyboard interactions (`Enter`/`Space`). Without these, the element relies solely on mouse interactions, causing a barrier to users navigating with keyboards or screen readers.
 **Action:** When adding interactive non-button elements, ensure `role="button"` and `tabindex="0"` are set alongside `aria-label` for screen reader legibility, and always bind `keydown` listeners for `Enter` and `Space` keys mimicking a native click.
+## 2024-05-15 - Use keydown for spacebar accessibility in custom buttons
+**Learning:** When creating custom accessible buttons (`role="button"`, `tabindex="0"`), using the `keyup` event for `Space` key handlers fails to prevent the default spacebar page scrolling behavior. The default scrolling action happens on `keydown`.
+**Action:** Always use the `keydown` event (e.g. `dom.EventType.KEY_DOWN`) combined with `dom.EventHelper.stop(e)` (or `e.preventDefault()`) when handling `Enter` and `Space` for custom accessible interactive elements.
