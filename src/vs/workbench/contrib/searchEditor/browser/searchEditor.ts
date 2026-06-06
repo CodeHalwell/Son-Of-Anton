@@ -173,16 +173,12 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 			DOM.EventHelper.stop(e);
 			this.toggleIncludesExcludes();
 		}));
-		this._register(DOM.addDisposableListener(this.toggleQueryDetailsButton, DOM.EventType.KEY_UP, (e: KeyboardEvent) => {
+		this._register(DOM.addDisposableListener(this.toggleQueryDetailsButton, DOM.EventType.KEY_DOWN, (e: KeyboardEvent) => {
 			const event = new StandardKeyboardEvent(e);
 			if (event.equals(KeyCode.Enter) || event.equals(KeyCode.Space)) {
 				DOM.EventHelper.stop(e);
 				this.toggleIncludesExcludes();
-			}
-		}));
-		this._register(DOM.addDisposableListener(this.toggleQueryDetailsButton, DOM.EventType.KEY_DOWN, (e: KeyboardEvent) => {
-			const event = new StandardKeyboardEvent(e);
-			if (event.equals(KeyMod.Shift | KeyCode.Tab)) {
+			} else if (event.equals(KeyMod.Shift | KeyCode.Tab)) {
 				if (this.queryEditorWidget.isReplaceActive()) {
 					this.queryEditorWidget.focusReplaceAllAction();
 				}
