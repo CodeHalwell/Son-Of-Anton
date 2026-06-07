@@ -105,6 +105,29 @@ export function addTraceHeaders(
 	return { ...headers, traceparent: formatTraceparent(ctx) };
 }
 
+// --- URL sanitisation ---
+
+/**
+ * Strip the query string and fragment from a URL before it lands in logs or
+ * span attributes. Query parameters can carry credentials (`?token=…`,
+ * `?api_key=…`) or PII; redacting them upstream prevents an upstream service
+ * forwarding such a request from leaking secrets into Jaeger / structured
+ * log aggregators. The path portion is preserved verbatim so route grouping
+ * (e.g. `/api/users/123`) still works for trace search.
+ */
+export function stripQuery(url: string): string {
+	const queryIndex = url.indexOf('?');
+	const fragmentIndex = url.indexOf('#');
+	let end = url.length;
+	if (queryIndex !== -1 && queryIndex < end) {
+		end = queryIndex;
+	}
+	if (fragmentIndex !== -1 && fragmentIndex < end) {
+		end = fragmentIndex;
+	}
+	return url.slice(0, end);
+}
+
 // --- Structured logging ---
 
 export function logHttpRequest(
@@ -120,7 +143,7 @@ export function logHttpRequest(
 		traceId: ctx.traceId,
 		spanId: ctx.spanId,
 		method,
-		url,
+		url: stripQuery(url),
 		status,
 		latencyMs,
 	}));
@@ -220,15 +243,16 @@ export function exportHttpSpan(
 	startEpochNs: bigint,
 	durationNs: bigint,
 ): void {
+	const sanitisedUrl = stripQuery(url);
 	exportSpan({
 		traceId: ctx.traceId,
 		spanId: ctx.spanId,
-		name: `${method} ${url}`,
+		name: `${method} ${sanitisedUrl}`,
 		service: serviceName,
 		startEpochNs,
 		durationNs,
 		httpMethod: method,
-		httpUrl: url,
+		httpUrl: sanitisedUrl,
 		httpStatus: status,
 	}).catch(() => {});
 }

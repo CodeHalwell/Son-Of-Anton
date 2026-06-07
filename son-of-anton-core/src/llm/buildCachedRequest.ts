@@ -41,6 +41,15 @@ export interface CachedRequestSlots {
  * that omits `projectMemory` and `graphContext` gets a single-breakpoint
  * request rather than wasting quota slots on empty blocks.
  *
+ * **Anthropic-specific.** The `cache: 'ephemeral'` markers on each
+ * `SystemPromptPart` are translated to `cache_control: { type: 'ephemeral' }`
+ * by the Anthropic serializer path inside `LlmClient`. Other provider
+ * backends (OpenAI, Gemini, Bedrock, Copilot, etc.) silently ignore the
+ * field — the request still flows through correctly, but no caching is
+ * applied, so the prompt-cache hit-rate metric will read 0 for those
+ * providers. Routing the same model id between Claude and a non-Anthropic
+ * provider is therefore not transparent from a cost-tracking perspective.
+ *
  * @param model       The `ModelId` to target.
  * @param slots       Static and semi-static prompt content.
  * @param conversation The full message history (user + assistant turns).

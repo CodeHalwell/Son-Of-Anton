@@ -47,7 +47,7 @@ export class MetricsCollector {
 			totalOutputTokens: 0,
 			totalCacheReadTokens: 0,
 			totalCacheCreationTokens: 0,
-			cacheHitRate: NaN,
+			cacheHitRate: 0,
 			byProvider: {},
 			byModel: {},
 			byAgentRole: {},
@@ -96,10 +96,13 @@ export class MetricsCollector {
 			}
 		}
 
+		// Use 0 (not NaN) for the zero-token case so `JSON.stringify` produces
+		// `0` rather than `null` over the metrics API, matching the cost panel's
+		// `computeCacheHitRate` which also returns 0 for that case.
 		const totalTokensForRate = result.totalInputTokens + result.totalCacheReadTokens;
 		result.cacheHitRate = totalTokensForRate > 0
 			? result.totalCacheReadTokens / totalTokensForRate
-			: NaN;
+			: 0;
 
 		return result;
 	}

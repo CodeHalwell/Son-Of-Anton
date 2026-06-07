@@ -17,14 +17,41 @@ interface AnthropicUsageFields {
 	cache_read_input_tokens?: number;
 }
 
-function applyUsageFields(fields: AnthropicUsageFields, acc: { inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number }): void {
-	acc.inputTokens += fields.input_tokens ?? 0;
-	acc.outputTokens += fields.output_tokens ?? 0;
-	acc.cacheReadInputTokens += fields.cache_read_input_tokens ?? 0;
-	acc.cacheCreationInputTokens += fields.cache_creation_input_tokens ?? 0;
+type AnthropicUsageEventType = 'message_start' | 'message_delta';
+
+interface ExtractedUsage {
+	readonly eventType: AnthropicUsageEventType;
+	readonly fields: AnthropicUsageFields;
 }
 
-function extractUsageFromEvent(event: unknown): AnthropicUsageFields | undefined {
+// Anthropic streaming protocol carries usage in two distinct events:
+//
+//   - `message_start.usage` is the authoritative source for `input_tokens`,
+//     `cache_read_input_tokens`, and `cache_creation_input_tokens`. Its
+//     `output_tokens` is a small placeholder (typically 1), not the real count.
+//   - `message_delta.usage` carries the cumulative final `output_tokens`.
+//     Each successive delta replaces the previous reading rather than adding
+//     to it, so we set instead of accumulate for that field.
+//
+// Routing the two event types separately avoids over-counting `output_tokens`
+// by the placeholder value (the bug behind §11.2 / F-10 follow-up).
+function applyUsageFields(extracted: ExtractedUsage, acc: { inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number }): void {
+	const { eventType, fields } = extracted;
+	if (eventType === 'message_start') {
+		acc.inputTokens += fields.input_tokens ?? 0;
+		acc.cacheReadInputTokens += fields.cache_read_input_tokens ?? 0;
+		acc.cacheCreationInputTokens += fields.cache_creation_input_tokens ?? 0;
+		return;
+	}
+	if (fields.output_tokens !== undefined) {
+		acc.outputTokens = fields.output_tokens;
+	}
+	if (fields.input_tokens !== undefined) {
+		acc.inputTokens += fields.input_tokens;
+	}
+}
+
+function extractUsageFromEvent(event: unknown): ExtractedUsage | undefined {
 	if (typeof event !== 'object' || event === null) {
 		return undefined;
 	}
@@ -32,12 +59,12 @@ function extractUsageFromEvent(event: unknown): AnthropicUsageFields | undefined
 	if (e['type'] === 'message_start') {
 		const msg = e['message'] as Record<string, unknown> | undefined;
 		if (msg && typeof msg['usage'] === 'object' && msg['usage'] !== null) {
-			return msg['usage'] as AnthropicUsageFields;
+			return { eventType: 'message_start', fields: msg['usage'] as AnthropicUsageFields };
 		}
 	}
 	if (e['type'] === 'message_delta') {
 		if (typeof e['usage'] === 'object' && e['usage'] !== null) {
-			return e['usage'] as AnthropicUsageFields;
+			return { eventType: 'message_delta', fields: e['usage'] as AnthropicUsageFields };
 		}
 	}
 	return undefined;
@@ -69,9 +96,9 @@ export async function* passthroughCollectUsage(
 	for await (const chunk of chunks) {
 		const events = parser.feed(chunk.toString('utf-8'));
 		for (const event of events) {
-			const usageFields = extractUsageFromEvent(event);
-			if (usageFields) {
-				applyUsageFields(usageFields, acc);
+			const extracted = extractUsageFromEvent(event);
+			if (extracted) {
+				applyUsageFields(extracted, acc);
 			}
 		}
 		yield chunk;
