@@ -16,3 +16,6 @@
 ## 2024-07-28 - Prevent Space Scroll on Custom Buttons by Using KEY_DOWN
 **Learning:** When adding keyboard interactivity to custom elements acting as buttons (`role="button"`, `tabindex="0"`), handling the `Space` key on `keyup` allows the browser's default behavior for `keydown` (which is to scroll down the page) to occur. This results in jarring UX where the page shifts unexpectedly before the action is executed.
 **Action:** Always handle the `Space` key for custom buttons on `keydown` (not `keyup`) and call `e.preventDefault()` (or use the internal `DOM.EventHelper.stop(e)`) to prevent the default page scroll while still triggering the desired interaction.
+## 2024-07-28 - Prevent Space Scroll on Custom Buttons by Using KEY_DOWN
+**Learning:** When adding keyboard interactivity to custom elements acting as buttons (`role="button"`, `tabindex="0"`), handling the `Space` key on `keyup` allows the browser's default behavior for `keydown` (which is to scroll down the page) to occur. This results in jarring UX where the page shifts unexpectedly before the action is executed.
+**Action:** Always handle the `Space` key for custom buttons on `keydown` (not `keyup`) and call `e.preventDefault()` (or use the internal `DOM.EventHelper.stop(e)`) to prevent the default page scroll while still triggering the desired interaction.
