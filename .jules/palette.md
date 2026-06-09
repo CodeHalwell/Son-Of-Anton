@@ -19,3 +19,6 @@
 ## 2024-05-24 - Missing ARIA labels in custom DOM button elements
 **Learning:** When using DOM helper builders like `DOM.$('a', { role: 'button' })` to create custom interactive elements, `aria-label` attributes are often omitted, relying only on `title`. This makes screen reader experience inconsistent or poor for action buttons like CodeLens or Merge Editor conflict actions.
 **Action:** Always explicitly include an `aria-label` attribute (e.g. `aria-label: tooltip || title`) alongside `role="button"` when creating custom UI buttons using DOM builders to ensure proper accessibility.
+## 2024-06-09 - Prevent Page Scroll on Space Key
+**Learning:** When using Space to trigger a custom UI element, the default browser action is to scroll the page. This is annoying and unexpected. Preventing the default action on `keyup` is too late, as the scroll happens on `keydown`.
+**Action:** When handling Space key on custom interactive elements (acting as buttons) that use `KEY_UP` to listen for keyboard interactions, change them to use `KEY_DOWN` to prevent the default page scroll using `event.preventDefault()`.
