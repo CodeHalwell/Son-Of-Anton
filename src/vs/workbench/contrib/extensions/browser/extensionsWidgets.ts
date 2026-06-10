@@ -62,7 +62,7 @@ export abstract class ExtensionWidget extends Disposable implements IExtensionCo
 export function onClick(element: HTMLElement, callback: () => void): IDisposable {
 	const disposables: DisposableStore = new DisposableStore();
 	disposables.add(addDisposableListener(element, EventType.CLICK, finalHandler(callback)));
-	disposables.add(addDisposableListener(element, EventType.KEY_UP, e => {
+	disposables.add(addDisposableListener(element, EventType.KEY_DOWN, e => {
 		const keyboardEvent = new StandardKeyboardEvent(e);
 		if (keyboardEvent.equals(KeyCode.Space) || keyboardEvent.equals(KeyCode.Enter)) {
 			e.preventDefault();

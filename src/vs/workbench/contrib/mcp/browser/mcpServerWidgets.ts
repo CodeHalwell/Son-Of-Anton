@@ -43,7 +43,7 @@ export abstract class McpServerWidget extends Disposable implements IMcpServerCo
 export function onClick(element: HTMLElement, callback: () => void): IDisposable {
 	const disposables: DisposableStore = new DisposableStore();
 	disposables.add(dom.addDisposableListener(element, dom.EventType.CLICK, dom.finalHandler(callback)));
-	disposables.add(dom.addDisposableListener(element, dom.EventType.KEY_UP, e => {
+	disposables.add(dom.addDisposableListener(element, dom.EventType.KEY_DOWN, e => {
 		const keyboardEvent = new StandardKeyboardEvent(e);
 		if (keyboardEvent.equals(KeyCode.Space) || keyboardEvent.equals(KeyCode.Enter)) {
 			e.preventDefault();
