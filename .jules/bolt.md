@@ -32,3 +32,6 @@
 ## 2024-05-29 - O(N*M) lookups in User Data Sync components
 **Learning:** Discovered O(N*M) nested iterations in `src/vs/platform/userDataSync/common/ignoredExtensions.ts`, `src/vs/platform/userDataSync/common/settingsMerge.ts`, and `src/vs/platform/userDataSync/common/globalStateSync.ts`. When syncing, we filter settings/extensions keys using `.includes()` against arrays (`removed`, `registered`), which blocks the main thread for large user configurations.
 **Action:** Always wrap target arrays in a `Set` before passing them into `.filter(x => !array.includes(x))` structures, reducing time complexity to O(N+M) with `Set.has()`. This directly improves User Data Sync performance during startup or manual sync execution.
+## 2026-06-10 - Using Set to avoid O(N^2) in Array.filter
+**Learning:** In several places handling UI lists (like compositeBar and editorCommands), `Array.filter` checks another array with `includes`, causing O(N*M) iteration bottlenecks that block the main thread. Converting the target array to a `Set` before filtering brings the complexity down to O(N+M) without significantly changing code.
+**Action:** When optimizing hot-path lists, check if `.includes` inside `.filter` can be avoided by hoisting a `Set`.

@@ -116,7 +116,8 @@ export class ExtensionEnablementService extends Disposable implements IWorkbench
 				const extensionUnificationEnabled = this.configurationService.getValue<boolean>(EXTENSION_UNIFICATION_SETTING);
 				if (!extensionUnificationEnabled) {
 					this._extensionUnificationEnabled = false;
-					this._onEnablementChanged.fire(this.extensionsManager.extensions.filter(ext => unificationExtensions.includes(ext.identifier.id.toLowerCase())));
+					const unificationExtensionsSet = new Set(unificationExtensions);
+					this._onEnablementChanged.fire(this.extensionsManager.extensions.filter(ext => unificationExtensionsSet.has(ext.identifier.id.toLowerCase())));
 				}
 			}
 		}));

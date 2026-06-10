@@ -894,7 +894,8 @@ function registerCloseEditorCommands() {
 			const resolvedContext = resolveCommandsContext(args, accessor.get(IEditorService), accessor.get(IEditorGroupsService), accessor.get(IListService));
 
 			return Promise.all(resolvedContext.groupedEditors.map(async ({ group, editors }) => {
-				const editorsToClose = group.getEditors(EditorsOrder.SEQUENTIAL, { excludeSticky: true }).filter(editor => !editors.includes(editor));
+				const editorsToKeep = new Set(editors);
+				const editorsToClose = group.getEditors(EditorsOrder.SEQUENTIAL, { excludeSticky: true }).filter(editor => !editorsToKeep.has(editor));
 
 				for (const editorToKeep of editors) {
 					if (editorToKeep) {

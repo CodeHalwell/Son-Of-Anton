@@ -647,8 +647,10 @@ export class CompositeBar extends Widget implements ICompositeBar {
 			overflowingIds.push(this.model.activeItem.id);
 		}
 
-		overflowingIds = overflowingIds.filter(compositeId => !this.visibleComposites.includes(compositeId));
-		return this.model.visibleItems.filter(c => overflowingIds.includes(c.id)).map(item => { return { id: item.id, name: this.getAction(item.id)?.label || item.name }; });
+		const visibleCompositesSet = new Set(this.visibleComposites);
+		overflowingIds = overflowingIds.filter(compositeId => !visibleCompositesSet.has(compositeId));
+		const overflowingIdsSet = new Set(overflowingIds);
+		return this.model.visibleItems.filter(c => overflowingIdsSet.has(c.id)).map(item => { return { id: item.id, name: this.getAction(item.id)?.label || item.name }; });
 	}
 
 	private showContextMenu(targetWindow: Window, e: MouseEvent | GestureEvent): void {
