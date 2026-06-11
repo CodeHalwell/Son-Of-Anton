@@ -98,14 +98,14 @@ export class FolderSettingsActionViewItem extends BaseActionViewItem {
 		this.anchorElementHover = this._register(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), this.anchorElement, ''));
 		this._register(DOM.addDisposableListener(this.anchorElement, DOM.EventType.MOUSE_DOWN, e => DOM.EventHelper.stop(e)));
 		this._register(DOM.addDisposableListener(this.anchorElement, DOM.EventType.CLICK, e => this.onClick(e)));
-		this._register(DOM.addDisposableListener(this.container, DOM.EventType.KEY_UP, e => this.onKeyUp(e)));
+		this._register(DOM.addDisposableListener(this.container, DOM.EventType.KEY_DOWN, e => this.onKeyDown(e)));
 
 		DOM.append(this.container, this.anchorElement);
 
 		this.update();
 	}
 
-	private onKeyUp(event: KeyboardEvent): void {
+	private onKeyDown(event: KeyboardEvent): void {
 		const keyboardEvent = new StandardKeyboardEvent(event);
 		switch (keyboardEvent.keyCode) {
 			case KeyCode.Enter:
