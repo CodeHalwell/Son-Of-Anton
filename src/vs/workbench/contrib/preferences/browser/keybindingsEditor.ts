@@ -1032,7 +1032,7 @@ interface ISourceColumnTemplateData {
 function onClick(element: HTMLElement, callback: () => void): IDisposable {
 	const disposables = new DisposableStore();
 	disposables.add(DOM.addDisposableListener(element, DOM.EventType.CLICK, DOM.finalHandler(callback)));
-	disposables.add(DOM.addDisposableListener(element, DOM.EventType.KEY_UP, e => {
+	disposables.add(DOM.addDisposableListener(element, DOM.EventType.KEY_DOWN, e => {
 		const keyboardEvent = new StandardKeyboardEvent(e);
 		if (keyboardEvent.equals(KeyCode.Space) || keyboardEvent.equals(KeyCode.Enter)) {
 			e.preventDefault();
