@@ -381,6 +381,7 @@ class ActionsContentWidget extends FixedZoneWidget {
 			if (item.action) {
 				children.push($('a', {
 					title: item.tooltip,
+					'aria-label': item.tooltip,
 					role: 'button',
 					tabindex: 0,
 					onclick: () => item.action!(),
