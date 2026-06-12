@@ -69,7 +69,8 @@ export class AiRelatedInformationService implements IAiRelatedInformationService
 				try {
 					const result = await provider.provideAiRelatedInformation(query, t);
 					// double filter just in case
-					return result.filter(r => types.includes(r.type));
+					const typesSet = new Set(types);
+					return result.filter(r => typesSet.has(r.type));
 				} catch (e) {
 					// logged in extension host
 				}
