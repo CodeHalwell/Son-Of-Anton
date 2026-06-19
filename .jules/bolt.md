@@ -35,3 +35,6 @@
 ## 2026-06-10 - Using Set to avoid O(N^2) in Array.filter
 **Learning:** In several places handling UI lists (like compositeBar and editorCommands), `Array.filter` checks another array with `includes`, causing O(N*M) iteration bottlenecks that block the main thread. Converting the target array to a `Set` before filtering brings the complexity down to O(N+M) without significantly changing code.
 **Action:** When optimizing hot-path lists, check if `.includes` inside `.filter` can be avoided by hoisting a `Set`.
+## 2024-05-18 - Optimize nested loops for configuration keys
+**Learning:** `indexOf` inside `filter` on arrays containing a large number of strings (like VS Code configuration keys) results in O(N*M) nested loops, which can bottleneck performance during configuration changes.
+**Action:** Always convert the target array to a `Set` and use `Set.has()` instead of `Array.prototype.indexOf()` or `includes()` within array filtering operations to significantly reduce time complexity to O(N+M).
