@@ -35,3 +35,6 @@
 ## 2026-06-10 - Using Set to avoid O(N^2) in Array.filter
 **Learning:** In several places handling UI lists (like compositeBar and editorCommands), `Array.filter` checks another array with `includes`, causing O(N*M) iteration bottlenecks that block the main thread. Converting the target array to a `Set` before filtering brings the complexity down to O(N+M) without significantly changing code.
 **Action:** When optimizing hot-path lists, check if `.includes` inside `.filter` can be avoided by hoisting a `Set`.
+## 2024-05-18 - Avoid O(N*M) nested array iterations when diffing configuration keys
+**Learning:** Using `Array.prototype.filter()` combined with `Array.prototype.indexOf()` or `Array.prototype.includes()` against another array to calculate array differences or intersections scales poorly (O(N*M)) when dealing with many items, such as large lists of extension IDs or configuration keys.
+**Action:** Always convert the target array to a `Set` first, then use `Set.has()` within the `filter()` callback to achieve O(N+M) time complexity.
