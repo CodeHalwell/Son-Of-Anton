@@ -143,11 +143,15 @@ export class Configuration extends BaseConfiguration {
 	compare(other: Configuration): IConfigurationChange {
 		const compare = (fromKeys: string[], toKeys: string[], overrideIdentifier?: string): string[] => {
 			const keys: string[] = [];
-			keys.push(...toKeys.filter(key => fromKeys.indexOf(key) === -1));
-			keys.push(...fromKeys.filter(key => toKeys.indexOf(key) === -1));
+			// Using Sets for O(1) lookups to avoid O(N*M) iteration bottlenecks
+			const fromKeysSet = new Set(fromKeys);
+			const toKeysSet = new Set(toKeys);
+
+			keys.push(...toKeys.filter(key => !fromKeysSet.has(key)));
+			keys.push(...fromKeys.filter(key => !toKeysSet.has(key)));
 			keys.push(...fromKeys.filter(key => {
 				// Ignore if the key does not exist in both models
-				if (toKeys.indexOf(key) === -1) {
+				if (!toKeysSet.has(key)) {
 					return false;
 				}
 				// Compare workspace value
