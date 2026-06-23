@@ -245,7 +245,7 @@ export function createServer() {
 							// Client cancelled mid-stream. Emit final events if the
 							// socket is still open (e.g. server-initiated abort), then
 							// bail — never retry after a client cancellation.
-							if (!res.writableEnded) {
+							if (!reqAbort.signal.aborted && !res.writableEnded) {
 								try {
 									res.write(`data: ${JSON.stringify({ type: 'message_stop', stopReason: 'error' })}\n\n`);
 									res.write(`data: ${JSON.stringify({ type: 'error', code: 'cancelled', message: 'Request cancelled', retryable: false })}\n\n`);

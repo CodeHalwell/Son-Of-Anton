@@ -331,7 +331,11 @@ export class SessionsManagementService extends Disposable implements ISessionsMa
 		// VS Code chat request.
 		const cts = new CancellationTokenSource();
 		const onAbort = () => cts.cancel();
-		signal.addEventListener('abort', onAbort, { once: true });
+		if (signal.aborted) {
+			cts.cancel();
+		} else {
+			signal.addEventListener('abort', onAbort, { once: true });
+		}
 		try {
 			await this.sendRequestForNewSession(sessionResource, options, cts.token);
 		} finally {
