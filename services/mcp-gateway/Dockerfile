@@ -15,7 +15,7 @@ RUN npm install
 COPY src/ ./src/
 COPY _lib/metrics/dist/ ./_lib/metrics/dist/
 COPY _lib/tracing/dist/ ./_lib/tracing/dist/
-RUN node --max-old-space-size=512 node_modules/.bin/tsc
+RUN node --max-old-space-size=1024 node_modules/.bin/tsc
 
 EXPOSE 3100
 

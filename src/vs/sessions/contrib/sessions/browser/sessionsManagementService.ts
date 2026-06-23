@@ -330,9 +330,15 @@ export class SessionsManagementService extends Disposable implements ISessionsMa
 		// the AbortSignal so that cancelling from the UI stops the underlying
 		// VS Code chat request.
 		const cts = new CancellationTokenSource();
-		const onAbort = () => cts.cancel();
+		const onAbort = () => {
+			cts.cancel();
+			// Also cancel any in-flight provider request that was already dispatched
+			// via chatService.sendRequest (which has no cancellation token parameter).
+			this.chatService.cancelCurrentRequestForSession(sessionResource, 'user-abort');
+		};
 		if (signal.aborted) {
 			cts.cancel();
+			this.chatService.cancelCurrentRequestForSession(sessionResource, 'user-abort');
 		} else {
 			signal.addEventListener('abort', onAbort, { once: true });
 		}
