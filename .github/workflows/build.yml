@@ -339,6 +339,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Create .env from example
+        run: cp .env.example .env
+
       - name: Start services
         run: docker compose up -d --wait --wait-timeout 120
 
