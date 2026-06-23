@@ -22,3 +22,6 @@
 ## 2024-06-09 - Prevent Page Scroll on Space Key
 **Learning:** When using Space to trigger a custom UI element, the default browser action is to scroll the page. This is annoying and unexpected. Preventing the default action on `keyup` is too late, as the scroll happens on `keydown`.
 **Action:** When handling Space key on custom interactive elements (acting as buttons) that use `KEY_UP` to listen for keyboard interactions, change them to use `KEY_DOWN` to prevent the default page scroll using `event.preventDefault()`.
+## 2024-05-19 - Accessible interactive span elements
+**Learning:** Interactive `span` elements used as links or buttons without native keyboard focus need explicit attributes to be accessible. Simply adding an `onclick` handler is insufficient.
+**Action:** Always add `role="button"`, `tabindex="0"`, an appropriate `aria-label`, and `onkeydown` event handlers for the `Enter` and `Space` keys (with `e.preventDefault()`) to ensure the element can be navigated to and activated using only the keyboard.

@@ -228,12 +228,21 @@ export class DefineKeybindingWidget extends Widget {
 		if (numberOfExisting > 0) {
 			const existingElement = dom.$('span.existingText');
 			const text = numberOfExisting === 1 ? nls.localize('defineKeybinding.oneExists', "1 existing command has this keybinding", numberOfExisting) : nls.localize('defineKeybinding.existing', "{0} existing commands have this keybinding", numberOfExisting);
+			existingElement.setAttribute('role', 'button');
+			existingElement.setAttribute('tabindex', '0');
+			existingElement.setAttribute('aria-label', text);
 			dom.append(existingElement, document.createTextNode(text));
 			aria.alert(text);
 			this._showExistingKeybindingsNode.appendChild(existingElement);
 			existingElement.onmousedown = (e) => { e.preventDefault(); };
 			existingElement.onmouseup = (e) => { e.preventDefault(); };
 			existingElement.onclick = () => { this._onShowExistingKeybindings.fire(this.getUserSettingsLabel()); };
+			existingElement.onkeydown = (e) => {
+				if (e.key === 'Enter' || e.key === ' ') {
+					e.preventDefault();
+					this._onShowExistingKeybindings.fire(this.getUserSettingsLabel());
+				}
+			};
 		}
 	}
 
