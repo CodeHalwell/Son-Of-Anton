@@ -180,7 +180,8 @@ services:
     restart: unless-stopped
 
   owasp-zap:
-    image: zaproxy/zap-stable:2.14.0
+    image: ghcr.io/zaproxy/zaproxy:stable
+    profiles: [security]
     container_name: soa-owasp-zap
     command: zap.sh -daemon -host 0.0.0.0 -port 8090 -config api.disablekey=true
     networks:
@@ -201,6 +202,7 @@ services:
     build:
       context: ./services/penetration-tester
       dockerfile: Dockerfile
+    profiles: [security]
     container_name: soa-penetration-tester
     depends_on:
       owasp-zap:
