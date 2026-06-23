@@ -47,6 +47,9 @@ jobs:
       - name: Install son-of-anton-core dependencies
         run: npm --prefix son-of-anton-core ci
 
+      - name: Build son-of-anton-core
+        run: npm --prefix son-of-anton-core run build
+
       - name: Install extension dependencies
         run: npm --prefix extensions/son-of-anton install
         env:
@@ -141,6 +144,11 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential pkg-config libx11-dev libx11-xcb-dev libxkbfile-dev libnotify-bin libkrb5-dev
+
       - name: Install root dependencies
         run: npm ci
         env:
@@ -172,13 +180,16 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y xvfb libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2
+          sudo apt-get install -y xvfb libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64
 
       - name: Install root dependencies
         run: npm ci
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: 1
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install son-of-anton-core dependencies
+        run: npm --prefix son-of-anton-core ci
 
       - name: Build son-of-anton-core
         run: npm --prefix son-of-anton-core run build
