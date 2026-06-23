@@ -47,9 +47,9 @@ const PIED_PIPER_ART: string = [
  * `gettingStarted.css`.
  *
  * Two element kinds:
- *  - `'building'`  — a persona-coloured extruded block that "rises" into the
+ *  - `'building'`  - a persona-coloured extruded block that "rises" into the
  *                    scene during the build-up animation.
- *  - `'wordmark'`  — a single typographic block carrying the SON OF / ANTON
+ *  - `'wordmark'`  - a single typographic block carrying the SON OF / ANTON
  *                    headline rendered as 3D type via stacked text-shadows.
  */
 export interface ISotaWelcomeHeroSkylineBuilding {
@@ -71,7 +71,7 @@ export interface ISotaWelcomeHeroSkylineBuilding {
 	/** Block depth (side-face thickness), in CSS px. */
 	readonly d: number;
 	/**
-	 * Animation delay in milliseconds — buildings stagger so the skyline reads
+	 * Animation delay in milliseconds - buildings stagger so the skyline reads
 	 * back-to-front rather than landing all at once.
 	 */
 	readonly delayMs: number;
@@ -81,7 +81,7 @@ export interface ISotaWelcomeHeroSkylineWordmarkLine {
 	readonly kind: 'wordmark';
 	/** The text rendered on this line (e.g. "SON OF" or "ANTON"). */
 	readonly text: string;
-	/** Css class modifier — used for per-line stagger. */
+	/** Css class modifier - used for per-line stagger. */
 	readonly cls: string;
 	/** Animation delay in milliseconds. */
 	readonly delayMs: number;
@@ -116,17 +116,17 @@ const PERSONA_ACCENTS: ReadonlyArray<{ readonly id: string; readonly accent: str
  * blocks line the front, and the orchestrator (anton, purple) stands centre.
  *
  * Coordinates are relative to the wrapper's centre. `x` increases rightward,
- * `z` decreases into the page. `y` is always 0 here — the resting baseline —
+ * `z` decreases into the page. `y` is always 0 here - the resting baseline -
  * because the rise animation drives `translateY` from 200px to 0.
  */
 const SKYLINE_BUILDINGS: readonly ISotaWelcomeHeroSkylineBuilding[] = [
-	// Back row — taller, further away. Reads first as silhouette.
+	// Back row - taller, further away. Reads first as silhouette.
 	{ kind: 'building', id: 'anton-security', accent: PERSONA_ACCENTS[3].accent, x: -180, y: 0, z: -90, w: 52, h: 168, d: 52, delayMs: 0 },
 	{ kind: 'building', id: 'anton-ci', accent: PERSONA_ACCENTS[6].accent, x: -100, y: 0, z: -110, w: 46, h: 144, d: 46, delayMs: 80 },
 	{ kind: 'building', id: 'anton', accent: PERSONA_ACCENTS[0].accent, x: 0, y: 0, z: -130, w: 64, h: 196, d: 64, delayMs: 160 },
 	{ kind: 'building', id: 'anton-pr', accent: PERSONA_ACCENTS[7].accent, x: 100, y: 0, z: -110, w: 48, h: 152, d: 48, delayMs: 240 },
 	{ kind: 'building', id: 'anton-spec', accent: PERSONA_ACCENTS[9].accent, x: 180, y: 0, z: -90, w: 50, h: 132, d: 50, delayMs: 320 },
-	// Front row — shorter, closer. Frames the wordmark from below.
+	// Front row - shorter, closer. Frames the wordmark from below.
 	{ kind: 'building', id: 'anton-docs', accent: PERSONA_ACCENTS[4].accent, x: -220, y: 0, z: 30, w: 44, h: 96, d: 44, delayMs: 400 },
 	{ kind: 'building', id: 'anton-test', accent: PERSONA_ACCENTS[2].accent, x: -130, y: 0, z: 50, w: 42, h: 84, d: 42, delayMs: 480 },
 	{ kind: 'building', id: 'anton-code', accent: PERSONA_ACCENTS[1].accent, x: 130, y: 0, z: 50, w: 46, h: 104, d: 46, delayMs: 560 },
@@ -137,7 +137,7 @@ const SKYLINE_BUILDINGS: readonly ISotaWelcomeHeroSkylineBuilding[] = [
 /**
  * Two-line wordmark "SON OF / ANTON". Each line animates in slightly after
  * the back-row buildings have started rising, so the eye reads buildings
- * first → wordmark second. The CSS uses `text-shadow` chains to fake a 3D
+ * first -> wordmark second. The CSS uses `text-shadow` chains to fake a 3D
  * extrusion without per-letter HTML.
  */
 const SKYLINE_WORDMARK: readonly ISotaWelcomeHeroSkylineWordmarkLine[] = [
@@ -265,7 +265,7 @@ export function getSotaWelcomeHeroActions(): readonly ISotaWelcomeHeroAction[] {
 }
 
 /**
- * Inline isometric "Son of Anton" skyline — letters built as stacked-block
+ * Inline isometric "Son of Anton" skyline - letters built as stacked-block
  * extruded buildings (Silicon Valley title-card energy) with a blueprint
  * draw-in animation on the front face, ground-plane perspective grid,
  * Pied Piper / Hooli balloons floating up, and small cars driving along

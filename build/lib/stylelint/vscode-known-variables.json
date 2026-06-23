@@ -1029,6 +1029,7 @@
 		"--inline-edit-border-radius",
 		"--chat-subagent-last-item-height",
 		"--vscode-inline-chat-affordance-height",
+		"--multi-session-depth",
 		"--collapse-from-width",
 		"--slide-from-x",
 		"--slide-from-y"

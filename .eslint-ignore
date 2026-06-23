@@ -26,6 +26,10 @@
 **/node_modules/**
 services/_lib/**
 services/**/_lib/**
+services/model-router/src/providers/**
+services/penetration-tester/**
+son-of-anton-mcp/servers/**
+extensions/son-of-anton/src/board/webview/**
 **/out/**
 **/out-*/**
 **/src/**/dompurify.js

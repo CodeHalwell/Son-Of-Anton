@@ -31,6 +31,7 @@ suite('QuotaPanel', () => {
 		};
 	}
 
+	// allow-any-unicode-next-line
 	// ── Shell rendering ───────────────────────────────────────────────────────
 
 	test('renders the panel root element with title and subtitle', () => {
@@ -61,6 +62,7 @@ suite('QuotaPanel', () => {
 		}
 	});
 
+	// allow-any-unicode-next-line
 	// ── Summary chip ──────────────────────────────────────────────────────────
 
 	test('setData shows cost in the summary chip', () => {
@@ -70,6 +72,7 @@ suite('QuotaPanel', () => {
 		assert.ok(summary!.textContent!.includes('$0.00'), `summary should include cost, got: "${summary!.textContent}"`);
 	});
 
+	// allow-any-unicode-next-line
 	// ── Spend cap warning ─────────────────────────────────────────────────────
 
 	test('spend cap warning is hidden when current spend is below the limit', () => {
@@ -99,6 +102,7 @@ suite('QuotaPanel', () => {
 		assert.ok(warning!.classList.contains('hidden'), 'warning should be hidden after spend drops below cap');
 	});
 
+	// allow-any-unicode-next-line
 	// ── By-model section ──────────────────────────────────────────────────────
 
 	test('setData with model entries renders one tbody row per model', () => {
@@ -149,6 +153,7 @@ suite('QuotaPanel', () => {
 		assert.ok(modelsSection!.querySelector('.quota-panel-empty'), 'empty-state text should be rendered');
 	});
 
+	// allow-any-unicode-next-line
 	// ── By-tool section ───────────────────────────────────────────────────────
 
 	test('setData with tool entries renders one tbody row per tool', () => {
@@ -179,6 +184,7 @@ suite('QuotaPanel', () => {
 		});
 	});
 
+	// allow-any-unicode-next-line
 	// ── Provider quota section ────────────────────────────────────────────────
 
 	test('subscription quota row renders with progress bar', () => {
@@ -234,6 +240,7 @@ suite('QuotaPanel', () => {
 		assert.strictEqual(detail!.textContent, '12 / 60 RPM');
 	});
 
+	// allow-any-unicode-next-line
 	// ── Update / no-duplicate semantics ───────────────────────────────────────
 
 	test('calling setData twice replaces model rows without duplicates', () => {

@@ -34,6 +34,7 @@ RUN npm install
 RUN npx playwright install chromium
 
 COPY src/ ./src/
+ENV NODE_OPTIONS="--max-old-space-size=4096"
 RUN npx tsc --noCheck
 
 EXPOSE 3105

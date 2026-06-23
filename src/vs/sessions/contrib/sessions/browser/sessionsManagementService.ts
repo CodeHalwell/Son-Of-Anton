@@ -103,7 +103,7 @@ export interface ISessionsManagementService {
 	 * streaming for this session type; callers must fall back to
 	 * `sendRequestForNewSession` in that case.
 	 *
-	 * The `signal` is wired to the provider connection — aborting it cancels
+	 * The `signal` is wired to the provider connection - aborting it cancels
 	 * the in-flight request and closes the SSE stream.
 	 */
 	streamRequestForNewSession(

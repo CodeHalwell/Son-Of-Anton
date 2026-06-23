@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-// SON-OF-ANTON: Tier 2 modification — Inline diff widget for agent-proposed code changes
+// SON-OF-ANTON: Tier 2 modification - Inline diff widget for agent-proposed code changes
 
 import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../../base/common/event.js';

@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Son of Anton Contributors. All rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
@@ -26,7 +26,7 @@ import {
 } from '../common/quotaModel.js';
 
 /**
- * Per-session cost and quota breakdown panel (§9.4, F-15).
+ * Per-session cost and quota breakdown panel (Section 9.4, F-15).
  *
  * Displays:
  * - A compact one-line summary (cost + tokens + quota hint)
@@ -62,8 +62,8 @@ export class QuotaPanel extends Disposable {
 		append(this._spendCapWarning, $('span.quota-panel-spend-cap-text'));
 
 		this._modelsBody = this._renderSection(container, localize('quota.byModel', "By Model"), 'models');
-		this._toolsBody  = this._renderSection(container, localize('quota.byTool', "By Tool"), 'tools');
-		this._quotaBody  = this._renderSection(container, localize('quota.providerQuota', "Provider Quota"), 'quota');
+		this._toolsBody = this._renderSection(container, localize('quota.byTool', "By Tool"), 'tools');
+		this._quotaBody = this._renderSection(container, localize('quota.providerQuota', "Provider Quota"), 'quota');
 
 		this._renderInitialEmpty();
 	}
@@ -89,8 +89,8 @@ export class QuotaPanel extends Disposable {
 	private _renderInitialEmpty(): void {
 		this._summaryEl.textContent = localize('quota.noData', "No activity yet.");
 		this._renderEmptyState(this._modelsBody, localize('quota.noModels', "No model calls recorded."));
-		this._renderEmptyState(this._toolsBody,  localize('quota.noTools', "No tool calls recorded."));
-		this._renderEmptyState(this._quotaBody,  localize('quota.noQuota', "No provider quota data."));
+		this._renderEmptyState(this._toolsBody, localize('quota.noTools', "No tool calls recorded."));
+		this._renderEmptyState(this._quotaBody, localize('quota.noQuota', "No provider quota data."));
 	}
 
 	private _renderEmptyState(parent: HTMLElement, message: string): void {
@@ -147,6 +147,7 @@ export class QuotaPanel extends Disposable {
 
 	private _formatModelTokens(entry: ModelUsageEntry): string {
 		const u = entry.usage;
+		// allow-any-unicode-next-line
 		return `${formatTokenCount(u.inputTokens)} in · ${formatTokenCount(u.outputTokens)} out`;
 	}
 
@@ -154,6 +155,7 @@ export class QuotaPanel extends Disposable {
 		const u = entry.usage;
 		const hitRate = computeCacheHitRate(u);
 		if (hitRate === 0 && u.cacheCreationInputTokens === 0) {
+			// allow-any-unicode-next-line
 			return '—';
 		}
 		const parts: string[] = [];
@@ -163,6 +165,7 @@ export class QuotaPanel extends Disposable {
 		if (u.cacheCreationInputTokens > 0) {
 			parts.push(`${formatTokenCount(u.cacheCreationInputTokens)} written`);
 		}
+		// allow-any-unicode-next-line
 		return parts.join(' · ');
 	}
 

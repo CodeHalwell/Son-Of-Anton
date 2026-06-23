@@ -26,6 +26,7 @@ suite('quotaModel', () => {
 
 	ensureNoDisposablesAreLeakedInTestSuite();
 
+	// allow-any-unicode-next-line
 	// ── emptyUsage ────────────────────────────────────────────────────────────
 
 	test('emptyUsage returns zero for every field', () => {
@@ -37,6 +38,7 @@ suite('quotaModel', () => {
 		});
 	});
 
+	// allow-any-unicode-next-line
 	// ── addUsage ──────────────────────────────────────────────────────────────
 
 	test('addUsage accumulates all fields correctly', () => {
@@ -56,6 +58,7 @@ suite('quotaModel', () => {
 		assert.deepStrictEqual(addUsage(emptyUsage(), u), u);
 	});
 
+	// allow-any-unicode-next-line
 	// ── pricingFor ────────────────────────────────────────────────────────────
 
 	test('pricingFor returns known pricing for claude-opus-4-7', () => {
@@ -76,6 +79,7 @@ suite('quotaModel', () => {
 		});
 	});
 
+	// allow-any-unicode-next-line
 	// ── estimateCost ──────────────────────────────────────────────────────────
 
 	test('estimateCost with zero usage returns zero', () => {
@@ -103,6 +107,7 @@ suite('quotaModel', () => {
 		assert.deepStrictEqual({ usd: parseFloat(cost.usd.toFixed(4)) }, { usd: 0.33 });
 	});
 
+	// allow-any-unicode-next-line
 	// ── formatCostUsd ─────────────────────────────────────────────────────────
 
 	test('formatCostUsd formats common cases', () => {
@@ -119,6 +124,7 @@ suite('quotaModel', () => {
 		});
 	});
 
+	// allow-any-unicode-next-line
 	// ── formatTokenCount ──────────────────────────────────────────────────────
 
 	test('formatTokenCount handles small, K, and M ranges', () => {
@@ -133,6 +139,7 @@ suite('quotaModel', () => {
 		});
 	});
 
+	// allow-any-unicode-next-line
 	// ── formatWindowFraction ──────────────────────────────────────────────────
 
 	test('formatWindowFraction rounds to nearest percent', () => {
@@ -147,6 +154,7 @@ suite('quotaModel', () => {
 		});
 	});
 
+	// allow-any-unicode-next-line
 	// ── formatDurationSeconds ─────────────────────────────────────────────────
 
 	test('formatDurationSeconds handles seconds, minutes, and hours', () => {
@@ -161,6 +169,7 @@ suite('quotaModel', () => {
 		});
 	});
 
+	// allow-any-unicode-next-line
 	// ── isSpendCapExceeded ────────────────────────────────────────────────────
 
 	test('isSpendCapExceeded returns false when no limit is set', () => {
@@ -179,6 +188,7 @@ suite('quotaModel', () => {
 		assert.strictEqual(isSpendCapExceeded({ limitUsd: 5, currentTotalUsd: 5.01 }), true);
 	});
 
+	// allow-any-unicode-next-line
 	// ── computeCacheHitRate ───────────────────────────────────────────────────
 
 	test('computeCacheHitRate returns 0 for empty usage', () => {
@@ -208,6 +218,7 @@ suite('quotaModel', () => {
 		);
 	});
 
+	// allow-any-unicode-next-line
 	// ── formatCacheHitRate ────────────────────────────────────────────────────
 
 	test('formatCacheHitRate rounds to nearest percent', () => {
@@ -224,6 +235,7 @@ suite('quotaModel', () => {
 		});
 	});
 
+	// allow-any-unicode-next-line
 	// ── buildCompactSummary ───────────────────────────────────────────────────
 
 	function makeData(overrides: Partial<QuotaCostData> = {}): QuotaCostData {
