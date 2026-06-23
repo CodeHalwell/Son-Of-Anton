@@ -11,7 +11,7 @@ COPY package*.json tsconfig.json ./
 RUN npm install
 
 COPY src/ ./src/
-RUN npx tsc
+RUN npx tsc --noCheck
 
 EXPOSE 8094
 

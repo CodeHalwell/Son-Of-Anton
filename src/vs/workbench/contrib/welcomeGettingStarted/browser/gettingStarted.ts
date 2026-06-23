@@ -949,6 +949,7 @@ export class GettingStartedPage extends EditorPane {
 		const title = $('h1.sota-welcome-title', {}, content.title);
 		const tagline = $('p.sota-welcome-tagline', {}, content.tagline);
 
+		// allow-any-unicode-next-line
 		const quoteText = $('span.sota-welcome-quote-text', {}, `“${content.quote.text}”`);
 		const quoteCite = $('cite.sota-welcome-quote-cite', {}, `— ${content.quote.attribution}`);
 		const quote = $('blockquote.sota-welcome-quote', {}, quoteText, quoteCite);

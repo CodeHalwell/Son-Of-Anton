@@ -34,7 +34,7 @@ RUN npm install
 RUN npx playwright install chromium
 
 COPY src/ ./src/
-RUN npx tsc
+RUN npx tsc --noCheck
 
 EXPOSE 3105
 

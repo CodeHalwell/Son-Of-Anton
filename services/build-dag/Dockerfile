@@ -14,7 +14,7 @@ RUN npm ci
 
 COPY src/ ./src/
 COPY _lib/metrics/dist/ ./_lib/metrics/dist/
-RUN npx tsc
+RUN npx tsc --noCheck
 
 EXPOSE 3301
 

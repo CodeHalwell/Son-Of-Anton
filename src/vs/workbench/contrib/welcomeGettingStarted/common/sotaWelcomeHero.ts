@@ -122,16 +122,16 @@ const PERSONA_ACCENTS: ReadonlyArray<{ readonly id: string; readonly accent: str
 const SKYLINE_BUILDINGS: readonly ISotaWelcomeHeroSkylineBuilding[] = [
 	// Back row — taller, further away. Reads first as silhouette.
 	{ kind: 'building', id: 'anton-security', accent: PERSONA_ACCENTS[3].accent, x: -180, y: 0, z: -90, w: 52, h: 168, d: 52, delayMs: 0 },
-	{ kind: 'building', id: 'anton-ci',       accent: PERSONA_ACCENTS[6].accent, x: -100, y: 0, z: -110, w: 46, h: 144, d: 46, delayMs: 80 },
-	{ kind: 'building', id: 'anton',          accent: PERSONA_ACCENTS[0].accent, x:    0, y: 0, z: -130, w: 64, h: 196, d: 64, delayMs: 160 },
-	{ kind: 'building', id: 'anton-pr',       accent: PERSONA_ACCENTS[7].accent, x:  100, y: 0, z: -110, w: 48, h: 152, d: 48, delayMs: 240 },
-	{ kind: 'building', id: 'anton-spec',     accent: PERSONA_ACCENTS[9].accent, x:  180, y: 0, z: -90,  w: 50, h: 132, d: 50, delayMs: 320 },
+	{ kind: 'building', id: 'anton-ci', accent: PERSONA_ACCENTS[6].accent, x: -100, y: 0, z: -110, w: 46, h: 144, d: 46, delayMs: 80 },
+	{ kind: 'building', id: 'anton', accent: PERSONA_ACCENTS[0].accent, x: 0, y: 0, z: -130, w: 64, h: 196, d: 64, delayMs: 160 },
+	{ kind: 'building', id: 'anton-pr', accent: PERSONA_ACCENTS[7].accent, x: 100, y: 0, z: -110, w: 48, h: 152, d: 48, delayMs: 240 },
+	{ kind: 'building', id: 'anton-spec', accent: PERSONA_ACCENTS[9].accent, x: 180, y: 0, z: -90, w: 50, h: 132, d: 50, delayMs: 320 },
 	// Front row — shorter, closer. Frames the wordmark from below.
-	{ kind: 'building', id: 'anton-docs',      accent: PERSONA_ACCENTS[4].accent, x: -220, y: 0, z: 30, w: 44, h: 96,  d: 44, delayMs: 400 },
-	{ kind: 'building', id: 'anton-test',      accent: PERSONA_ACCENTS[2].accent, x: -130, y: 0, z: 50, w: 42, h: 84,  d: 42, delayMs: 480 },
-	{ kind: 'building', id: 'anton-code',      accent: PERSONA_ACCENTS[1].accent, x:  130, y: 0, z: 50, w: 46, h: 104, d: 46, delayMs: 560 },
-	{ kind: 'building', id: 'anton-e2e',       accent: PERSONA_ACCENTS[5].accent, x:  210, y: 0, z: 30, w: 44, h: 92,  d: 44, delayMs: 640 },
-	{ kind: 'building', id: 'anton-moderniser', accent: PERSONA_ACCENTS[8].accent, x:   40, y: 0, z: 70, w: 40, h: 76,  d: 40, delayMs: 720 },
+	{ kind: 'building', id: 'anton-docs', accent: PERSONA_ACCENTS[4].accent, x: -220, y: 0, z: 30, w: 44, h: 96, d: 44, delayMs: 400 },
+	{ kind: 'building', id: 'anton-test', accent: PERSONA_ACCENTS[2].accent, x: -130, y: 0, z: 50, w: 42, h: 84, d: 42, delayMs: 480 },
+	{ kind: 'building', id: 'anton-code', accent: PERSONA_ACCENTS[1].accent, x: 130, y: 0, z: 50, w: 46, h: 104, d: 46, delayMs: 560 },
+	{ kind: 'building', id: 'anton-e2e', accent: PERSONA_ACCENTS[5].accent, x: 210, y: 0, z: 30, w: 44, h: 92, d: 44, delayMs: 640 },
+	{ kind: 'building', id: 'anton-moderniser', accent: PERSONA_ACCENTS[8].accent, x: 40, y: 0, z: 70, w: 40, h: 76, d: 40, delayMs: 720 },
 ];
 
 /**
@@ -142,7 +142,7 @@ const SKYLINE_BUILDINGS: readonly ISotaWelcomeHeroSkylineBuilding[] = [
  */
 const SKYLINE_WORDMARK: readonly ISotaWelcomeHeroSkylineWordmarkLine[] = [
 	{ kind: 'wordmark', text: 'SON OF', cls: 'sota-welcome-skyline-wordmark-line-1', delayMs: 600 },
-	{ kind: 'wordmark', text: 'ANTON',  cls: 'sota-welcome-skyline-wordmark-line-2', delayMs: 800 },
+	{ kind: 'wordmark', text: 'ANTON', cls: 'sota-welcome-skyline-wordmark-line-2', delayMs: 800 },
 ];
 
 /** Returns the building blocks (one per persona) that compose the skyline. */

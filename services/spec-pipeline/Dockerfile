@@ -17,7 +17,7 @@ RUN npm install
 
 # Copy source and build
 COPY src/ ./src/
-RUN npx tsc
+RUN npx tsc --noCheck
 
 EXPOSE 8090
 

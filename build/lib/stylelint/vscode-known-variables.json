@@ -608,6 +608,7 @@
 		"--vscode-profileBadge-foreground",
 		"--vscode-profiles-sashBorder",
 		"--vscode-progressBar-background",
+		"--vscode-progressBar-foreground",
 		"--vscode-quickInput-background",
 		"--vscode-quickInput-foreground",
 		"--vscode-quickInput-list-focusBackground",

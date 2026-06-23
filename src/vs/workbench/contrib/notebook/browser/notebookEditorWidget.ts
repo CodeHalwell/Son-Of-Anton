@@ -2395,6 +2395,7 @@ export class NotebookEditorWidget extends Disposable implements INotebookEditorD
 
 		const cellsInSelectionRange = this.getCellsInViewRange(selectedIndex, previousIndex);
 
+		// allow-any-unicode-next-line
 		// ⚡ BOLT OPTIMIZATION:
 		// Convert cellsInSelectionRange to a Set to optimize the O(N*M) nested array traversal during filtering.
 		// `cellsInSelectionRange.includes` inside `currentSelections.filter` is O(N*M).
