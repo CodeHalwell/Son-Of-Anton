@@ -125,6 +125,7 @@ export function registerConfiguration(): IDisposable {
 		const disallowedIgnoredSettings = getDisallowedIgnoredSettings();
 		const defaultIgnoredSettings = getDefaultIgnoredSettings();
 
+		// allow-any-unicode-next-line
 		// ⚡ BOLT OPTIMIZATION:
 		// Convert arrays to Sets to optimize O(N*M) nested array traversal during filtering.
 		// `allSettings.properties` can contain thousands of properties.

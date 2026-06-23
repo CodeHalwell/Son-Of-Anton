@@ -1063,7 +1063,7 @@
 	"scripts": {
 		"build": "npx tsx esbuild.mts",
 		"watch": "npx tsx esbuild.mts --watch",
-		"test": "node ./out/test/runTests.js"
+		"test": "mocha"
 	},
 	"dependencies": {
 		"@aws-sdk/client-bedrock-runtime": "^3.700.0",
@@ -1072,11 +1072,14 @@
 	"devDependencies": {
 		"@copilotkit/react-core": "1.57.1",
 		"@copilotkit/react-ui": "1.57.1",
+		"@types/mocha": "^10.0.10",
 		"@types/react": "^18.3.28",
 		"@types/react-dom": "^18.3.7",
 		"@types/vscode": "^1.96.0",
 		"esbuild": "^0.24.2",
+		"mocha": "^10.7.3",
 		"react": "^18.3.1",
-		"react-dom": "^18.3.1"
+		"react-dom": "^18.3.1",
+		"tsx": "^4.19.2"
 	}
 }

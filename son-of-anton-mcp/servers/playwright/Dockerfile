@@ -34,8 +34,7 @@ RUN npm install
 RUN npx playwright install chromium
 
 COPY src/ ./src/
-ENV NODE_OPTIONS="--max-old-space-size=4096"
-RUN npx tsc --noCheck
+RUN node -e "const ts=require('./node_modules/typescript');const fs=require('fs');const tc=JSON.parse(fs.readFileSync('tsconfig.json','utf-8'));const co=ts.convertCompilerOptionsFromJson(tc.compilerOptions||{},'').options;fs.mkdirSync('dist',{recursive:true});const src=fs.readFileSync('src/index.ts','utf-8');const r=ts.transpileModule(src,{compilerOptions:co,fileName:'src/index.ts'});fs.writeFileSync('dist/index.js',r.outputText);console.log('done');"
 
 EXPOSE 3105
 

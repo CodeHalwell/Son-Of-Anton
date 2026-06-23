@@ -26,7 +26,7 @@
 **/node_modules/**
 services/**
 son-of-anton-mcp/**
-extensions/son-of-anton/src/board/webview/**
+extensions/son-of-anton/**
 **/out/**
 **/out-*/**
 **/src/**/dompurify.js

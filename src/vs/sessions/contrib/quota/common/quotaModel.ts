@@ -108,19 +108,19 @@ export function pricingFor(modelId: string): ModelPricing {
 
 export function estimateCost(usage: TokenUsage, pricing: ModelPricing): EstimatedCost {
 	const usd =
-		(usage.inputTokens              * pricing.inputPerMillion      / 1_000_000) +
-		(usage.outputTokens             * pricing.outputPerMillion     / 1_000_000) +
-		(usage.cacheReadInputTokens     * pricing.cacheReadPerMillion  / 1_000_000) +
+		(usage.inputTokens * pricing.inputPerMillion / 1_000_000) +
+		(usage.outputTokens * pricing.outputPerMillion / 1_000_000) +
+		(usage.cacheReadInputTokens * pricing.cacheReadPerMillion / 1_000_000) +
 		(usage.cacheCreationInputTokens * pricing.cacheWritePerMillion / 1_000_000);
 	return { usd };
 }
 
 export function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
 	return {
-		inputTokens:              a.inputTokens              + b.inputTokens,
-		outputTokens:             a.outputTokens             + b.outputTokens,
+		inputTokens: a.inputTokens + b.inputTokens,
+		outputTokens: a.outputTokens + b.outputTokens,
 		cacheCreationInputTokens: a.cacheCreationInputTokens + b.cacheCreationInputTokens,
-		cacheReadInputTokens:     a.cacheReadInputTokens     + b.cacheReadInputTokens,
+		cacheReadInputTokens: a.cacheReadInputTokens + b.cacheReadInputTokens,
 	};
 }
 
