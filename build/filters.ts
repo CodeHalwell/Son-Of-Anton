@@ -12,7 +12,7 @@ import { join } from 'path';
  * named according to the checks performed on them. Each subset contains
  * the following one, as described in mathematical notation:
  *
- * all ⊃ eol ⊇ indentation ⊃ copyright ⊃ typescript
+ * all > eol >= indentation > copyright > typescript
  */
 
 export const all = Object.freeze<string[]>([
@@ -62,7 +62,7 @@ export const unicodeFilter = Object.freeze<string[]>([
 	'!extensions/**/snippets/**',
 	'!extensions/**/colorize-fixtures/**',
 	'!extensions/terminal-suggest/src/shell/fishBuiltinsCache.ts',
-	// Son of Anton webview bundle — vanilla JS / CSS asset that uses brand
+	// Son of Anton webview bundle - vanilla JS / CSS asset that uses brand
 	// glyphs and pre-strict-mode formatting. Parallels the existing
 	// exclusions for markdown-language-features/media and
 	// simple-browser/media above.

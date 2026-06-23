@@ -86,7 +86,7 @@ interface RemoteQuotaData {
  * live cost/quota data via the `sotaQuota.getSessionSummary` command.
  *
  * Gracefully degrades to an empty state when the extension is not yet active or
- * the command is not registered — the panel renders "No activity yet." and the
+ * the command is not registered - the panel renders "No activity yet." and the
  * pane remains visible but silent.
  */
 export class QuotaViewPane extends ViewPane {

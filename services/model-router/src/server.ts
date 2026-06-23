@@ -176,7 +176,7 @@ export function createServer() {
 		const reqAbort = new AbortController();
 		// Only abort when the response is still in-flight — if the response
 		// already ended normally, ignore the close event.
-		req.on('close', () => { if (!res.writableEnded) { reqAbort.abort(); } });
+		res.on('close', () => { if (!res.writableEnded) { reqAbort.abort(); } });
 
 		const providers = resolveProvidersForRole(context.agentRole, context, router, failoverConfig);
 
