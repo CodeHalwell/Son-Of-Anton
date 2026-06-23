@@ -48,7 +48,7 @@ jobs:
         run: npm --prefix son-of-anton-core ci
 
       - name: Install extension dependencies
-        run: npm --prefix extensions/son-of-anton ci
+        run: npm --prefix extensions/son-of-anton install
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: 1
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
@@ -114,7 +114,7 @@ jobs:
         run: npm --prefix son-of-anton-cli run build
 
       - name: Install extension dependencies
-        run: npm --prefix extensions/son-of-anton ci
+        run: npm --prefix extensions/son-of-anton install
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: 1
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
