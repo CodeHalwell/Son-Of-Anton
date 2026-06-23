@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY package*.json tsconfig.json ./
-RUN npm ci
+RUN npm install
 
 # Install Playwright Chromium browser
 RUN npx playwright install chromium
