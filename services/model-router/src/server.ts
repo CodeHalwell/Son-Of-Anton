@@ -174,7 +174,9 @@ export function createServer() {
 		// user clicks Cancel). Without this the provider fetch runs to completion,
 		// burning tokens and keeping the connection alive unnecessarily.
 		const reqAbort = new AbortController();
-		req.on('close', () => reqAbort.abort());
+		// Only abort when the response is still in-flight — if the response
+		// already ended normally, ignore the close event.
+		req.on('close', () => { if (!res.writableEnded) { reqAbort.abort(); } });
 
 		const providers = resolveProvidersForRole(context.agentRole, context, router, failoverConfig);
 
