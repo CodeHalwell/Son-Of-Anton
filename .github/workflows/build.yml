@@ -156,6 +156,12 @@ jobs:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install son-of-anton-core dependencies
+        run: npm --prefix son-of-anton-core ci
+
+      - name: Install son-of-anton-cli dependencies
+        run: npm --prefix son-of-anton-cli ci
+
       - name: Run harness smoke (offline)
         run: bash scripts/harness-smoke.sh --no-live
 
@@ -180,7 +186,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y build-essential pkg-config libkrb5-dev xvfb libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64
+          sudo apt-get install -y build-essential pkg-config libkrb5-dev libx11-dev libx11-xcb-dev libxkbfile-dev libnotify-bin xvfb libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64
 
       - name: Install root dependencies
         run: npm ci
