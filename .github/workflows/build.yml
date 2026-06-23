@@ -162,6 +162,12 @@ jobs:
       - name: Install son-of-anton-cli dependencies
         run: npm --prefix son-of-anton-cli ci
 
+      - name: Install extension dependencies
+        run: npm --prefix extensions/son-of-anton install
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+
       - name: Run harness smoke (offline)
         run: bash scripts/harness-smoke.sh --no-live
 
