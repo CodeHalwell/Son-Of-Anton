@@ -47,6 +47,12 @@ jobs:
       - name: Install son-of-anton-core dependencies
         run: npm --prefix son-of-anton-core ci
 
+      - name: Install extension dependencies
+        run: npm --prefix extensions/son-of-anton ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+
       - name: Type check build scripts
         run: npm run typecheck
         working-directory: build
@@ -95,11 +101,23 @@ jobs:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install son-of-anton-core dependencies
+        run: npm --prefix son-of-anton-core ci
+
       - name: Build son-of-anton-core
         run: npm --prefix son-of-anton-core run build
 
+      - name: Install son-of-anton-cli dependencies
+        run: npm --prefix son-of-anton-cli ci
+
       - name: Build son-of-anton-cli
         run: npm --prefix son-of-anton-cli run build
+
+      - name: Install extension dependencies
+        run: npm --prefix extensions/son-of-anton ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
 
       - name: Typecheck extensions/son-of-anton
         run: npx tsc -p tsconfig.json --noEmit

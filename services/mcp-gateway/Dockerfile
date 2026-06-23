@@ -9,13 +9,13 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends curl && \
     rm -rf /var/lib/apt/lists/*
 
-COPY package*.json tsconfig.json ./
+COPY package*.json tsconfig.json tsconfig.build.json ./
 RUN npm install
 
 COPY src/ ./src/
 COPY _lib/metrics/dist/ ./_lib/metrics/dist/
 COPY _lib/tracing/dist/ ./_lib/tracing/dist/
-RUN node --max-old-space-size=2048 node_modules/.bin/tsc
+RUN node_modules/.bin/tsc -p tsconfig.build.json
 
 EXPOSE 3100
 
