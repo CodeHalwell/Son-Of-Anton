@@ -229,10 +229,18 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 		this.messageDisposables.clear();
 
 		if (show) {
-			const runAgainLink = DOM.append(this.messageBox, DOM.$('a.pointer.prominent.message', {}, localize('runSearch', "Run Search")));
-			this.messageDisposables.add(DOM.addDisposableListener(runAgainLink, DOM.EventType.CLICK, async () => {
+			const runAgainLink = DOM.append(this.messageBox, DOM.$('a.pointer.prominent.message', { role: 'button', tabindex: 0 }, localize('runSearch', "Run Search")));
+			this.messageDisposables.add(DOM.addDisposableListener(runAgainLink, DOM.EventType.CLICK, async (e: MouseEvent) => {
+				DOM.EventHelper.stop(e, false);
 				await this.triggerSearch();
 				this.searchResultEditor.focus();
+			}));
+			this.messageDisposables.add(DOM.addStandardDisposableListener(runAgainLink, DOM.EventType.KEY_DOWN, async (e: StandardKeyboardEvent) => {
+				if (e.equals(KeyCode.Enter) || e.equals(KeyCode.Space)) {
+					DOM.EventHelper.stop(e, false);
+					await this.triggerSearch();
+					this.searchResultEditor.focus();
+				}
 			}));
 		}
 	}
