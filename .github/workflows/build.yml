@@ -215,10 +215,6 @@ jobs:
       - name: Build extensions/son-of-anton
         run: npm --prefix extensions/son-of-anton run build
 
-      - name: Compile extensions/son-of-anton for tests
-        run: npx tsc -p tsconfig.json
-        working-directory: extensions/son-of-anton
-
       - name: Run extension tests under xvfb
         run: xvfb-run --auto-servernum npm --prefix extensions/son-of-anton test
 

@@ -24,11 +24,8 @@
 **/extensions/vscode-api-tests/testWorkspace2/**
 **/fixtures/**
 **/node_modules/**
-services/_lib/**
-services/**/_lib/**
-services/model-router/src/providers/**
-services/penetration-tester/**
-son-of-anton-mcp/servers/**
+services/**
+son-of-anton-mcp/**
 extensions/son-of-anton/src/board/webview/**
 **/out/**
 **/out-*/**
