@@ -38,6 +38,21 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  postgres:
+    image: postgres:16
+    container_name: soa-postgres
+    environment:
+      - POSTGRES_DB=${DB_NAME:-son_of_anton}
+      - POSTGRES_USER=${DB_USER:-readonly}
+      - POSTGRES_HOST_AUTH_METHOD=trust
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U readonly -d son_of_anton"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
   indexer:
     build:
       context: ./services/indexer
@@ -124,10 +139,13 @@ services:
       context: ./son-of-anton-mcp/servers/database
       dockerfile: Dockerfile
     container_name: soa-mcp-database
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "${MCP_DATABASE_PORT:-3102}:3102"
     environment:
-      - DB_HOST=${DB_HOST:-localhost}
+      - DB_HOST=${DB_HOST:-postgres}
       - DB_PORT=${DB_PORT:-5432}
       - DB_NAME=${DB_NAME:-son_of_anton}
       - DB_USER=${DB_USER:-readonly}
