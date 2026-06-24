@@ -112,7 +112,7 @@ services:
       - MCP_PORT=${MCP_PORT:-3100}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
     healthcheck:
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/3100' 2>/dev/null"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:3100/health"]
       interval: 15s
       timeout: 5s
       retries: 5

@@ -369,7 +369,7 @@ jobs:
       - name: Verify all services are healthy
         run: |
           set -euo pipefail
-          unhealthy_count="$(docker compose ps --format json | jq -s '[.[] | select(.Health != "healthy")] | length')"
+          unhealthy_count="$(docker compose ps --format json | jq '[.[] | select(.Health != "healthy")] | length')"
           if [ "$unhealthy_count" -gt 0 ]; then
             echo "Found $unhealthy_count unhealthy services:"
             docker compose ps
