@@ -287,6 +287,7 @@ export class MainThreadQuickOpen implements MainThreadQuickOpenShape {
 	/**
 	* Converts IconPath DTO into iconPath/iconClass properties.
 	*/
+	// eslint-disable-next-line @stylistic/ts/member-delimiter-style
 	private expandIconPath(target: Pick<TransferQuickPickItem, 'iconPathDto'> & { iconPath?: { light?: URI; dark: URI }, iconClass?: string }) {
 		const icon = target.iconPathDto;
 		if (!icon) {

@@ -40,6 +40,7 @@ suite('AuthenticationService', () => {
 	setup(() => {
 		const storageService = disposables.add(new TestStorageService());
 		const authenticationAccessService = disposables.add(new AuthenticationAccessService(storageService, TestProductService));
+		// eslint-disable-next-line local/code-no-any-casts
 		const dynamicAuthenticationProviderStorageService = disposables.add(new DynamicAuthenticationProviderStorageService(storageService, null as any /* SecretStorageService */, new NullLogService()));
 		authenticationService = disposables.add(new AuthenticationService(new TestExtensionService(), authenticationAccessService, TestEnvironmentService, new NullLogService(), dynamicAuthenticationProviderStorageService));
 	});

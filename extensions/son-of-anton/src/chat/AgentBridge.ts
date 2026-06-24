@@ -301,9 +301,13 @@ export class AgentBridge {
 		}
 
 		try {
-			const text = await agent.runChatTurn(
+			const text = await agent.runAgenticTurn(
 				userMessage,
-				t => emit({ type: 'token', token: t }),
+				event => {
+					if (event.type === 'token') {
+						emit({ type: 'token', token: event.token });
+					}
+				},
 				cancellation,
 				{
 					modelOverride: model,

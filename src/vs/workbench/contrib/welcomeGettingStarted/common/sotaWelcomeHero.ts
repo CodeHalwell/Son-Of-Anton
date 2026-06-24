@@ -166,14 +166,17 @@ interface ISiliconValleyQuote {
  */
 const SILICON_VALLEY_QUOTES: readonly ISiliconValleyQuote[] = [
 	{
+		// eslint-disable-next-line local/code-no-unexternalized-strings
 		text: "It's possible that Son of Anton thought the best way to get rid of all the bugs was to get rid of all the software, which is technically and statistically correct.",
 		attribution: 'Gilfoyle',
 	},
 	{
+		// eslint-disable-next-line local/code-no-unexternalized-strings
 		text: "I'm not hiring him. He uses spaces not tabs.",
 		attribution: 'Richard Hendricks',
 	},
 	{
+		// eslint-disable-next-line local/code-no-unexternalized-strings
 		text: "It's not magic, it's talent and sweat.",
 		attribution: 'Gilfoyle',
 	},
@@ -182,14 +185,17 @@ const SILICON_VALLEY_QUOTES: readonly ISiliconValleyQuote[] = [
 		attribution: 'Dinesh',
 	},
 	{
+		// eslint-disable-next-line local/code-no-unexternalized-strings
 		text: "I don't want to live in a world where someone else is making the world a better place better than we are.",
 		attribution: 'Gavin Belson',
 	},
 	{
+		// eslint-disable-next-line local/code-no-unexternalized-strings
 		text: "Welcome to Pied Piper's new home. Hoo-hoo-hoo!",
 		attribution: 'Richard Hendricks',
 	},
 	{
+		// eslint-disable-next-line local/code-no-unexternalized-strings
 		text: "Don't 'think different,' that's Apple.",
 		attribution: 'Gavin Belson',
 	},

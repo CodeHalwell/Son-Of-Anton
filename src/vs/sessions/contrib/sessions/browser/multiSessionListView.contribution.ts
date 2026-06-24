@@ -5,9 +5,9 @@
 
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
-import { IViewDescriptor, IViewsRegistry, Extensions as ViewContainerExtensions, IViewContainersRegistry } from '../../../../workbench/common/views.js';
-import { IViewDescriptorService } from '../../../../workbench/common/views.js';
+import { IViewDescriptor, IViewDescriptorService, IViewsRegistry, Extensions as ViewContainerExtensions, IViewContainersRegistry } from '../../../../workbench/common/views.js';
 import { localize2 } from '../../../../nls.js';
+import { mainWindow } from '../../../../base/browser/window.js';
 import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.js';
 import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
@@ -86,12 +86,12 @@ export class MultiSessionListViewPane extends ViewPane {
 			this.panel?.setActiveResource(active?.resource);
 		}));
 
-		this.refreshTimer = setInterval(() => this.refreshRows(), REFRESH_INTERVAL_MS);
-		this._register({ dispose: () => clearInterval(this.refreshTimer) });
+		this.refreshTimer = mainWindow.setInterval(() => this.refreshRows(), REFRESH_INTERVAL_MS);
+		this._register({ dispose: () => mainWindow.clearInterval(this.refreshTimer) });
 	}
 
 	override dispose(): void {
-		clearInterval(this.refreshTimer);
+		mainWindow.clearInterval(this.refreshTimer);
 		super.dispose();
 	}
 

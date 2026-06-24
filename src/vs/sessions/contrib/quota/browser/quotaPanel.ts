@@ -41,6 +41,7 @@ export class QuotaPanel extends Disposable {
 
 	private readonly _summaryEl: HTMLElement;
 	private readonly _spendCapWarning: HTMLElement;
+	private readonly _spendCapWarningText: HTMLElement;
 	private readonly _modelsBody: HTMLElement;
 	private readonly _toolsBody: HTMLElement;
 	private readonly _quotaBody: HTMLElement;
@@ -59,7 +60,7 @@ export class QuotaPanel extends Disposable {
 		this._spendCapWarning = append(container, $('.quota-panel-spend-cap-warning.hidden'));
 		const warnIcon = append(this._spendCapWarning, $('span.quota-panel-spend-cap-icon'));
 		warnIcon.appendChild(renderIcon(Codicon.warning));
-		append(this._spendCapWarning, $('span.quota-panel-spend-cap-text'));
+		this._spendCapWarningText = append(this._spendCapWarning, $('span.quota-panel-spend-cap-text'));
 
 		this._modelsBody = this._renderSection(container, localize('quota.byModel', "By Model"), 'models');
 		this._toolsBody = this._renderSection(container, localize('quota.byTool', "By Tool"), 'tools');
@@ -105,15 +106,12 @@ export class QuotaPanel extends Disposable {
 	private _updateSpendCapWarning(cap: SpendCapConfig): void {
 		if (isSpendCapExceeded(cap)) {
 			this._spendCapWarning.classList.remove('hidden');
-			const textEl = this._spendCapWarning.querySelector<HTMLElement>('.quota-panel-spend-cap-text');
-			if (textEl) {
-				textEl.textContent = localize(
-					'quota.spendCapExceeded',
-					"Spend cap of {0} exceeded (current: {1}). New requests are blocked.",
-					formatCostUsd(cap.limitUsd!),
-					formatCostUsd(cap.currentTotalUsd),
-				);
-			}
+			this._spendCapWarningText.textContent = localize(
+				'quota.spendCapExceeded',
+				"Spend cap of {0} exceeded (current: {1}). New requests are blocked.",
+				formatCostUsd(cap.limitUsd!),
+				formatCostUsd(cap.currentTotalUsd),
+			);
 		} else {
 			this._spendCapWarning.classList.add('hidden');
 		}
