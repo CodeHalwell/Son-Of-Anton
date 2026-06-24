@@ -39,3 +39,7 @@
 ## 2026-06-22 - Optimize array intersections in configuration models
 **Learning:** When comparing configuration models, checking if a key exists in an array using `Array.prototype.indexOf()` or `Array.prototype.includes()` inside an `Array.prototype.filter()` callback creates a nested iteration bottleneck with time complexity O(N*M).
 **Action:** Convert the target array to a `Set` and use `Set.has()` instead to reduce time complexity to O(N+M), significantly speeding up configuration comparisons for large numbers of settings.
+
+## 2024-05-24 - Configuration Models `indexOf` nested iteration bottleneck
+**Learning:** In `src/vs/platform/configuration/common/configurationModels.ts`, checking whether keys exist in a list was done using nested iteration (Array.prototype.filter + Array.prototype.indexOf). When comparing or merging configurations with thousands of keys, this leads to an O(N*M) time complexity.
+**Action:** Use a Set for the target keys array before using `filter` to reduce the complexity to O(N+M).
