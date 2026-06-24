@@ -5,4 +5,5 @@ module.exports = {
 	spec: 'test/**/*.test.ts',
 	timeout: 10000,
 	reporter: 'spec',
+	ui: 'tdd',
 };

@@ -40,7 +40,9 @@ if [[ "${1:-}" == "--no-live" ]]; then
 fi
 
 ok() { printf '  \033[32m✓\033[0m  %s\n' "$1"; }
+# allow-any-unicode-next-line
 fail() { printf '  \033[31m✗\033[0m  %s\n' "$1"; exit 1; }
+# allow-any-unicode-next-line
 section() { printf '\n\033[1m▶ %s\033[0m\n' "$1"; }
 
 section "1. Build all three packages"

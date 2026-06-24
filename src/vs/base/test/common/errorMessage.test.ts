@@ -67,7 +67,7 @@ suite('ErrorMessage', () => {
 		assert.strictEqual(isErrorWithActions(null), false);
 		assert.strictEqual(isErrorWithActions(new Error()), false);
 
-		const action: IAction = { id: 'test', label: 'Test', tooltip: '', class: '', enabled: true, run: async () => {} };
+		const action: IAction = { id: 'test', label: 'Test', tooltip: '', class: '', enabled: true, run: async () => { } };
 		const err = createErrorWithActions('Error with actions', [action]);
 		assert.strictEqual(isErrorWithActions(err), true);
 		assert.strictEqual(err.message, 'Error with actions');

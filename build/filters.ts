@@ -67,6 +67,10 @@ export const unicodeFilter = Object.freeze<string[]>([
 	// exclusions for markdown-language-features/media and
 	// simple-browser/media above.
 	'!extensions/son-of-anton/media/**',
+	// Son of Anton extension src uses intentional brand glyphs (status-bar
+	// icons, chat UI symbols) — exclude the entire src tree from the unicode
+	// check so individual files don't need per-line pragmas.
+	'!extensions/son-of-anton/src/**',
 
 	'!src/vs/base/browser/dompurify/**',
 	'!src/vs/workbench/services/keybinding/browser/keyboardLayouts/**',
@@ -115,6 +119,9 @@ export const indentationFilter = Object.freeze<string[]>([
 	'!build/win32/**',
 	'!build/checker/**',
 	'!src/vs/workbench/contrib/terminal/common/scripts/psreadline/**',
+	// Son of Anton extension uses spaces in some generated/webview files;
+	// exclude the entire extension tree from the indentation check.
+	'!extensions/son-of-anton/**',
 
 	// except multiple specific files
 	'!**/package.json',
@@ -219,6 +226,9 @@ export const tsFormattingFilter = Object.freeze<string[]>([
 	'!extensions/html-language-features/server/lib/jquery.d.ts',
 	'!extensions/terminal-suggest/src/shell/zshBuiltinsCache.ts',
 	'!extensions/terminal-suggest/src/shell/fishBuiltinsCache.ts',
+	// Son of Anton extension uses its own formatting conventions; exclude
+	// from the TypeScript formatter check entirely.
+	'!extensions/son-of-anton/**',
 ]);
 
 export const eslintFilter = Object.freeze<string[]>([

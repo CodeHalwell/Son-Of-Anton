@@ -27,6 +27,7 @@
 services/**
 son-of-anton-mcp/**
 extensions/son-of-anton/**
+son-of-anton-core/**
 **/out/**
 **/out-*/**
 **/src/**/dompurify.js
