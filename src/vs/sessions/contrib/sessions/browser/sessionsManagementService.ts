@@ -338,10 +338,10 @@ export class SessionsManagementService extends Disposable implements ISessionsMa
 		};
 		if (signal.aborted) {
 			cts.cancel();
-			this.chatService.cancelCurrentRequestForSession(sessionResource, 'user-abort');
-		} else {
-			signal.addEventListener('abort', onAbort, { once: true });
+			cts.dispose();
+			return null;
 		}
+		signal.addEventListener('abort', onAbort, { once: true });
 		try {
 			await this.sendRequestForNewSession(sessionResource, options, cts.token);
 		} finally {
@@ -385,6 +385,9 @@ export class SessionsManagementService extends Disposable implements ISessionsMa
 		};
 
 		await this.chatSessionsService.getOrCreateChatSession(session.resource, cancellation);
+		if (cancellation.isCancellationRequested) {
+			return;
+		}
 		await this.doSendRequestForNewSession(session, query, sendOptions, session.selectedOptions, options?.openNewSessionView);
 
 		// Clean up the session after sending (setter disposes the previous value)
