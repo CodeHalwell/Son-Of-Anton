@@ -5,9 +5,12 @@
 import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
+import { fileURLToPath } from 'url';
+
+const _dir = path.dirname(fileURLToPath(import.meta.url));
 
 suite('Personality', () => {
-	const resourcesDir = path.join(__dirname, '..', 'resources');
+	const resourcesDir = path.join(_dir, '..', 'resources');
 
 	suite('startup-messages.json', () => {
 		let messages: string[];
@@ -84,7 +87,7 @@ suite('Personality', () => {
 		let packageJson: { contributes: { commands: Array<{ command: string; title: string }> } };
 
 		suiteSetup(() => {
-			const raw = fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8');
+			const raw = fs.readFileSync(path.join(_dir, '..', 'package.json'), 'utf-8');
 			packageJson = JSON.parse(raw);
 		});
 

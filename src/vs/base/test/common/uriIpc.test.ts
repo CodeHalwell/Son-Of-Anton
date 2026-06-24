@@ -64,7 +64,7 @@ suite('URI IPC', () => {
 
 	test('transformOutgoingURIs - max depth limit', () => {
 		// Create an object deeper than 200 levels
-		// eslint-disable-next-line local/code-no-any-casts, prefer-const
+		// eslint-disable-next-line prefer-const
 		let obj: any = {};
 		let current = obj;
 		for (let i = 0; i < 205; i++) {

@@ -31,7 +31,7 @@ services:
     volumes:
       - qdrant-data:/qdrant/storage
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO /dev/null http://localhost:6333/readyz"]
+      test: ["CMD-SHELL", "grep -qF ':18BD ' /proc/net/tcp6 2>/dev/null || grep -qF ':18BD ' /proc/net/tcp 2>/dev/null"]
       interval: 10s
       timeout: 5s
       retries: 5

@@ -2,6 +2,9 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import type { CredentialBroker } from '../auth/CredentialBroker';
 import type { ConfigStore, SecretStore } from '../host';
 
@@ -149,13 +152,16 @@ export async function detectCredentials(
 		|| nonEmpty(env.GROQ_API_KEY);
 
 	const cerebrasHasKey = nonEmpty(cerebrasSecret)
-		|| nonEmpty(config.get<string>('cerebrasApiKey'));
+		|| nonEmpty(config.get<string>('cerebrasApiKey'))
+		|| nonEmpty(env.CEREBRAS_API_KEY);
 
 	const togetherHasKey = nonEmpty(togetherSecret)
-		|| nonEmpty(config.get<string>('togetherApiKey'));
+		|| nonEmpty(config.get<string>('togetherApiKey'))
+		|| nonEmpty(env.TOGETHER_API_KEY);
 
 	const fireworksHasKey = nonEmpty(fireworksSecret)
-		|| nonEmpty(config.get<string>('fireworksApiKey'));
+		|| nonEmpty(config.get<string>('fireworksApiKey'))
+		|| nonEmpty(env.FIREWORKS_API_KEY);
 
 	return {
 		anthropic: { hasApiKey: anthropicHasKey, hasOAuth: oauthConnected('anthropic-oauth') },
@@ -172,7 +178,7 @@ export async function detectCredentials(
 		cerebras: { hasApiKey: cerebrasHasKey },
 		together: { hasApiKey: togetherHasKey },
 		fireworks: { hasApiKey: fireworksHasKey },
-		codex: { hasCli: false },
+		codex: { hasCli: detectCodexCli() },
 	};
 }
 
@@ -195,6 +201,14 @@ export function hasAnyProvider(state: CredentialState): boolean {
 		|| state.together.hasApiKey
 		|| state.fireworks.hasApiKey
 		|| state.codex.hasCli;
+}
+
+function detectCodexCli(): boolean {
+	try {
+		return fs.existsSync(path.join(os.homedir(), '.codex', 'config.json'));
+	} catch {
+		return false;
+	}
 }
 
 function nonEmpty(value: string | undefined): boolean {
