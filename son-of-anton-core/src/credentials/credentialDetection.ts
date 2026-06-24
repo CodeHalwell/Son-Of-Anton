@@ -2,9 +2,7 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
+import { isCodexAvailable } from '../llm/codexRunner';
 import type { CredentialBroker } from '../auth/CredentialBroker';
 import type { ConfigStore, SecretStore } from '../host';
 
@@ -178,7 +176,7 @@ export async function detectCredentials(
 		cerebras: { hasApiKey: cerebrasHasKey },
 		together: { hasApiKey: togetherHasKey },
 		fireworks: { hasApiKey: fireworksHasKey },
-		codex: { hasCli: detectCodexCli() },
+		codex: { hasCli: isCodexAvailable() },
 	};
 }
 
@@ -201,14 +199,6 @@ export function hasAnyProvider(state: CredentialState): boolean {
 		|| state.together.hasApiKey
 		|| state.fireworks.hasApiKey
 		|| state.codex.hasCli;
-}
-
-function detectCodexCli(): boolean {
-	try {
-		return fs.existsSync(path.join(os.homedir(), '.codex', 'config.json'));
-	} catch {
-		return false;
-	}
 }
 
 function nonEmpty(value: string | undefined): boolean {
