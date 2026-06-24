@@ -1251,6 +1251,7 @@ export class Repository implements Disposable {
 				commands.executeCommand('_chat.editSessions.accept', resources);
 			},
 			() => {
+				// allow-any-unicode-next-line
 				// ⚡ Bolt: Convert arrays to Sets to optimize O(N*M) lookups to O(N+M)
 				const resourcePaths = new Set(resources.map(r => r.fsPath));
 				const indexGroupResourcePaths = new Set(this.indexGroup.resourceStates.map(r => r.resourceUri.fsPath));
@@ -1319,6 +1320,7 @@ export class Repository implements Disposable {
 				const untrackedChanges = config.get<'mixed' | 'separate' | 'hidden'>('untrackedChanges');
 				const untrackedChangesResourceGroupType = untrackedChanges === 'mixed' ? ResourceGroupType.WorkingTree : ResourceGroupType.Untracked;
 
+				// allow-any-unicode-next-line
 				// ⚡ Bolt: Convert arrays to Sets to optimize O(N*M) lookups to O(N+M)
 				const resourcePaths = new Set(resources.length === 0 ?
 					this.indexGroup.resourceStates.map(r => r.resourceUri.fsPath) : resources.map(r => r.fsPath));
@@ -1572,6 +1574,7 @@ export class Repository implements Disposable {
 				commands.executeCommand('_aiEdits.clearAiContributions', resources);
 			},
 			() => {
+				// allow-any-unicode-next-line
 				// ⚡ Bolt: Convert arrays to Sets to optimize O(N*M) lookups to O(N+M)
 				const resourcePaths = new Set(resources.map(r => r.fsPath));
 

@@ -59,7 +59,7 @@ services:
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:ro
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/8080' 2>/dev/null"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -84,7 +84,7 @@ services:
       - ${PROJECT_PATH:-.}:/workspace:ro
       - lsif-snapshots:/data/lsif-snapshots
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8081/health || exit 1"]
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/8081' 2>/dev/null"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -112,7 +112,7 @@ services:
       - MCP_PORT=${MCP_PORT:-3100}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:3100/health || exit 1"]
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/3100' 2>/dev/null"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -134,7 +134,7 @@ services:
       - DB_PASSWORD=${DB_PASSWORD:-}
       - MCP_DATABASE_PORT=3102
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:3102/health || exit 1"]
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/3102' 2>/dev/null"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -153,7 +153,7 @@ services:
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - MCP_DEPLOYMENT_PORT=3103
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:3103/health || exit 1"]
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/3103' 2>/dev/null"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -172,7 +172,7 @@ services:
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - MCP_TICKETS_PORT=3104
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:3104/health || exit 1"]
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/3104' 2>/dev/null"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -221,7 +221,7 @@ services:
     networks:
       - sandbox-net
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8092/health || exit 1"]
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/8092' 2>/dev/null"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -241,7 +241,7 @@ services:
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:ro
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8090/health || exit 1"]
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/8090' 2>/dev/null"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -261,7 +261,7 @@ services:
     networks:
       - sandbox-net
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:3105/health || exit 1"]
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/3105' 2>/dev/null"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -303,7 +303,7 @@ services:
       - background-tasks-data:/data/background
       - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8093/health || exit 1"]
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/8093' 2>/dev/null"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -324,7 +324,7 @@ services:
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:rw
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8094/health || exit 1"]
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/8094' 2>/dev/null"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -342,7 +342,7 @@ services:
     volumes:
       - ./services/model-router/config/model-routes.json:/app/config/routes.json:ro
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:3200/health || exit 1"]
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/3200' 2>/dev/null"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -363,7 +363,7 @@ services:
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:rw
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:3201/health || exit 1"]
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/3201' 2>/dev/null"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -387,7 +387,7 @@ services:
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:rw
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:3202/health || exit 1"]
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/3202' 2>/dev/null"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -408,7 +408,7 @@ services:
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:ro
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:3300/health || exit 1"]
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/3300' 2>/dev/null"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -433,7 +433,7 @@ services:
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:ro
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:3301/health || exit 1"]
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/3301' 2>/dev/null"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -453,7 +453,7 @@ services:
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:ro
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:3302/health || exit 1"]
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/3302' 2>/dev/null"]
       interval: 15s
       timeout: 5s
       retries: 5
