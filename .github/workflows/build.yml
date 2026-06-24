@@ -361,6 +361,7 @@ jobs:
         run: |
           cp .env.example .env
           sed -i "s|^PROJECT_PATH=.*|PROJECT_PATH=$GITHUB_WORKSPACE|" .env
+          echo "BACKGROUND_TASK_API_TOKEN=ci-smoke-token" >> .env
 
       - name: Start services
         run: docker compose up -d --wait --wait-timeout 120
