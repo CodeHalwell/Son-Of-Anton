@@ -304,9 +304,7 @@ export class AgentBridge {
 			const text = await agent.runAgenticTurn(
 				userMessage,
 				event => {
-					if (event.type === 'token') {
-						emit({ type: 'token', token: event.token });
-					}
+					emit(event as AgentEvent);
 				},
 				cancellation,
 				{
