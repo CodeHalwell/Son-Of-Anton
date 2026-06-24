@@ -301,33 +301,9 @@ export class AgentBridge {
 		}
 
 		try {
-			// `emitFollowupSuggestions = true` opts the IDE chat into receiving
-			// the H4 sentinel block; the chat-webview strips it before render
-			// and surfaces the suggestions as quick-pick buttons.
-			//
-			// `runAgenticTurn` falls back to `runChatTurn` internally when the
-			// agent has no `ToolExecutionContext` wired, so installations
-			// without one keep their pre-migration single-shot behaviour.
-			// When a context exists, this lights up native tool-use for
-			// direct specialist invocation (e.g. `@anton-code "fix this"`
-			// reads files + makes edits + runs tests on its own instead of
-			// emitting a markdown diff for the user to apply manually).
-			const text = await agent.runAgenticTurn(
+			const text = await agent.runChatTurn(
 				userMessage,
-				event => {
-					if (event.type === 'token') {
-						emit({ type: 'token', token: event.token });
-					} else {
-						emit({
-							type: 'tool-call',
-							id: event.id,
-							name: event.name,
-							input: event.input,
-							status: event.status,
-							output: event.output,
-						});
-					}
-				},
+				t => emit({ type: 'token', token: t }),
 				cancellation,
 				{
 					modelOverride: model,

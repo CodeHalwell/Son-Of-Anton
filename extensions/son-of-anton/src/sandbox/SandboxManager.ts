@@ -148,7 +148,7 @@ export class SandboxManager {
 				return {
 					exitCode: 1,
 					stdout: '',
-					stderr: 'Command requires confirmation but no handler is registered.',
+					stderr: 'No confirmation handler registered for this command.',
 					timedOut: false,
 					durationMs: 0,
 					classification,

@@ -210,7 +210,7 @@
 			},
 			{
 				"command": "sota.openCliHere",
-				"title": "Open sota CLI in Terminal",
+				"title": "Anton: Open CLI in Terminal",
 				"category": "Son of Anton"
 			},
 			{
