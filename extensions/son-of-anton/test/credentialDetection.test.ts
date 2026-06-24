@@ -81,6 +81,7 @@ suite('credentialDetection', () => {
 			foundry: { hasApiKey: false, hasEndpoint: false },
 			bedrock: { hasAccessKey: false, hasProfile: false },
 			google: { hasApiKey: false },
+			other: { hasAnyKey: false },
 		};
 		assert.deepStrictEqual(
 			{ state, hasAny: hasAnyProvider(state) },
@@ -191,6 +192,22 @@ suite('credentialDetection', () => {
 		);
 	});
 
+	test('OpenRouter secret sets other.hasAnyKey=true', async () => {
+		const secrets = new FakeSecretStorage();
+		await secrets.store(SECRET_KEYS.openRouter, 'or-key');
+		const state = await detectCredentials(secrets, makeConfig(), makeBroker());
+		assert.deepStrictEqual(state.other, { hasAnyKey: true });
+	});
+
+	test('Ollama base URL setting sets other.hasAnyKey=true', async () => {
+		const state = await detectCredentials(
+			new FakeSecretStorage(),
+			makeConfig({ ollamaBaseUrl: 'http://my-server:11434' }),
+			makeBroker(),
+		);
+		assert.deepStrictEqual(state.other, { hasAnyKey: true });
+	});
+
 	test('hasAnyProvider returns true when any single field is set', () => {
 		const empty: CredentialState = {
 			anthropic: { hasApiKey: false, hasOAuth: false },
@@ -198,16 +215,18 @@ suite('credentialDetection', () => {
 			foundry: { hasApiKey: false, hasEndpoint: false },
 			bedrock: { hasAccessKey: false, hasProfile: false },
 			google: { hasApiKey: false },
+			other: { hasAnyKey: false },
 		};
 		const variants: CredentialState[] = [
 			{ ...empty, anthropic: { hasApiKey: true, hasOAuth: false } },
 			{ ...empty, openai: { hasApiKey: false, hasOAuth: true } },
 			{ ...empty, bedrock: { hasAccessKey: false, hasProfile: true } },
 			{ ...empty, google: { hasApiKey: true } },
+			{ ...empty, other: { hasAnyKey: true } },
 		];
 		assert.deepStrictEqual(
 			[hasAnyProvider(empty), ...variants.map(hasAnyProvider)],
-			[false, true, true, true, true],
+			[false, true, true, true, true, true],
 		);
 	});
 });

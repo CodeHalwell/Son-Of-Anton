@@ -61,6 +61,49 @@ const MODEL_COSTS: Partial<Record<ModelId, { input: number; output: number; cach
 	'claude-haiku-4-5': { input: 1.0, output: 5.0, cachedInput: 0.1 },
 	'claude-opus-4-1': { input: 15.0, output: 75.0, cachedInput: 1.5 },
 	'claude-sonnet-4-1': { input: 3.0, output: 15.0, cachedInput: 0.3 },
+	// OpenAI GPT / reasoning models (USD per 1M tokens).
+	'gpt-5': { input: 60.0, output: 240.0, cachedInput: 30.0 },
+	'gpt-5-mini': { input: 1.25, output: 5.0, cachedInput: 0.625 },
+	'gpt-5-nano': { input: 0.3, output: 1.2, cachedInput: 0.15 },
+	'gpt-5-codex': { input: 30.0, output: 120.0, cachedInput: 15.0 },
+	'gpt-4-1': { input: 2.0, output: 8.0, cachedInput: 0.5 },
+	'gpt-4-1-mini': { input: 0.4, output: 1.6, cachedInput: 0.1 },
+	'gpt-4-1-nano': { input: 0.1, output: 0.4, cachedInput: 0.025 },
+	'gpt-4o': { input: 2.5, output: 10.0, cachedInput: 1.25 },
+	'gpt-4o-mini': { input: 0.15, output: 0.6, cachedInput: 0.075 },
+	'gpt-4-turbo': { input: 10.0, output: 30.0, cachedInput: 5.0 },
+	'gpt-3-5-turbo': { input: 0.5, output: 1.5, cachedInput: 0.25 },
+	'o1': { input: 15.0, output: 60.0, cachedInput: 7.5 },
+	'o1-mini': { input: 3.0, output: 12.0, cachedInput: 1.5 },
+	'o1-pro': { input: 150.0, output: 600.0, cachedInput: 75.0 },
+	'o3': { input: 10.0, output: 40.0, cachedInput: 2.5 },
+	'o3-mini': { input: 1.1, output: 4.4, cachedInput: 0.55 },
+	'o4-mini': { input: 1.1, output: 4.4, cachedInput: 0.275 },
+	// DeepSeek direct API.
+	'deepseek-v3': { input: 0.27, output: 1.1, cachedInput: 0.07 },
+	'deepseek-r1': { input: 0.55, output: 2.19, cachedInput: 0.14 },
+	// Mistral direct API.
+	'mistral-large': { input: 3.0, output: 9.0, cachedInput: 1.5 },
+	'mistral-small': { input: 0.1, output: 0.3, cachedInput: 0.05 },
+	'codestral': { input: 0.3, output: 0.9, cachedInput: 0.15 },
+	'mistral-pixtral': { input: 0.15, output: 0.15, cachedInput: 0.075 },
+	// Groq LPU inference.
+	'groq-llama-3-3-70b': { input: 0.59, output: 0.79, cachedInput: 0.3 },
+	'groq-llama-3-1-8b': { input: 0.05, output: 0.08, cachedInput: 0.025 },
+	'groq-mixtral-8x7b': { input: 0.24, output: 0.24, cachedInput: 0.12 },
+	'groq-deepseek-r1-llama-70b': { input: 0.75, output: 0.99, cachedInput: 0.375 },
+	// Cerebras wafer-scale inference.
+	'cerebras-llama-3-3-70b': { input: 0.85, output: 1.2, cachedInput: 0.425 },
+	'cerebras-llama-3-1-8b': { input: 0.1, output: 0.1, cachedInput: 0.05 },
+	// OpenRouter proxied models (approximate underlying list prices).
+	'openrouter-claude-opus-4-7': { input: 15.0, output: 75.0, cachedInput: 1.5 },
+	'openrouter-claude-sonnet-4-7': { input: 3.0, output: 15.0, cachedInput: 0.3 },
+	'openrouter-gpt-5': { input: 60.0, output: 240.0, cachedInput: 30.0 },
+	'openrouter-llama-3-1-405b': { input: 3.0, output: 3.0, cachedInput: 1.5 },
+	'openrouter-deepseek-v3': { input: 0.27, output: 1.1, cachedInput: 0.07 },
+	'openrouter-mistral-large': { input: 3.0, output: 9.0, cachedInput: 1.5 },
+	'openrouter-qwen-2-5-coder': { input: 0.5, output: 1.5, cachedInput: 0.25 },
+	'openrouter-grok-2': { input: 2.0, output: 10.0, cachedInput: 1.0 },
 };
 
 const ZERO_COST = { input: 0, output: 0, cachedInput: 0 };

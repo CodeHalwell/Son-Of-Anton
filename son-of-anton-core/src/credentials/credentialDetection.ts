@@ -35,6 +35,7 @@ export interface CredentialState {
 	foundry: { hasApiKey: boolean; hasEndpoint: boolean };
 	bedrock: { hasAccessKey: boolean; hasProfile: boolean };
 	google: { hasApiKey: boolean };
+	other: { hasAnyKey: boolean };
 }
 
 /**
@@ -62,12 +63,28 @@ export async function detectCredentials(
 		foundrySecret,
 		bedrockAccessSecret,
 		googleSecret,
+		openRouterSecret,
+		lmstudioSecret,
+		deepSeekSecret,
+		mistralSecret,
+		groqSecret,
+		cerebrasSecret,
+		togetherSecret,
+		fireworksSecret,
 	] = await Promise.all([
 		secrets.get(SECRET_KEYS.anthropic),
 		secrets.get(SECRET_KEYS.openai),
 		secrets.get(SECRET_KEYS.foundry),
 		secrets.get(SECRET_KEYS.bedrockAccessKeyId),
 		secrets.get(SECRET_KEYS.google),
+		secrets.get(SECRET_KEYS.openRouter),
+		secrets.get(SECRET_KEYS.lmstudio),
+		secrets.get(SECRET_KEYS.deepSeek),
+		secrets.get(SECRET_KEYS.mistral),
+		secrets.get(SECRET_KEYS.groq),
+		secrets.get(SECRET_KEYS.cerebras),
+		secrets.get(SECRET_KEYS.together),
+		secrets.get(SECRET_KEYS.fireworks),
 	]);
 
 	const oauthStatus = await safeStatus(broker);
@@ -100,12 +117,35 @@ export async function detectCredentials(
 		|| nonEmpty(env.GOOGLE_API_KEY)
 		|| nonEmpty(env.GEMINI_API_KEY);
 
+	const otherHasAnyKey = nonEmpty(openRouterSecret)
+		|| nonEmpty(config.get<string>('openRouterApiKey'))
+		|| nonEmpty(env.OPENROUTER_API_KEY)
+		|| nonEmpty(config.get<string>('ollamaBaseUrl'))
+		|| nonEmpty(lmstudioSecret)
+		|| nonEmpty(config.get<string>('lmstudioApiKey'))
+		|| nonEmpty(deepSeekSecret)
+		|| nonEmpty(config.get<string>('deepSeekApiKey'))
+		|| nonEmpty(env.DEEPSEEK_API_KEY)
+		|| nonEmpty(mistralSecret)
+		|| nonEmpty(config.get<string>('mistralApiKey'))
+		|| nonEmpty(env.MISTRAL_API_KEY)
+		|| nonEmpty(groqSecret)
+		|| nonEmpty(config.get<string>('groqApiKey'))
+		|| nonEmpty(env.GROQ_API_KEY)
+		|| nonEmpty(cerebrasSecret)
+		|| nonEmpty(config.get<string>('cerebrasApiKey'))
+		|| nonEmpty(togetherSecret)
+		|| nonEmpty(config.get<string>('togetherApiKey'))
+		|| nonEmpty(fireworksSecret)
+		|| nonEmpty(config.get<string>('fireworksApiKey'));
+
 	return {
 		anthropic: { hasApiKey: anthropicHasKey, hasOAuth: oauthConnected('anthropic-oauth') },
 		openai: { hasApiKey: openaiHasKey, hasOAuth: oauthConnected('chatgpt-oauth') },
 		foundry: { hasApiKey: foundryHasKey, hasEndpoint: foundryHasEndpoint },
 		bedrock: { hasAccessKey: bedrockHasAccessKey, hasProfile: bedrockHasProfile },
 		google: { hasApiKey: googleHasKey },
+		other: { hasAnyKey: otherHasAnyKey },
 	};
 }
 
@@ -117,7 +157,8 @@ export function hasAnyProvider(state: CredentialState): boolean {
 		|| state.foundry.hasApiKey
 		|| state.bedrock.hasAccessKey
 		|| state.bedrock.hasProfile
-		|| state.google.hasApiKey;
+		|| state.google.hasApiKey
+		|| state.other.hasAnyKey;
 }
 
 function nonEmpty(value: string | undefined): boolean {
