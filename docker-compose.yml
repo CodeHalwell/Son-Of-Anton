@@ -342,7 +342,7 @@ services:
     volumes:
       - ./services/model-router/config/model-routes.json:/app/config/routes.json:ro
     healthcheck:
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/3200' 2>/dev/null"]
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 3200"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -363,7 +363,7 @@ services:
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:rw
     healthcheck:
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/3201' 2>/dev/null"]
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 3201"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -387,7 +387,7 @@ services:
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:rw
     healthcheck:
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/3202' 2>/dev/null"]
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 3202"]
       interval: 15s
       timeout: 5s
       retries: 5
