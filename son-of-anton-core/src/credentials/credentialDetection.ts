@@ -35,7 +35,16 @@ export interface CredentialState {
 	foundry: { hasApiKey: boolean; hasEndpoint: boolean };
 	bedrock: { hasAccessKey: boolean; hasProfile: boolean };
 	google: { hasApiKey: boolean };
-	other: { hasAnyKey: boolean };
+	openrouter: { hasApiKey: boolean };
+	ollama: { hasBaseUrl: boolean };
+	lmstudio: { hasBaseUrl: boolean };
+	deepseek: { hasApiKey: boolean };
+	mistral: { hasApiKey: boolean };
+	groq: { hasApiKey: boolean };
+	cerebras: { hasApiKey: boolean };
+	together: { hasApiKey: boolean };
+	fireworks: { hasApiKey: boolean };
+	codex: { hasCli: boolean };
 }
 
 /**
@@ -117,26 +126,35 @@ export async function detectCredentials(
 		|| nonEmpty(env.GOOGLE_API_KEY)
 		|| nonEmpty(env.GEMINI_API_KEY);
 
-	const otherHasAnyKey = nonEmpty(openRouterSecret)
+	const openrouterHasKey = nonEmpty(openRouterSecret)
 		|| nonEmpty(config.get<string>('openRouterApiKey'))
-		|| nonEmpty(env.OPENROUTER_API_KEY)
-		|| nonEmpty(config.get<string>('ollamaBaseUrl'))
-		|| nonEmpty(lmstudioSecret)
+		|| nonEmpty(env.OPENROUTER_API_KEY);
+
+	const ollamaHasBaseUrl = nonEmpty(config.get<string>('ollamaBaseUrl'));
+
+	const lmstudioHasBaseUrl = nonEmpty(lmstudioSecret)
 		|| nonEmpty(config.get<string>('lmstudioApiKey'))
-		|| nonEmpty(deepSeekSecret)
+		|| nonEmpty(config.get<string>('lmstudioBaseUrl'));
+
+	const deepseekHasKey = nonEmpty(deepSeekSecret)
 		|| nonEmpty(config.get<string>('deepSeekApiKey'))
-		|| nonEmpty(env.DEEPSEEK_API_KEY)
-		|| nonEmpty(mistralSecret)
+		|| nonEmpty(env.DEEPSEEK_API_KEY);
+
+	const mistralHasKey = nonEmpty(mistralSecret)
 		|| nonEmpty(config.get<string>('mistralApiKey'))
-		|| nonEmpty(env.MISTRAL_API_KEY)
-		|| nonEmpty(groqSecret)
+		|| nonEmpty(env.MISTRAL_API_KEY);
+
+	const groqHasKey = nonEmpty(groqSecret)
 		|| nonEmpty(config.get<string>('groqApiKey'))
-		|| nonEmpty(env.GROQ_API_KEY)
-		|| nonEmpty(cerebrasSecret)
-		|| nonEmpty(config.get<string>('cerebrasApiKey'))
-		|| nonEmpty(togetherSecret)
-		|| nonEmpty(config.get<string>('togetherApiKey'))
-		|| nonEmpty(fireworksSecret)
+		|| nonEmpty(env.GROQ_API_KEY);
+
+	const cerebrasHasKey = nonEmpty(cerebrasSecret)
+		|| nonEmpty(config.get<string>('cerebrasApiKey'));
+
+	const togetherHasKey = nonEmpty(togetherSecret)
+		|| nonEmpty(config.get<string>('togetherApiKey'));
+
+	const fireworksHasKey = nonEmpty(fireworksSecret)
 		|| nonEmpty(config.get<string>('fireworksApiKey'));
 
 	return {
@@ -145,7 +163,16 @@ export async function detectCredentials(
 		foundry: { hasApiKey: foundryHasKey, hasEndpoint: foundryHasEndpoint },
 		bedrock: { hasAccessKey: bedrockHasAccessKey, hasProfile: bedrockHasProfile },
 		google: { hasApiKey: googleHasKey },
-		other: { hasAnyKey: otherHasAnyKey },
+		openrouter: { hasApiKey: openrouterHasKey },
+		ollama: { hasBaseUrl: ollamaHasBaseUrl },
+		lmstudio: { hasBaseUrl: lmstudioHasBaseUrl },
+		deepseek: { hasApiKey: deepseekHasKey },
+		mistral: { hasApiKey: mistralHasKey },
+		groq: { hasApiKey: groqHasKey },
+		cerebras: { hasApiKey: cerebrasHasKey },
+		together: { hasApiKey: togetherHasKey },
+		fireworks: { hasApiKey: fireworksHasKey },
+		codex: { hasCli: false },
 	};
 }
 
@@ -158,7 +185,16 @@ export function hasAnyProvider(state: CredentialState): boolean {
 		|| state.bedrock.hasAccessKey
 		|| state.bedrock.hasProfile
 		|| state.google.hasApiKey
-		|| state.other.hasAnyKey;
+		|| state.openrouter.hasApiKey
+		|| state.ollama.hasBaseUrl
+		|| state.lmstudio.hasBaseUrl
+		|| state.deepseek.hasApiKey
+		|| state.mistral.hasApiKey
+		|| state.groq.hasApiKey
+		|| state.cerebras.hasApiKey
+		|| state.together.hasApiKey
+		|| state.fireworks.hasApiKey
+		|| state.codex.hasCli;
 }
 
 function nonEmpty(value: string | undefined): boolean {
