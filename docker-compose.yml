@@ -31,7 +31,7 @@ services:
     volumes:
       - qdrant-data:/qdrant/storage
     healthcheck:
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/6333' 2>/dev/null"]
+      test: ["CMD", "curl", "-sf", "http://localhost:6333/readyz"]
       interval: 10s
       timeout: 5s
       retries: 5
