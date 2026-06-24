@@ -26,6 +26,8 @@ export interface MemoryHistoryParams {
 	topic: string;
 }
 
+const VALID_MEMORY_TYPES = new Set(['Decision', 'Convention', 'Warning', 'Preference']);
+
 /**
  * Query long-term memory entries from the temporal knowledge graph.
  */
@@ -37,6 +39,10 @@ export async function memoryQuery(
 	const queryParams: Record<string, unknown> = {};
 
 	if (params.type) {
+		// 🛡️ Sentinel: Validate node labels to prevent Cypher injection
+		if (!VALID_MEMORY_TYPES.has(params.type)) {
+			throw new Error(`Invalid memory type: ${params.type}`);
+		}
 		conditions.push(`e:${params.type}`);
 	}
 
@@ -76,6 +82,11 @@ export async function memoryRecord(
 	db: FalkorDBClient,
 	params: MemoryRecordParams,
 ): Promise<{ id: string; created: boolean }> {
+	// 🛡️ Sentinel: Validate node labels to prevent Cypher injection
+	if (!VALID_MEMORY_TYPES.has(params.type)) {
+		throw new Error(`Invalid memory type: ${params.type}`);
+	}
+
 	const now = Date.now();
 	const id = `mem-${now}-${Math.random().toString(36).substring(2, 8)}`;
 

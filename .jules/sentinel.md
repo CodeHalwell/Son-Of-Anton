@@ -36,3 +36,7 @@
 **Vulnerability:** Found unsanitized dynamic fields (`span.id` and `span.type`) directly embedded into the webview's HTML generation in `TraceViewerPanel.ts`.
 **Learning:** Even internal backend IDs and types can contain malicious payloads if compromised or manipulated before display, leading to XSS inside VS Code webviews.
 **Prevention:** Always use the internal `escapeHtml` string sanitizer function on all dynamic data injected into HTML strings, even for supposedly "safe" fields like identifiers or types.
+## 2024-05-18 - Prevent Cypher Injection via Node Labels
+**Vulnerability:** The node label in `memoryQuery.ts` (`MATCH (e:${params.type})`) and `memoryRecord.ts` (`CREATE (:${params.type} {`) was being dynamically constructed using unvalidated string concatenation (`params.type`). Because Cypher (FalkorDB) does not allow parameterization of node labels or relationship types, this exposed a Cypher injection vulnerability where an attacker could potentially manipulate query structure if `params.type` contained malicious input.
+**Learning:** Even when using parameterized queries for dynamic values (`WHERE ... e.content = $content`), structural components of a graph query (like node labels) cannot be parameterized. Unvalidated input used for labels is inherently vulnerable.
+**Prevention:** Always validate node labels and relationship types against a strict allowlist (e.g., `Set`) before interpolating them into a Cypher query string. Reject the request completely if the input does not match the allowlist.
