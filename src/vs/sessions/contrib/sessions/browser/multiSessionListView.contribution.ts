@@ -49,7 +49,7 @@ const REFRESH_INTERVAL_MS = 5_000;
 export class MultiSessionListViewPane extends ViewPane {
 
 	private panel: MultiSessionListPanel | undefined;
-	private refreshTimer: ReturnType<typeof setInterval> | undefined;
+	private refreshTimer: number | undefined;
 
 	constructor(
 		options: IViewPaneOptions,

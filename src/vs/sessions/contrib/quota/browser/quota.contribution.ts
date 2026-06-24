@@ -92,7 +92,7 @@ interface RemoteQuotaData {
 export class QuotaViewPane extends ViewPane {
 
 	private panel: QuotaPanel | undefined;
-	private refreshTimer: ReturnType<typeof setInterval> | undefined;
+	private refreshTimer: number | undefined;
 
 	constructor(
 		options: IViewPaneOptions,

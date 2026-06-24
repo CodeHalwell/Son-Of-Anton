@@ -48,7 +48,7 @@ interface RemoteProviderStatus {
 export class ConnectedAccountsViewPane extends ViewPane {
 
 	private panel: ConnectedAccountsPanel | undefined;
-	private refreshTimer: ReturnType<typeof setInterval> | undefined;
+	private refreshTimer: number | undefined;
 
 	constructor(
 		options: IViewPaneOptions,
