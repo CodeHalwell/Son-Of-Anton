@@ -65,6 +65,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Upload compiled output
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-out
+          path: out/
+          retention-days: 1
+
   # ---------------------------------------------------------------------------
   # Son of Anton-specific package CI. The compile job above covers the VS Code
   # monolithic build; this matrix covers the three first-party SoA packages
@@ -287,6 +294,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Download compiled output
+        uses: actions/download-artifact@v4
+        with:
+          name: compiled-out
+          path: out/
+
       - name: Run unit tests
         run: ./scripts/test.sh
 
@@ -308,6 +321,12 @@ jobs:
         run: npm ci
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download compiled output
+        uses: actions/download-artifact@v4
+        with:
+          name: compiled-out
+          path: out/
 
       - name: Run unit tests
         run: ./scripts/test.sh
