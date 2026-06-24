@@ -70,7 +70,7 @@ const ALLOWED_PATTERNS: { pattern: RegExp; reason: string }[] = [
 	{ pattern: /\btail\b/, reason: 'Reading file' },
 	{ pattern: /\bwc\b/, reason: 'Counting' },
 	{ pattern: /\bnpm\s+ci\b/, reason: 'Installing dependencies (locked)' },
-	{ pattern: /\bnpm\s+install\s*$/, reason: 'Installing dependencies (bare)' },
+	{ pattern: /^npm\s+install\s*$/, reason: 'Installing dependencies (bare)' },
 	{ pattern: /\bcargo\s+build\b/, reason: 'Building project' },
 	{ pattern: /\bnpm\s+run\s+build\b/, reason: 'Building project' },
 	{ pattern: /\bsemgrep\b/, reason: 'Security scanning' },
@@ -113,6 +113,11 @@ export const NETWORK_ALLOWLIST: string[] = [
 	'api.github.com',
 ];
 
+// Matches compound shell operators that chain commands. A command containing
+// any of these could hide a dangerous prefix behind a safe-looking suffix, so
+// the allowlist is skipped for such commands and they fall through to confirm.
+const COMPOUND_OPERATOR_PATTERN = /;|&&|\|\||\|/;
+
 /**
  * Classifies a shell command into a permission level.
  * Commands are checked against blocked, allowed, and confirm patterns.
@@ -135,10 +140,14 @@ export function classifyCommand(command: string): ClassificationResult {
 		}
 	}
 
-	// Check allowed patterns
-	for (const { pattern, reason } of ALLOWED_PATTERNS) {
-		if (pattern.test(trimmed)) {
-			return { level: 'allowed', reason, command: trimmed };
+	// Compound shell syntax (;  &&  ||  |) can hide dangerous prefixes behind
+	// an otherwise-allowed suffix. Skip the allowlist for compound commands so
+	// they fall through to confirm rather than being auto-permitted.
+	if (!COMPOUND_OPERATOR_PATTERN.test(trimmed)) {
+		for (const { pattern, reason } of ALLOWED_PATTERNS) {
+			if (pattern.test(trimmed)) {
+				return { level: 'allowed', reason, command: trimmed };
+			}
 		}
 	}
 
