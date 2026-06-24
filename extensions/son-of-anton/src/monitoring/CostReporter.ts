@@ -217,7 +217,7 @@ export class CostReporter {
 
 		for (const entry of this.entries) {
 			if (entry.timestamp >= cutoff) {
-				result[entry.model] += entry.cost;
+				result[entry.model] = (result[entry.model] ?? 0) + entry.cost;
 			}
 		}
 
@@ -270,7 +270,7 @@ export class CostReporter {
 		let totalCached = 0;
 
 		for (const entry of currentWeekEntries) {
-			costByModel[entry.model] += entry.cost;
+			costByModel[entry.model] = (costByModel[entry.model] ?? 0) + entry.cost;
 			costByAgent[entry.agentHandle] = (costByAgent[entry.agentHandle] ?? 0) + entry.cost;
 			totalInput += entry.inputTokens;
 			totalOutput += entry.outputTokens;
