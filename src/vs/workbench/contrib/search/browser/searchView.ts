@@ -477,7 +477,7 @@ export class SearchView extends ViewPane {
 		// Toggle query details button
 		const toggleQueryDetailsLabel = nls.localize('moreSearch', "Toggle Search Details");
 		this.toggleQueryDetailsButton = dom.append(this.queryDetails,
-			$('.more' + ThemeIcon.asCSSSelector(searchDetailsIcon), { tabindex: 0, role: 'button', 'aria-label': toggleQueryDetailsLabel }));
+			$('.more' + ThemeIcon.asCSSSelector(searchDetailsIcon), { tabindex: 0, role: 'button', 'aria-label': toggleQueryDetailsLabel, 'aria-expanded': 'false' }));
 		this._register(this.hoverService.setupManagedHover(getDefaultHoverDelegate('element'), this.toggleQueryDetailsButton, toggleQueryDetailsLabel));
 
 		this._register(dom.addDisposableListener(this.toggleQueryDetailsButton, dom.EventType.CLICK, e => {

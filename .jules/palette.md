@@ -25,3 +25,6 @@
 ## 2024-05-19 - Accessible interactive span elements
 **Learning:** Interactive `span` elements used as links or buttons without native keyboard focus need explicit attributes to be accessible. Simply adding an `onclick` handler is insufficient.
 **Action:** Always add `role="button"`, `tabindex="0"`, an appropriate `aria-label`, and `onkeydown` event handlers for the `Enter` and `Space` keys (with `e.preventDefault()`) to ensure the element can be navigated to and activated using only the keyboard.
+## 2024-05-18 - Missing initial aria-expanded on collapsable query details buttons
+**Learning:** Collapsable elements styled as role="button" (like toggle query details in SearchView and SearchEditor) update `aria-expanded` when toggled, but lack the initial `aria-expanded="false"` attribute on instantiation, breaking screen reader expectations on initial focus.
+**Action:** Always include initial ARIA state attributes (like `aria-expanded="false"`) when constructing collapsable role="button" UI components, not just when updating them dynamically.
