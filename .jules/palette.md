@@ -25,3 +25,6 @@
 ## 2024-05-19 - Accessible interactive span elements
 **Learning:** Interactive `span` elements used as links or buttons without native keyboard focus need explicit attributes to be accessible. Simply adding an `onclick` handler is insufficient.
 **Action:** Always add `role="button"`, `tabindex="0"`, an appropriate `aria-label`, and `onkeydown` event handlers for the `Enter` and `Space` keys (with `e.preventDefault()`) to ensure the element can be navigated to and activated using only the keyboard.
+## 2026-06-27 - Initialize aria-expanded dynamically instead of hardcoding false
+**Learning:** When constructing collapsable UI components with `role="button"` (such as toggles), always initialize them with the correct `aria-expanded` attribute during DOM creation. Do not blindly hardcode `'false'`; dynamically evaluate the initial state (e.g., `'aria-expanded': String(!!initialState)`) so screen readers announce the accurate state on load, rather than relying solely on later dynamic updates.
+**Action:** When adding `aria-expanded` to a component on creation, check if it has a dynamic initial state, and initialize it based on that state, e.g. `'aria-expanded': this.isExpanded ? 'true' : 'false'`.
