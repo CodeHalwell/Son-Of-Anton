@@ -873,9 +873,12 @@ export class Configuration {
 			for (const overrideIdentifier of overrideIdentifiersFromKey(key)) {
 				const fromKeys = this._defaultConfiguration.getKeysForOverrideIdentifier(overrideIdentifier);
 				const toKeys = defaults.getKeysForOverrideIdentifier(overrideIdentifier);
+				// ⚡ Bolt Optimization: Use Set.has instead of Array.indexOf to prevent O(N*M) lookup bottlenecks when computing key differences for large configuration models.
+				const fromKeysSet = new Set(fromKeys);
+				const toKeysSet = new Set(toKeys);
 				const keys = [
-					...toKeys.filter(key => fromKeys.indexOf(key) === -1),
-					...fromKeys.filter(key => toKeys.indexOf(key) === -1),
+					...toKeys.filter(key => !fromKeysSet.has(key)),
+					...fromKeys.filter(key => !toKeysSet.has(key)),
 					...fromKeys.filter(key => !objects.equals(this._defaultConfiguration.override(overrideIdentifier).getValue(key), defaults.override(overrideIdentifier).getValue(key)))
 				];
 				overrides.push([overrideIdentifier, keys]);
@@ -1277,17 +1280,21 @@ function compare(from: ConfigurationModel | undefined, to: ConfigurationModel | 
 }
 
 function compareConfigurationContents(to: { keys: string[]; contents: IStringDictionary<unknown> } | undefined, from: { keys: string[]; contents: IStringDictionary<unknown> } | undefined) {
+	// ⚡ Bolt Optimization: Use Set.has instead of Array.indexOf to prevent O(N*M) lookup bottlenecks when computing key differences for large configuration models.
+	const fromKeysSet = from ? new Set(from.keys) : new Set<string>();
+	const toKeysSet = to ? new Set(to.keys) : new Set<string>();
+
 	const added = to
-		? from ? to.keys.filter(key => from.keys.indexOf(key) === -1) : [...to.keys]
+		? from ? to.keys.filter(key => !fromKeysSet.has(key)) : [...to.keys]
 		: [];
 	const removed = from
-		? to ? from.keys.filter(key => to.keys.indexOf(key) === -1) : [...from.keys]
+		? to ? from.keys.filter(key => !toKeysSet.has(key)) : [...from.keys]
 		: [];
 	const updated: string[] = [];
 
 	if (to && from) {
 		for (const key of from.keys) {
-			if (to.keys.indexOf(key) !== -1) {
+			if (toKeysSet.has(key)) {
 				const value1 = getConfigurationValue(from.contents, key);
 				const value2 = getConfigurationValue(to.contents, key);
 				if (!objects.equals(value1, value2)) {
