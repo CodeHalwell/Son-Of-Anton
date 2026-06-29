@@ -39,3 +39,6 @@
 ## 2026-06-22 - Optimize array intersections in configuration models
 **Learning:** When comparing configuration models, checking if a key exists in an array using `Array.prototype.indexOf()` or `Array.prototype.includes()` inside an `Array.prototype.filter()` callback creates a nested iteration bottleneck with time complexity O(N*M).
 **Action:** Convert the target array to a `Set` and use `Set.has()` instead to reduce time complexity to O(N+M), significantly speeding up configuration comparisons for large numbers of settings.
+## 2024-05-18 - Avoid O(N*M) complexity in configuration key comparisons
+**Learning:** Checking for changes between configuration models can be extremely slow when comparing large arrays of configuration keys (e.g., in `compareAndUpdateDefaultConfiguration` and `compareConfigurationContents`) using `Array.prototype.filter()` combined with `Array.prototype.indexOf()`, resulting in O(N*M) time complexity.
+**Action:** Convert the target arrays to `Set` objects and use `Set.has()` instead of `Array.prototype.indexOf()` for O(1) lookups, significantly reducing the time complexity to O(N+M) and improving the performance of configuration updates.
