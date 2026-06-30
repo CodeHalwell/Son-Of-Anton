@@ -25,3 +25,6 @@
 ## 2024-05-19 - Accessible interactive span elements
 **Learning:** Interactive `span` elements used as links or buttons without native keyboard focus need explicit attributes to be accessible. Simply adding an `onclick` handler is insufficient.
 **Action:** Always add `role="button"`, `tabindex="0"`, an appropriate `aria-label`, and `onkeydown` event handlers for the `Enter` and `Space` keys (with `e.preventDefault()`) to ensure the element can be navigated to and activated using only the keyboard.
+## 2024-07-28 - Prevent Space Scroll on Splitview Pane Headers
+**Learning:** When using `Event.filter` on keydown events to handle the `Space` and `Enter` keys on custom components like `Pane` headers (which act as buttons for toggling expansion), failing to call `preventDefault()` causes the browser to execute its default action—scrolling down the page. This leads to a jarring user experience where toggling a pane jumps the view.
+**Action:** Always ensure the event handler triggered by `Space` or `Enter` for expanding/collapsing elements (or triggering buttons) calls `e.preventDefault()` (and usually `e.stopPropagation()`) before executing the action.
