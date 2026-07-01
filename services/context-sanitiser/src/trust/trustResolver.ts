@@ -127,3 +127,17 @@ const TRUST_ORDER: Record<TrustLevel, number> = {
 export function meetsTrustLevel(level: TrustLevel, minimum: TrustLevel): boolean {
 	return TRUST_ORDER[level] >= TRUST_ORDER[minimum];
 }
+
+/**
+ * Check whether a detection pattern applies to content at the given trust level.
+ *
+ * A pattern's `minTrustLevel` is the *most-trusted* level at which it still
+ * fires: it triggers for content at that trust level or lower (less trusted).
+ * Less-trusted content is therefore scanned by more patterns, while fully
+ * trusted content is handled separately and bypasses all patterns. For example
+ * a `medium` pattern fires for `medium`, `low`, and `untrusted` content, but not
+ * for `high` source code.
+ */
+export function appliesAtTrustLevel(contentTrust: TrustLevel, patternMinTrust: TrustLevel): boolean {
+	return TRUST_ORDER[contentTrust] <= TRUST_ORDER[patternMinTrust];
+}

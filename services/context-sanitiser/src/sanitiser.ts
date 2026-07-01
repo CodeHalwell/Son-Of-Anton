@@ -10,7 +10,7 @@ import type {
 	TrustLevel,
 } from './types';
 import { INJECTION_PATTERNS } from './patterns/injectionPatterns';
-import { resolveTrustLevel, meetsTrustLevel } from './trust/trustResolver';
+import { resolveTrustLevel, appliesAtTrustLevel } from './trust/trustResolver';
 
 /**
  * Context sanitiser for prompt injection defence.
@@ -53,8 +53,11 @@ export class ContextSanitiser {
 		// Run all applicable detection patterns
 		const lines = input.split('\n');
 		for (const pattern of INJECTION_PATTERNS) {
-			// Skip patterns that don't apply at this trust level
-			if (meetsTrustLevel(trustLevel, pattern.minTrustLevel)) {
+			// Skip patterns that don't apply at this trust level. Less-trusted
+			// content is scanned by more patterns; trusted content already
+			// returned above, so here we scan when the content is at or below
+			// the pattern's minimum trust level.
+			if (!appliesAtTrustLevel(trustLevel, pattern.minTrustLevel)) {
 				continue;
 			}
 
@@ -74,7 +77,7 @@ export class ContextSanitiser {
 
 		// Check for invisible Unicode characters across the full content
 		const unicodePattern = INJECTION_PATTERNS.find(p => p.id === 'invisible-unicode');
-		if (unicodePattern && !meetsTrustLevel(trustLevel, unicodePattern.minTrustLevel)) {
+		if (unicodePattern && appliesAtTrustLevel(trustLevel, unicodePattern.minTrustLevel)) {
 			// Remove invisible characters
 			const cleaned = content.replace(
 				/[\u200B\u200C\u200D\u200E\u200F\u202A-\u202E\u2060\u2061\u2062\u2063\u2064\uFEFF]/g,
