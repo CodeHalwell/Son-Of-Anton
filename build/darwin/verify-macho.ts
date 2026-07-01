@@ -22,7 +22,7 @@ const MACHO_X86_64_CPU_TYPE = new Set([
 ]);
 
 // Files to skip during architecture validation
-const FILES_TO_SKIP = [
+const FILES_TO_SKIP: string[] = [
 ];
 
 function isFileSkipped(file: string): boolean {
