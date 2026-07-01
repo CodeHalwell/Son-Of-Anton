@@ -264,38 +264,13 @@ function createServer(): McpServer {
 		}
 	);
 
-	server.tool(
-		'run_playwright_code',
-		'Execute arbitrary Playwright code for complex interactions. Code receives a `page` variable.',
-		{
-			code: z.string().describe('Playwright code to execute. Has access to `page` (Page) variable.'),
-			timeout: z.number().optional().describe('Execution timeout in ms (default: 30000, max: 60000)'),
-		},
-		async ({ code, timeout }) => {
-			try {
-				const page = await browserManager.ensureBrowser();
-				const timeoutMs = Math.min(timeout ?? 30000, 60000);
-
-				// Execute the code in a controlled context
-				const fn = new Function('page', `return (async () => { ${code} })();`);
-				const result = await Promise.race([
-					fn(page),
-					new Promise((_, reject) =>
-						setTimeout(() => reject(new Error('Execution timed out')), timeoutMs)
-					),
-				]);
-
-				return {
-					content: [{
-						type: 'text' as const,
-						text: JSON.stringify({ result: result ?? 'completed' }, null, 2),
-					}],
-				};
-			} catch (error) {
-				return errorResponse('run_playwright_code', error);
-			}
-		}
-	);
+	// The `run_playwright_code` tool was intentionally removed. It executed
+	// caller-supplied JavaScript via `new Function('page', code)` in the Node
+	// host process — an unauthenticated remote-code-execution primitive
+	// (e.g. `return process.mainModule.require('child_process').execSync(...)`)
+	// that also bypassed the navigation allowlist. Complex interactions must go
+	// through the structured tools (navigate, click, fill, screenshot,
+	// read_content, get_accessibility_tree, wait_for) instead.
 
 	server.tool(
 		'wait_for',
