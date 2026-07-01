@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
+import { randomBytes } from 'crypto';
 import { AgentManager } from 'son-of-anton-core/agents/AgentManager';
 import { MetricsTracker } from 'son-of-anton-core/agents/MetricsTracker';
 import { BackgroundTaskClient, BackgroundTask } from '../background/BackgroundTaskClient';
@@ -163,10 +164,13 @@ export class FleetDashboardPanel {
 			) / metrics.length * 100
 			: 0;
 
+		const nonce = getNonce();
+
 		return `<!DOCTYPE html>
 <html lang="en">
 <head>
 	<meta charset="UTF-8">
+	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
 	<title>Agent Fleet Dashboard</title>
 	<style>
@@ -292,13 +296,13 @@ export class FleetDashboardPanel {
 		${activeTasks.map(t => `
 			<tr>
 				<td>${escapeHtml(t.name)}</td>
-				<td><span class="status-badge status-${t.status}">${t.status}</span></td>
+				<td><span class="status-badge status-${escapeHtml(t.status)}">${escapeHtml(t.status)}</span></td>
 				<td>
 					<div class="progress-bar"><div class="progress-fill" style="width:${t.progress.percentage}%"></div></div>
 					<small>${escapeHtml(t.progress.message)}</small>
 				</td>
 				<td>${t.startedAt ? formatDuration(Date.now() - t.startedAt) : '-'}</td>
-				<td><button onclick="cancelTask('${t.id}')">Cancel</button></td>
+				<td><button data-action="cancel" data-taskid="${escapeHtml(t.id)}">Cancel</button></td>
 			</tr>
 		`).join('')}
 		</tbody>
@@ -312,10 +316,10 @@ export class FleetDashboardPanel {
 		${completedTasks.slice(0, 20).map(t => `
 			<tr>
 				<td>${escapeHtml(t.name)}</td>
-				<td><span class="status-badge status-${t.status}">${t.status}</span></td>
+				<td><span class="status-badge status-${escapeHtml(t.status)}">${escapeHtml(t.status)}</span></td>
 				<td>${t.startedAt && t.completedAt ? formatDuration(t.completedAt - t.startedAt) : '-'}</td>
 				<td>$${t.tokenUsage.estimatedCostUsd.toFixed(2)}</td>
-				<td><button class="btn-secondary" onclick="viewResults('${t.id}')">Results</button></td>
+				<td><button class="btn-secondary" data-action="results" data-taskid="${escapeHtml(t.id)}">Results</button></td>
 			</tr>
 		`).join('')}
 		</tbody>
@@ -339,14 +343,21 @@ export class FleetDashboardPanel {
 	</table>`}
 
 	<div style="margin-top: 16px; text-align: right;">
-		<button onclick="refresh()">Refresh</button>
+		<button data-action="refresh">Refresh</button>
 	</div>
 
-	<script>
+	<script nonce="${nonce}">
 		const vscode = acquireVsCodeApi();
-		function refresh() { vscode.postMessage({ command: 'refresh' }); }
-		function cancelTask(taskId) { vscode.postMessage({ command: 'cancelTask', taskId }); }
-		function viewResults(taskId) { vscode.postMessage({ command: 'viewResults', taskId }); }
+		// Strict CSP blocks inline handlers; delegate clicks from data-action buttons.
+		document.addEventListener('click', (e) => {
+			const btn = e.target.closest('[data-action]');
+			if (!btn) { return; }
+			switch (btn.dataset.action) {
+				case 'refresh': vscode.postMessage({ command: 'refresh' }); break;
+				case 'cancel': vscode.postMessage({ command: 'cancelTask', taskId: btn.dataset.taskid }); break;
+				case 'results': vscode.postMessage({ command: 'viewResults', taskId: btn.dataset.taskid }); break;
+			}
+		});
 	</script>
 </body>
 </html>`;
@@ -365,6 +376,11 @@ function escapeHtml(text: string): string {
 		.replace(/</g, '&lt;')
 		.replace(/>/g, '&gt;')
 		.replace(/"/g, '&quot;');
+}
+
+/** Cryptographically-random nonce for the webview's Content-Security-Policy. */
+function getNonce(): string {
+	return randomBytes(16).toString('hex');
 }
 
 function formatDuration(ms: number): string {
