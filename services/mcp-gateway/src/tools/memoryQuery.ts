@@ -37,6 +37,10 @@ export async function memoryQuery(
 	const queryParams: Record<string, unknown> = {};
 
 	if (params.type) {
+		const allowedTypes = ['Decision', 'Convention', 'Warning', 'Preference'];
+		if (!allowedTypes.includes(params.type)) {
+			throw new Error('Invalid memory type');
+		}
 		conditions.push(`e:${params.type}`);
 	}
 
@@ -89,19 +93,26 @@ export async function memoryRecord(
 		});
 	}
 
+	const allowedTypes = ['Decision', 'Convention', 'Warning', 'Preference'];
+	if (!allowedTypes.includes(params.type)) {
+		throw new Error('Invalid memory type');
+	}
+
 	const createQuery =
 		`CREATE (:${params.type} {` +
-		`id: '${id}', ` +
+		`id: $id, ` +
 		`content: $content, ` +
 		`source: $source, ` +
-		`createdAt: ${now}, ` +
-		`validFrom: ${now}, ` +
+		`createdAt: $now, ` +
+		`validFrom: $now, ` +
 		`validUntil: null, ` +
 		`supersededBy: null, ` +
 		`topics: $topics` +
 		`})`;
 
 	await db.query(createQuery, {
+		id,
+		now,
 		content: params.content,
 		source: params.source,
 		topics: params.topics,
