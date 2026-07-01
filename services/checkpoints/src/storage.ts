@@ -8,6 +8,29 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Checkpoint, SessionManifest } from './types.js';
 
+/**
+ * Validate that a caller-supplied value is safe to use as a single path
+ * segment (a session id or checkpoint id). Session and checkpoint ids arrive
+ * from untrusted HTTP request parameters and are joined onto the storage root;
+ * rejecting separators, parent references, empty values, and null bytes stops a
+ * request such as `DELETE /sessions/..%2f..%2fworkspace` from escaping the
+ * storage directory and deleting or overwriting arbitrary paths.
+ */
+function assertSafePathSegment(value: string, label: string): void {
+	if (
+		typeof value !== 'string' ||
+		value.length === 0 ||
+		value.length > 255 ||
+		value.includes('\0') ||
+		value.includes('/') ||
+		value.includes('\\') ||
+		value === '.' ||
+		value === '..'
+	) {
+		throw new Error(`Invalid ${label}`);
+	}
+}
+
 export class CheckpointStorage {
 	private readonly basePath: string;
 
@@ -22,11 +45,13 @@ export class CheckpointStorage {
 	}
 
 	async saveCheckpoint(sessionId: string, checkpoint: Checkpoint): Promise<void> {
+		assertSafePathSegment(checkpoint.id, 'checkpointId');
 		const filePath = path.join(this.sessionPath(sessionId), `${checkpoint.id}.json`);
 		await fs.writeFile(filePath, JSON.stringify(checkpoint, null, '\t'), 'utf-8');
 	}
 
 	async loadCheckpoint(sessionId: string, checkpointId: string): Promise<Checkpoint> {
+		assertSafePathSegment(checkpointId, 'checkpointId');
 		const filePath = path.join(this.sessionPath(sessionId), `${checkpointId}.json`);
 		const data = await fs.readFile(filePath, 'utf-8');
 		return JSON.parse(data) as Checkpoint;
@@ -109,6 +134,15 @@ export class CheckpointStorage {
 	}
 
 	private sessionPath(sessionId: string): string {
-		return path.join(this.basePath, sessionId);
+		assertSafePathSegment(sessionId, 'sessionId');
+		const target = path.join(this.basePath, sessionId);
+		// Defence in depth: even though the segment check above rejects
+		// traversal, confirm the resolved path stays within the storage root.
+		const base = path.resolve(this.basePath);
+		const resolved = path.resolve(target);
+		if (resolved !== base && !resolved.startsWith(base + path.sep)) {
+			throw new Error('Invalid sessionId');
+		}
+		return target;
 	}
 }

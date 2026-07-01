@@ -93,9 +93,19 @@ export class CheckpointManager {
 
 	async restoreCheckpoint(sessionId: string, checkpointId: string): Promise<void> {
 		const checkpoint = await this.storage.loadCheckpoint(sessionId, checkpointId);
+		const workspaceRootResolved = path.resolve(this.workspaceRoot);
+		const workspaceRootWithSep = workspaceRootResolved + path.sep;
 
 		for (const file of checkpoint.files) {
-			const absolutePath = path.resolve(this.workspaceRoot, file.path);
+			const absolutePath = path.resolve(workspaceRootResolved, file.path);
+
+			// Enforce that the resolved path stays within the workspace root to
+			// prevent a checkpoint whose file paths escape the workspace (via
+			// `..`) from writing or deleting files elsewhere on restore. This
+			// mirrors the containment check in createCheckpoint.
+			if (absolutePath !== workspaceRootResolved && !absolutePath.startsWith(workspaceRootWithSep)) {
+				continue;
+			}
 
 			if (file.exists && file.contentHash) {
 				const content = await this.storage.loadFileSnapshot(sessionId, file.contentHash);

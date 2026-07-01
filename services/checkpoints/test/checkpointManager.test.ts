@@ -195,4 +195,45 @@ describe('CheckpointManager', () => {
 		assert.strictEqual(snapFiles.length, 1);
 		assert.strictEqual(snapFiles[0], `${checkpoint.files[0].contentHash}.snap`);
 	});
+
+	test('rejects path traversal in session id so deleteSession cannot escape the storage root', async () => {
+		// A directory outside the storage root that a traversal id would target.
+		const victim = path.join(storagePath, '..', `victim-${crypto.randomUUID()}`);
+		await fs.mkdir(victim, { recursive: true });
+		await fs.writeFile(path.join(victim, 'keep.txt'), 'important', 'utf-8');
+		try {
+			const traversalId = `..${path.sep}${path.basename(victim)}`;
+			await assert.rejects(manager.deleteSession(traversalId), /Invalid sessionId/);
+			// The victim directory must be untouched.
+			await assert.doesNotReject(fs.access(path.join(victim, 'keep.txt')));
+		} finally {
+			await fs.rm(victim, { recursive: true, force: true });
+		}
+	});
+
+	test('restore does not write or delete files outside the workspace root', async () => {
+		// A file outside the workspace that a crafted checkpoint tries to remove.
+		const outside = path.join(workspaceRoot, '..', `outside-${crypto.randomUUID()}.txt`);
+		await fs.writeFile(outside, 'do not delete', 'utf-8');
+		try {
+			const escaping = `..${path.sep}${path.basename(outside)}`;
+			const checkpoint = {
+				id: `cp-${crypto.randomUUID()}`,
+				timestamp: Date.now(),
+				agentId: 'a',
+				taskId: 't',
+				action: 'x',
+				toolCall: 'y',
+				files: [{ path: escaping, contentHash: '', content: null, exists: false }],
+				metadata: {},
+			};
+			await storage.ensureSessionDir('session-x');
+			await storage.saveCheckpoint('session-x', checkpoint as unknown as Parameters<typeof storage.saveCheckpoint>[1]);
+			await manager.restoreCheckpoint('session-x', checkpoint.id);
+			// The out-of-workspace file must still exist.
+			await assert.doesNotReject(fs.access(outside), 'restore must not delete files outside the workspace');
+		} finally {
+			await fs.rm(outside, { force: true });
+		}
+	});
 });

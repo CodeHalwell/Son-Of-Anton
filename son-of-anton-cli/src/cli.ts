@@ -23,7 +23,20 @@ const program = new Command();
 program
 	.name('sota')
 	.description('Son of Anton CLI — same brain as the IDE, different body.')
-	.version('0.1.0');
+	.version('0.1.0')
+	// Workspace trust is OFF by default so that running `sota` inside a cloned
+	// or otherwise untrusted repository never executes that repository's
+	// `.son-of-anton/hooks.json` scripts. Pass `--trust` (or set
+	// SOTA_TRUST_WORKSPACE=1) only for repositories you control.
+	.option('--trust', 'Trust the current workspace, allowing its .son-of-anton/hooks.json scripts to run. Off by default.');
+
+// Translate the global `--trust` flag into the environment signal that
+// buildCliHost() reads, before any command action constructs the host.
+program.hook('preAction', (thisCommand: Command) => {
+	if (thisCommand.opts().trust) {
+		process.env.SOTA_TRUST_WORKSPACE = '1';
+	}
+});
 
 const outputOption = (): Option =>
 	new Option('--output <mode>', 'Output mode: text or json')

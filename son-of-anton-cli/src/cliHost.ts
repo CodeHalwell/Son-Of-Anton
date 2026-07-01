@@ -231,8 +231,32 @@ class FsFileStore implements FileStore {
 	}
 }
 
-export function buildCliHost(): CoreHost {
+/**
+ * Decide whether the current working directory should be treated as a trusted
+ * workspace. Trust gates execution of workspace-supplied
+ * `.son-of-anton/hooks.json` scripts (see {@link buildCliHost} consumers), so
+ * the CLI defaults to UNtrusted: `cd`-ing into a cloned/untrusted repository
+ * and running `sota` must never run that repository's hook scripts without an
+ * explicit decision from the user. Opt in by setting `SOTA_TRUST_WORKSPACE`
+ * to `1`/`true`/`yes` (a `--trust` flag can also pass an explicit value to
+ * {@link buildCliHost}).
+ */
+function isWorkspaceTrustedFromEnv(): boolean {
+	const value = (process.env.SOTA_TRUST_WORKSPACE ?? '').trim().toLowerCase();
+	return value === '1' || value === 'true' || value === 'yes';
+}
+
+export interface CliHostOptions {
+	/**
+	 * Explicit workspace-trust decision. When omitted, trust is resolved from
+	 * the `SOTA_TRUST_WORKSPACE` environment variable and defaults to `false`.
+	 */
+	readonly trustWorkspace?: boolean;
+}
+
+export function buildCliHost(options?: CliHostOptions): CoreHost {
 	const cwd = process.cwd();
+	const isTrusted = options?.trustWorkspace ?? isWorkspaceTrustedFromEnv();
 	return {
 		secrets: new FileSecretStore(),
 		config: new FileConfigStore(),
@@ -240,7 +264,7 @@ export function buildCliHost(): CoreHost {
 		notifier: new CliNotifier(),
 		workspace: {
 			folders: [{ fsPath: cwd, name: path.basename(cwd) }],
-			isTrusted: true,
+			isTrusted,
 		},
 		globalState: new FileMementoStore(),
 		projectContext: new CwdProjectContextProvider(cwd),
