@@ -334,6 +334,21 @@ function modelSupportsImages(model: ModelId): boolean {
 }
 
 /**
+ * OpenAI's reasoning models (the o1/o3/o4 and gpt-5 families) diverge from the
+ * classic chat-completion contract in two request-breaking ways: they reject
+ * the `max_tokens` field (requiring `max_completion_tokens` instead) and they
+ * reject the legacy `system` role (expecting `developer`). Detection matches
+ * the model *key* rather than the resolved id so it stays stable across id
+ * remaps, mirroring the Azure Foundry path's reasoning-family check. Classic
+ * chat models (gpt-4o, gpt-4.1, gpt-3.5, …) do not match and keep `max_tokens`.
+ *
+ * @internal exported for unit tests.
+ */
+export function isOpenAIReasoningModel(model: ModelId): boolean {
+	return /^(?:o1|o3|o4|gpt-5)/.test(model);
+}
+
+/**
  * Normalise an `LlmMessageContent` into a structured part array. Strings are
  * promoted to a single text part. Empty strings still produce a part so
  * downstream serialisers don't have to special-case the role.
@@ -1980,15 +1995,21 @@ export class LlmClient {
 
 		// OpenAI takes the system prompt as a leading system message rather
 		// than a top-level field. Build it once so we can prepend cleanly.
+		// Reasoning models (o1/o3/o4/gpt-5) reject the `system` role and expect
+		// `developer` instead.
+		const isReasoning = isOpenAIReasoningModel(options.model);
 		const systemMessage = {
-			role: 'system' as const,
+			role: isReasoning ? ('developer' as const) : ('system' as const),
 			content: options.systemPrompt ?? 'You are a helpful coding assistant.',
 		};
 
 		const supportsImages = modelSupportsImages(options.model);
+		const tokenLimit = options.maxTokens ?? 4096;
 		const body: Record<string, unknown> = {
 			model: modelId,
-			max_tokens: options.maxTokens ?? 4096,
+			// Reasoning models reject `max_tokens` and require
+			// `max_completion_tokens`; classic chat models require `max_tokens`.
+			...(isReasoning ? { max_completion_tokens: tokenLimit } : { max_tokens: tokenLimit }),
 			messages: [
 				systemMessage,
 				...options.messages.map(m => ({ role: m.role, content: serialiseOpenAIContent(m.content, supportsImages) })),
