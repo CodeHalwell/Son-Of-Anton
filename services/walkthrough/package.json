@@ -5,8 +5,10 @@
 	"main": "dist/src/index.js",
 	"scripts": {
 		"build": "tsc",
+		"postbuild": "node -e \"const{cpSync}=require('fs');cpSync('_shared','dist/_shared',{recursive:true,force:true})\"",
 		"start": "node dist/src/index.js",
 		"dev": "tsc --watch & node --watch dist/src/index.js",
+		"pretest": "npm run build",
 		"test": "node --test dist/src/test/**/*.test.js"
 	},
 	"dependencies": {
