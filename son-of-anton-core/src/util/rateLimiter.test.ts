@@ -60,4 +60,29 @@ describe('RateLimiter', () => {
 		await rl.acquire('default', fakeSleep);
 		assert.ok(slept >= 1, `expected to sleep waiting for a token, slept ${slept}`);
 	});
+
+	test('acquire rejects immediately when the signal is already aborted', async () => {
+		let now = 0;
+		const rl = new RateLimiter(1, 1000, () => now);
+		assert.equal(rl.tryAcquire(), true); // drain the only token
+		const ac = new AbortController();
+		ac.abort();
+		await assert.rejects(
+			() => rl.acquire('default', async () => { /* unused */ }, ac.signal),
+			(err: Error) => err.name === 'AbortError',
+		);
+	});
+
+	test('acquire rejects fast when the signal aborts while queued', async () => {
+		let now = 0;
+		const rl = new RateLimiter(1, 1000, () => now);
+		assert.equal(rl.tryAcquire(), true); // drain the only token
+		const ac = new AbortController();
+		// A sleep that never resolves on its own, so only the abort can end the
+		// wait — proves the queued request fails fast instead of waiting a refill.
+		const neverSleep = (): Promise<void> => new Promise<void>(() => { /* pending forever */ });
+		const acquiring = rl.acquire('default', neverSleep, ac.signal);
+		ac.abort();
+		await assert.rejects(acquiring, (err: Error) => err.name === 'AbortError');
+	});
 });

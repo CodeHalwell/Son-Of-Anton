@@ -69,12 +69,40 @@ export class RateLimiter {
 		return Math.ceil(deficit / refillRatePerMs);
 	}
 
-	/** Wait (if needed) until a token is free for `key`, then consume it. */
-	async acquire(key = 'default', sleep: SleepFn = defaultSleep): Promise<void> {
+	/**
+	 * Wait (if needed) until a token is free for `key`, then consume it. When a
+	 * `signal` is supplied the wait is interruptible: an abort while queued
+	 * rejects immediately (with the signal's reason / an `AbortError`) instead of
+	 * waiting out the token refill, so a cancelled request frees up fast.
+	 */
+	async acquire(key = 'default', sleep: SleepFn = defaultSleep, signal?: AbortSignal): Promise<void> {
+		signal?.throwIfAborted();
 		// Loop rather than sleep-once because concurrent acquirers on the same
 		// key may consume the token we were waiting for.
 		while (!this.tryAcquire(key)) {
-			await sleep(Math.max(1, this.msUntilNextToken(key)));
+			await this.waitOrAbort(Math.max(1, this.msUntilNextToken(key)), sleep, signal);
+			signal?.throwIfAborted();
 		}
+	}
+
+	/**
+	 * Sleep for `ms`, but reject as soon as `signal` aborts. Cleans up the abort
+	 * listener in all outcomes so no listener leaks across the retry loop.
+	 */
+	private waitOrAbort(ms: number, sleep: SleepFn, signal?: AbortSignal): Promise<void> {
+		if (!signal) {
+			return sleep(ms);
+		}
+		signal.throwIfAborted();
+		let onAbort: (() => void) | undefined;
+		return new Promise<void>((resolve, reject) => {
+			onAbort = () => reject(signal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
+			signal.addEventListener('abort', onAbort, { once: true });
+			sleep(ms).then(resolve, reject);
+		}).finally(() => {
+			if (onAbort) {
+				signal.removeEventListener('abort', onAbort);
+			}
+		});
 	}
 }

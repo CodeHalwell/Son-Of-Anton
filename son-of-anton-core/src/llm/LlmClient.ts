@@ -1597,7 +1597,9 @@ export class LlmClient {
 		// queued fails fast instead of waiting out the rate limit / occupying a
 		// concurrency permit it will never use.
 		throwIfAborted(options.signal);
-		await this.rateLimiter.acquire(options.agentHandle ?? 'default');
+		// Pass the signal so a cancellation while queued for a rate-limit token
+		// fails fast instead of waiting out the refill interval.
+		await this.rateLimiter.acquire(options.agentHandle ?? 'default', undefined, options.signal);
 		throwIfAborted(options.signal);
 		await this.requestSemaphore.acquire();
 		try {
