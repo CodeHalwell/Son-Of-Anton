@@ -137,13 +137,17 @@ suite('CommandClassifier', () => {
 			assert.notStrictEqual(result.level, 'allowed');
 		});
 
-		test('bare npm install without compound operators is still allowed', () => {
-			const result = classifyCommand('npm install');
+		test('a non-compound allowlisted command still resolves via the allowlist', () => {
+			// Control for the compound-operator guard: with no ; && || | present the
+			// allowlist path runs. `npm ci` is lockfile-faithful so it stays allowed,
+			// whereas bare `npm install` is gated to confirm (see the supply-chain
+			// gate test above).
+			const result = classifyCommand('npm ci');
 			assert.strictEqual(result.level, 'allowed');
 		});
 
 		test('npm install with a package name requires confirmation', () => {
-			// npm install <pkg> is a CONFIRM_PATTERNS entry, not ALLOWED.
+			// Every `npm install …` form is a CONFIRM_PATTERNS entry, not ALLOWED.
 			const result = classifyCommand('npm install lodash');
 			assert.strictEqual(result.level, 'confirm');
 		});
