@@ -9,9 +9,20 @@ import { createAgentStack, type AgentStack } from 'son-of-anton-core/dist/agents
 import type { CoreHost, Disposable } from 'son-of-anton-core/dist/host';
 import { LlmClient } from 'son-of-anton-core/dist/llm/LlmClient';
 import { McpClient, type McpClientDeps } from 'son-of-anton-core/dist/mcp/McpClient';
+import type { ApprovalGate } from './approval';
 import { HookRunner, hooksFilePath } from './persistence/HookRunner';
 import { instrumentToolExecutionContext } from './persistence/instrumentToolExecutionContext';
 import { buildCliToolExecutionContext } from './toolExecutionContext';
+
+/**
+ * Optional wiring for {@link buildCliAgentStack}. Callers that drive
+ * side-effecting agentic runs (`sota run`) pass an {@link ApprovalGate} so
+ * the tool-execution context prompts before writes / commands; read-only
+ * surfaces (`plan`, `acp`) omit it and inherit the prior no-gate behaviour.
+ */
+export interface CliAgentStackOptions {
+	readonly approvalGate?: ApprovalGate;
+}
 
 /**
  * Construct the canonical agent stack for the CLI. Mirrors the extension's
@@ -23,7 +34,7 @@ import { buildCliToolExecutionContext } from './toolExecutionContext';
  * in try/catch and surfaces "(Code graph not available)") so the stack still
  * produces a usable response.
  */
-export function buildCliAgentStack(host: CoreHost): { stack: AgentStack; llm: LlmClient; agentManager: AgentManager; mcpClient: McpClient; hookRunner?: HookRunner; dispose: () => void } {
+export function buildCliAgentStack(host: CoreHost, options?: CliAgentStackOptions): { stack: AgentStack; llm: LlmClient; agentManager: AgentManager; mcpClient: McpClient; hookRunner?: HookRunner; dispose: () => void } {
 	const llm = new LlmClient(host.secrets, host.config);
 
 	// MCP deps wired to "no servers, no live updates". The CLI doesn't
@@ -42,7 +53,7 @@ export function buildCliAgentStack(host: CoreHost): { stack: AgentStack; llm: Ll
 	// without a workspace (rare — mostly happens in tests) skip the context
 	// and fall back to the legacy diff-parse path.
 	const workspaceRoot = host.workspace.folders[0]?.fsPath;
-	const baseToolExecutionContext = workspaceRoot ? buildCliToolExecutionContext(workspaceRoot, host) : undefined;
+	const baseToolExecutionContext = workspaceRoot ? buildCliToolExecutionContext(workspaceRoot, host, options?.approvalGate) : undefined;
 	// Wrap the tool execution context with the hooks runtime when the workspace
 	// is trusted AND `.son-of-anton/hooks.json` exists. We skip instantiation
 	// (rather than relying solely on the runner's no-op behaviour for empty

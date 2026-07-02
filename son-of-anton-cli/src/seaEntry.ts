@@ -251,26 +251,18 @@ function installSeaPromptShim(): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve the version pinned in `son-of-anton-cli/package.json`. esbuild
- * inlines the JSON import at bundle time, so the version is baked in at
- * build time rather than read from disk at runtime — there's no real
- * package.json next to the SEA executable.
+ * Resolve the version pinned in `son-of-anton-cli/package.json`. The value is
+ * baked in at build time via {@link SOTA_VERSION} (esbuild inlines the JSON,
+ * so there is no real package.json next to the SEA executable to read at
+ * runtime). Sharing the constant with `cli.ts` / `update.ts` keeps the vendor
+ * cache path, the reported `--version`, and the self-update check in lockstep.
  *
- * We resolve lazily on first use so initialisation order with the
- * dispatcher above doesn't matter.
+ * `require`d rather than `import`ed at the top so it participates in the same
+ * lazy CommonJS init as the rest of this shim.
  */
-let cachedSotaVersion: string | undefined;
 function getSotaVersion(): string {
-	if (cachedSotaVersion === undefined) {
-		try {
-			// eslint-disable-next-line @typescript-eslint/no-require-imports
-			const pj = require('../package.json') as { version?: string };
-			cachedSotaVersion = pj?.version ?? '0.0.0-dev';
-		} catch {
-			cachedSotaVersion = '0.0.0-dev';
-		}
-	}
-	return cachedSotaVersion;
+	// eslint-disable-next-line @typescript-eslint/no-require-imports
+	return (require('./version') as typeof import('./version')).SOTA_VERSION;
 }
 
 function vendorCacheRoot(): string {

@@ -4,7 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 import type { AgentHandle } from 'son-of-anton-core/dist/agents/types';
+import type { ModelId } from 'son-of-anton-core/dist/llm/LlmClient';
 import { buildCliAgentStack } from '../agentStackBuilder';
+import { createApprovalGate, resolveApprovalMode } from '../approval';
 import { bootstrapCredentials } from '../auth/bootstrap';
 import { CliCancellation } from '../cancellation';
 import { buildCliHost } from '../cliHost';
@@ -21,6 +23,10 @@ interface RunOptions {
 	output: 'text' | 'json';
 	quiet?: boolean;
 	maxTurns?: string;
+	/** `--yes` — auto-approve every write/command (headless use). */
+	yes?: boolean;
+	/** `--auto-approve` — alias for `--yes`. */
+	autoApprove?: boolean;
 }
 
 /**
@@ -80,7 +86,17 @@ export async function runSpecialist(handle: string, prompt: string, opts: RunOpt
 	const handleId = normaliseHandle(handle);
 	const { renderer, getCapturedText } = makeRunRenderer(opts);
 
-	const built = buildCliAgentStack(host);
+	// Resolve the tool-approval policy for this run. `--yes` / `--auto-approve`
+	// approves every write/command up front (headless use); otherwise we prompt
+	// y/N on a TTY and DENY by default when there is nothing to prompt on (piped
+	// / non-interactive), so an unattended `sota run` can never silently mutate
+	// the workspace. The gate is enforced inside the ToolExecutionContext (see
+	// toolExecutionContext.ts), covering write_file / edit_file / run_command.
+	const autoApprove = !!(opts.yes || opts.autoApprove);
+	const approvalMode = resolveApprovalMode({ autoApprove, isTty: !!process.stdin.isTTY });
+	const approvalGate = createApprovalGate(approvalMode);
+
+	const built = buildCliAgentStack(host, { approvalGate });
 	const specialist = built.stack.specialists.get(handleId);
 	if (!specialist) {
 		const known = [...built.stack.specialists.keys()].map(h => `@${h}`).join(', ');
@@ -92,24 +108,53 @@ export async function runSpecialist(handle: string, prompt: string, opts: RunOpt
 		process.exit(SOTA_EXIT_CODES.HARD_FAIL);
 	}
 
+	const modelOverride: ModelId | undefined = opts.model ? (opts.model as ModelId) : undefined;
+
 	const cancellation = new CliCancellation();
 	const onSigint = (): void => cancellation.cancel();
 	process.once('SIGINT', onSigint);
 
 	try {
-		await specialist.runChatTurn(
+		// Drive the ACTUAL agentic path. `runAgenticTurn` runs the native
+		// tool-use loop (read_file / write_file / edit_file / run_command /
+		// search_workspace / glob) against the approval-gated
+		// ToolExecutionContext, so `sota run @anton-code "fix the bug"`
+		// genuinely edits files and runs commands instead of only streaming
+		// prose. It falls back to a single-shot turn automatically when no
+		// workspace tool context is available (e.g. no workspace root).
+		const finalText = await specialist.runAgenticTurn(
 			mergedPrompt,
-			(token) => renderer.emit({ type: 'token', text: token }),
+			(event) => {
+				if (event.type === 'token') {
+					renderer.emit({ type: 'token', text: event.token });
+					return;
+				}
+				// A tool call — surface start/end annotations so a watching user
+				// (or a JSON consumer) can see which tools the agent invoked.
+				if (event.status === 'running') {
+					renderer.emit({ type: 'tool_call_start', name: event.name, input: event.input });
+				} else {
+					renderer.emit({
+						type: 'tool_call_end',
+						name: event.name,
+						output: event.output,
+						error: event.status === 'error' ? (event.output ?? 'tool failed') : undefined,
+					});
+				}
+			},
 			cancellation,
+			modelOverride ? { modelOverride } : undefined,
 		);
 		renderer.emit({ type: 'done' });
 
 		if (opts.quiet && opts.output === 'text') {
-			// Quiet mode: the final reply lands on stdout exactly once, with a
-			// trailing newline so the shell substitution stays clean.
-			const captured = getCapturedText();
-			if (captured) {
-				process.stdout.write(captured.trim() + '\n');
+			// Quiet mode: emit only the final assistant text (the post-tool
+			// summary) so `$(sota run @anton-code "...")` stays clean. Prefer the
+			// loop's return value over captured tokens, which would also include
+			// intermediate tool-planning turns.
+			const finalOut = finalText.trim() || getCapturedText().trim();
+			if (finalOut) {
+				process.stdout.write(finalOut + '\n');
 			}
 		}
 	} catch (err) {
@@ -123,14 +168,10 @@ export async function runSpecialist(handle: string, prompt: string, opts: RunOpt
 		built.dispose();
 	}
 
-	// Advisory acknowledgements for flags the agent runtime does not honour
-	// directly yet. Routed to stderr so they don't pollute --output json.
-	if (opts.output === 'text' && !opts.quiet) {
-		if (opts.model) {
-			process.stderr.write(`note: --model "${opts.model}" not yet honoured by specialist runs (uses ${specialist.defaultModel}).\n`);
-		}
-		if (opts.maxTurns) {
-			process.stderr.write(`note: --max-turns "${opts.maxTurns}" is advisory; the specialist runs a single turn today.\n`);
-		}
+	// `--model` now maps to the loop's per-turn override above. `--max-turns`
+	// stays advisory: the agentic loop uses a fixed internal iteration cap.
+	// Routed to stderr so it never pollutes --output json.
+	if (opts.output === 'text' && !opts.quiet && opts.maxTurns) {
+		process.stderr.write(`note: --max-turns "${opts.maxTurns}" is advisory; the agent loop uses a fixed iteration cap.\n`);
 	}
 }

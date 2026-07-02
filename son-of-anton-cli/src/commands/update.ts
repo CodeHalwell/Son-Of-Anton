@@ -42,6 +42,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { SOTA_EXIT_CODES } from '../headless';
+import { SOTA_VERSION, compareSemver, isStrictlyGreater, tagToVersion } from '../version';
 
 interface UpdateOptions {
 	check?: boolean;
@@ -80,44 +81,6 @@ interface GitHubRelease {
 	assets: GitHubReleaseAsset[];
 }
 
-/**
- * Lazy-load the package version from the bundled package.json. Reading at
- * call-time (rather than top-level) keeps the import side-effect-free and
- * makes the function easy to test.
- */
-function readCurrentVersion(): string {
-	const pkgPath = path.join(__dirname, '..', '..', 'package.json');
-	try {
-		const raw = fs.readFileSync(pkgPath, 'utf8');
-		const parsed = JSON.parse(raw) as { version?: string };
-		return parsed.version ?? '0.0.0';
-	} catch {
-		return '0.0.0';
-	}
-}
-
-/**
- * Compare two semver-ish version strings. Treats missing parts as 0; ignores
- * pre-release suffixes (anything after `-`). Sufficient for "is the new one
- * strictly greater" — full semver comparison would pull in another dep.
- */
-function isStrictlyGreater(candidate: string, base: string): boolean {
-	const parse = (v: string): number[] => v.split('-')[0].split('.').map((p) => parseInt(p, 10) || 0);
-	const a = parse(candidate);
-	const b = parse(base);
-	for (let i = 0; i < 3; i++) {
-		const av = a[i] ?? 0;
-		const bv = b[i] ?? 0;
-		if (av > bv) {
-			return true;
-		}
-		if (av < bv) {
-			return false;
-		}
-	}
-	return false;
-}
-
 async function fetchLatestVersion(): Promise<string | null> {
 	try {
 		const res = await fetch(REGISTRY_URL, {
@@ -149,7 +112,7 @@ export async function maybeNagAboutUpdate(): Promise<void> {
 		if (!latest) {
 			return;
 		}
-		const current = readCurrentVersion();
+		const current = SOTA_VERSION;
 		writeCache({ checkedAt: Date.now(), latest });
 		if (isStrictlyGreater(latest, current)) {
 			const cmd = isRunningUnderSea() ? 'sota update' : 'npm i -g son-of-anton-cli@latest';
@@ -227,7 +190,7 @@ export async function runUpdate(opts: UpdateOptions): Promise<void> {
  * intact for contributors running `node dist/cli.js`.
  */
 async function runNpmUpdateCheck(opts: UpdateOptions): Promise<void> {
-	const current = readCurrentVersion();
+	const current = SOTA_VERSION;
 	const latest = await fetchLatestVersion();
 
 	if (!latest) {
@@ -321,18 +284,17 @@ async function fetchLatestSeaRelease(): Promise<GitHubRelease | null> {
 			return null;
 		}
 		const body = (await res.json()) as GitHubRelease[];
+		// Sort by semver descending so the newest release is `candidates[0]`.
+		// A lexicographic sort on the raw tag would rank `sota-v0.9.0` above
+		// `sota-v0.10.0` (because the character '9' > '1'), silently offering
+		// the older release as the "latest".
 		const candidates = body
 			.filter((r) => !r.draft && r.tag_name?.startsWith('sota-v'))
-			.sort((a, b) => (a.tag_name < b.tag_name ? 1 : -1));
+			.sort((a, b) => compareSemver(tagToVersion(b.tag_name), tagToVersion(a.tag_name)));
 		return candidates[0] ?? null;
 	} catch {
 		return null;
 	}
-}
-
-function tagToVersion(tag: string): string {
-	// `sota-v0.1.0` → `0.1.0`. Tolerates the bare version too (just in case).
-	return tag.replace(/^sota-v/, '');
 }
 
 /**
@@ -455,7 +417,7 @@ function swapBinary(runningPath: string, newBinaryPath: string): void {
  * `--dry-run` short-circuits after step 3 with a plan.
  */
 async function runSeaSelfUpdate(opts: UpdateOptions): Promise<void> {
-	const current = readCurrentVersion();
+	const current = SOTA_VERSION;
 	const pick = pickSeaArtefact();
 	if (!pick) {
 		emitError(opts, `Unsupported platform for self-update: ${process.platform}/${process.arch}`);

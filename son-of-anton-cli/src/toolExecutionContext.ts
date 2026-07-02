@@ -8,6 +8,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import type { CoreHost } from 'son-of-anton-core/dist/host';
 import type { ToolExecutionContext } from 'son-of-anton-core/dist/tools/types';
+import type { ApprovalGate } from './approval';
 
 const SEARCH_FILE_BYTE_CAP = 256 * 1024;
 const RUN_COMMAND_OUTPUT_CAP = 256 * 1024;
@@ -18,10 +19,18 @@ const SEARCH_DEFAULT_IGNORES: ReadonlyArray<string> = [
 
 /**
  * Build a `ToolExecutionContext` for the CLI host backed by Node's
- * `fs/promises` and `child_process.spawn`. The IDE constructs a parallel
- * context that gates each call through its workspace-trust + auto-approval
- * flow; the CLI's surface gates approvals at the top of the chat session
- * instead, so each tool call here runs immediately when invoked.
+ * `fs/promises` and `child_process.spawn`.
+ *
+ * Approval: when an `approvalGate` is supplied, the two side-effecting
+ * operations — `writeFile` (backing the `write_file` / `edit_file` tools) and
+ * `runCommand` (backing `run_command`) — are gated through it *before* they
+ * touch disk or spawn a process. These are exactly the tools the core marks
+ * `riskLevel: 'requiresApproval'`. A denied request is surfaced back to the
+ * model as a non-fatal `{ written: false }` / `{ ran: false }` result (with
+ * the gate's reason), so the tool loop can adapt rather than crash. Read-only
+ * operations (`readFile`, `readDir`, `searchTextInWorkspace`) are never gated.
+ * Callers that omit the gate keep the prior behaviour — every call runs
+ * immediately.
  *
  * Path safety: every method validates that the supplied workspace-relative
  * path stays inside `workspaceRoot`. `..` segments and absolute paths are
@@ -33,7 +42,7 @@ const SEARCH_DEFAULT_IGNORES: ReadonlyArray<string> = [
  * sandbox-mode check) can read settings at execute time. Callers without a
  * host see the safest defaults — the `run_command` sandbox stays in `'safe'`.
  */
-export function buildCliToolExecutionContext(workspaceRoot: string, host?: CoreHost): ToolExecutionContext {
+export function buildCliToolExecutionContext(workspaceRoot: string, host?: CoreHost, approvalGate?: ApprovalGate): ToolExecutionContext {
 	const root = path.resolve(workspaceRoot);
 
 	const resolveRelative = (relPath: string): string => {
@@ -74,6 +83,12 @@ export function buildCliToolExecutionContext(workspaceRoot: string, host?: CoreH
 
 		writeFile: async (relPath, content) => {
 			const abs = resolveRelative(relPath);
+			if (approvalGate) {
+				const decision = await approvalGate({ kind: 'write', detail: relPath });
+				if (!decision.approved) {
+					return { written: false, reason: decision.reason ?? 'declined by user' };
+				}
+			}
 			let preImage: string | undefined;
 			let existed = false;
 			try {
@@ -89,6 +104,13 @@ export function buildCliToolExecutionContext(workspaceRoot: string, host?: CoreH
 
 		runCommand: async (command, args, opts) => {
 			const cwd = opts?.cwd ? resolveRelative(opts.cwd) : root;
+			if (approvalGate) {
+				const detail = [command, ...args].join(' ');
+				const decision = await approvalGate({ kind: 'command', detail });
+				if (!decision.approved) {
+					return { ran: false, reason: decision.reason ?? 'declined by user' };
+				}
+			}
 			const timeoutMs = Math.max(100, Math.min(opts?.timeoutMs ?? 30_000, 120_000));
 			return await new Promise(resolve => {
 				const child = spawn(command, [...args], {
