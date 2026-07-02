@@ -301,10 +301,6 @@
 				"title": "Anton: Show Harness Stats"
 			},
 			{
-				"command": "sota.showSandbox",
-				"title": "Anton: Show Sandbox Terminal"
-			},
-			{
 				"command": "sota.triggerPreCommitHook",
 				"title": "Anton: Trigger Pre-Commit Hook"
 			},
