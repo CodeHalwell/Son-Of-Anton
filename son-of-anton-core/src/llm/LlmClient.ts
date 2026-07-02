@@ -8,6 +8,8 @@ import type { AwsCredentialIdentity, AwsCredentialIdentityProvider } from '@smit
 import type { ConfigStore, SecretStore } from '../host';
 import type { PromptCacheOptimizer } from './PromptCacheOptimizer';
 import type { ClaudeCodeMessage } from './claudeCodeRunner';
+import { Semaphore } from '../util/semaphore';
+import { RateLimiter } from '../util/rateLimiter';
 
 /**
  * Minimal sink for per-request cost telemetry. The extension implements this
@@ -890,6 +892,38 @@ export class LlmClient {
 	}
 
 	/**
+	 * Global in-flight cap on provider requests. Enforces the documented
+	 * "max concurrent API requests" limit across every caller (orchestrator
+	 * fan-out, chat, specialists, CLI) since they all funnel through
+	 * `streamRequest`. Lazily built from `sota.limits.maxConcurrentRequests`
+	 * (default 5); invalid values fall back to the default.
+	 */
+	private _requestSemaphore?: Semaphore;
+	private get requestSemaphore(): Semaphore {
+		if (!this._requestSemaphore) {
+			const raw = this.config.get<number>('limits.maxConcurrentRequests', 5);
+			const max = typeof raw === 'number' && Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 5;
+			this._requestSemaphore = new Semaphore(max);
+		}
+		return this._requestSemaphore;
+	}
+
+	/**
+	 * Per-agent request-rate cap. Enforces the documented "max requests per
+	 * minute per agent" limit, keyed on the agent handle. Lazily built from
+	 * `sota.limits.requestsPerMinute` (default 30); invalid values fall back.
+	 */
+	private _rateLimiter?: RateLimiter;
+	private get rateLimiter(): RateLimiter {
+		if (!this._rateLimiter) {
+			const raw = this.config.get<number>('limits.requestsPerMinute', 30);
+			const perMinute = typeof raw === 'number' && Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 30;
+			this._rateLimiter = new RateLimiter(perMinute, 60_000);
+		}
+		return this._rateLimiter;
+	}
+
+	/**
 	 * Forward a successful stream completion to the optional CostReporter.
 	 * Only fires when an `agentHandle` was provided on the request — agent
 	 * stack work that records via `MetricsTracker` deliberately omits the
@@ -1544,11 +1578,24 @@ export class LlmClient {
 	 * Returns an async iterable of normalized stream events.
 	 */
 	async *streamRequest(options: LlmRequestOptions): AsyncGenerator<LlmStreamEvent> {
-		// Intercept the provider's stream so we can record per-completion
-		// cache metrics in one place. The optimizer is set lazily via
-		// `setCacheOptimizer`; when undefined the interceptor degrades to
-		// a pure passthrough.
-		yield* this.recordOnComplete(this.dispatchProviderStream(options), options);
+		// Enforce the runtime rate limits before touching a provider:
+		// (1) per-agent requests-per-minute (waits for a token), then
+		// (2) a global in-flight concurrency permit held for the whole stream.
+		// Ordering matters — we wait out the rate limit BEFORE occupying a
+		// concurrency slot. The permit is released in `finally`, which also
+		// runs if the consumer abandons the generator early (for-await break
+		// triggers the generator's return()).
+		await this.rateLimiter.acquire(options.agentHandle ?? 'default');
+		await this.requestSemaphore.acquire();
+		try {
+			// Intercept the provider's stream so we can record per-completion
+			// cache metrics in one place. The optimizer is set lazily via
+			// `setCacheOptimizer`; when undefined the interceptor degrades to
+			// a pure passthrough.
+			yield* this.recordOnComplete(this.dispatchProviderStream(options), options);
+		} finally {
+			this.requestSemaphore.release();
+		}
 	}
 
 	private async *dispatchProviderStream(options: LlmRequestOptions): AsyncGenerator<LlmStreamEvent> {

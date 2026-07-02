@@ -6,7 +6,7 @@
 import type { ChatRequestLike, ChatContextLike, ChatStreamLike, CancellationLike } from '../chatStream';
 import type { ConfigStore, ProjectContextProvider } from '../host';
 import { getVoice } from '../chat/personas';
-import { LlmClient, ModelId, type LlmContentPart, type LlmMessage, type SystemPromptPart } from '../llm/LlmClient';
+import { LlmClient, ModelId, type LlmContentPart, type LlmMessage, type LlmStreamComplete, type SystemPromptPart } from '../llm/LlmClient';
 import { detectUncertainty, UNCERTAINTY_ESCALATION_THRESHOLD } from '../llm/confidence';
 import { ModelRouter } from '../llm/ModelRouter';
 import { McpClient, McpToolResult } from '../mcp/McpClient';
@@ -569,51 +569,42 @@ export abstract class BaseAgent {
 			attributes: isEscalation ? { model, escalation: true } : { model },
 		});
 
-		if (onToken) {
-			let text = '';
-			for await (const event of this.llmClient.streamRequest({
-				model,
-				systemPrompt,
-				messages: [{ role: 'user', content: userMessage }],
-			})) {
-				if (event.type === 'token') {
-					text += event.token;
-					onToken(event.token);
-				} else if (event.type === 'error') {
-					throw new Error(event.error);
-				}
-			}
-
-			span.endTime = Date.now();
-
-			const usage = this.llmClient.getTokenUsage();
-			const tokenUsage: TokenUsage = {
-				inputTokens: usage.input,
-				outputTokens: usage.output,
-				cachedTokens: usage.cached,
-				naiveInputTokens: usage.input + usage.cached,
-			};
-
-			span.attributes['inputTokens'] = tokenUsage.inputTokens;
-			span.attributes['outputTokens'] = tokenUsage.outputTokens;
-
-			return { text, tokenUsage };
-		}
-
-		const text = await this.llmClient.request({
+		// Consume the stream once, capturing the per-call usage from the
+		// `complete` event. This must NOT read llmClient.getTokenUsage(), which
+		// returns the client's *cumulative* totals — reading those here counted
+		// every prior call's tokens against this one (super-linear inflation),
+		// and under the orchestrator's concurrent fan-out the shared counter
+		// makes per-subtask usage meaningless. `onToken` is optional so the
+		// streaming and non-streaming callers share one accurate path.
+		let text = '';
+		let completion: LlmStreamComplete | undefined;
+		for await (const event of this.llmClient.streamRequest({
 			model,
 			systemPrompt,
 			messages: [{ role: 'user', content: userMessage }],
-		});
+		})) {
+			if (event.type === 'token') {
+				text += event.token;
+				if (onToken) {
+					onToken(event.token);
+				}
+			} else if (event.type === 'complete') {
+				completion = event;
+			} else if (event.type === 'error') {
+				throw new Error(event.error);
+			}
+		}
 
 		span.endTime = Date.now();
 
-		const usage = this.llmClient.getTokenUsage();
+		const inputTokens = completion?.inputTokens ?? 0;
+		const outputTokens = completion?.outputTokens ?? 0;
+		const cachedTokens = completion?.cachedTokens ?? 0;
 		const tokenUsage: TokenUsage = {
-			inputTokens: usage.input,
-			outputTokens: usage.output,
-			cachedTokens: usage.cached,
-			naiveInputTokens: usage.input + usage.cached,
+			inputTokens,
+			outputTokens,
+			cachedTokens,
+			naiveInputTokens: inputTokens + cachedTokens,
 		};
 
 		span.attributes['inputTokens'] = tokenUsage.inputTokens;
@@ -898,6 +889,7 @@ export abstract class BaseAgent {
 			});
 
 			let text = '';
+			let completion: LlmStreamComplete | undefined;
 			const pendingCalls: Array<{ id: string; name: string; input: Record<string, unknown> }> = [];
 
 			for await (const event of this.llmClient.streamRequest({
@@ -919,6 +911,8 @@ export abstract class BaseAgent {
 					args.onToken?.(event.token);
 				} else if (event.type === 'tool-call') {
 					pendingCalls.push({ id: event.id, name: event.name, input: event.input });
+				} else if (event.type === 'complete') {
+					completion = event;
 				} else if (event.type === 'error') {
 					span.endTime = Date.now();
 					throw new Error(event.error);
@@ -928,15 +922,21 @@ export abstract class BaseAgent {
 			span.endTime = Date.now();
 			lastText = text;
 
-			const usage = this.llmClient.getTokenUsage();
-			aggregateUsage.inputTokens += usage.input;
-			aggregateUsage.outputTokens += usage.output;
-			aggregateUsage.cachedTokens += usage.cached;
-			// `naiveInputTokens` is the worst-case input cost — what we'd
-			// have paid if nothing were cached. Accumulating
-			// `input + cached` per loop iteration keeps the aggregate
-			// consistent with the non-tool-loop callers above.
-			aggregateUsage.naiveInputTokens += usage.input + usage.cached;
+			// Accumulate THIS iteration's usage from its `complete` event, not
+			// llmClient.getTokenUsage() (cumulative client totals) — the old
+			// code re-added every prior call's tokens each iteration, inflating
+			// the aggregate super-linearly and mixing in other concurrent
+			// agents' usage off the shared counter.
+			const iterInput = completion?.inputTokens ?? 0;
+			const iterOutput = completion?.outputTokens ?? 0;
+			const iterCached = completion?.cachedTokens ?? 0;
+			aggregateUsage.inputTokens += iterInput;
+			aggregateUsage.outputTokens += iterOutput;
+			aggregateUsage.cachedTokens += iterCached;
+			// `naiveInputTokens` is the worst-case input cost — what we'd have
+			// paid if nothing were cached (input + cache-read), kept consistent
+			// with the non-tool-loop callers above.
+			aggregateUsage.naiveInputTokens += iterInput + iterCached;
 
 			if (pendingCalls.length === 0) {
 				// Natural turn-end: model is done with tools. Return.
