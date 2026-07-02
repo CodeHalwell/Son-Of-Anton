@@ -210,7 +210,7 @@ pub async fn embed_pending(
         let vectors = embedder.embed(&texts).await?;
 
         let mut guard = store.lock();
-        for ((sid, _), vec) in chunk.iter().zip(vectors.into_iter()) {
+        for ((sid, _), vec) in chunk.iter().zip(vectors) {
             guard.upsert_embedding(*sid, &vec)?;
             written += 1;
         }

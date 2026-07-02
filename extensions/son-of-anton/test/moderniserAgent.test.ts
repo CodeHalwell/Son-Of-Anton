@@ -5,10 +5,13 @@
 import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
+import { fileURLToPath } from 'url';
+
+const _dir = path.dirname(fileURLToPath(import.meta.url));
 
 suite('ModerniserAgent', () => {
 	suite('Agent definition file', () => {
-		const agentDefPath = path.join(__dirname, '..', '..', '..', '.son-of-anton', 'agents', 'moderniser.agent.md');
+		const agentDefPath = path.join(_dir, '..', '..', '..', '.son-of-anton', 'agents', 'moderniser.agent.md');
 
 		test('definition file exists', () => {
 			assert.ok(fs.existsSync(agentDefPath), `Expected agent definition at ${agentDefPath}`);
@@ -45,7 +48,7 @@ suite('ModerniserAgent', () => {
 
 		suiteSetup(() => {
 			const raw = fs.readFileSync(
-				path.join(__dirname, '..', 'package.json'),
+				path.join(_dir, '..', 'package.json'),
 				'utf-8',
 			);
 			packageJson = JSON.parse(raw);

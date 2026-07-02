@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Son of Anton Contributors. All rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
@@ -37,7 +37,7 @@
 	gap: 6px;
 }
 
-/* ── Provider row ── */
+/* --Provider row -- */
 
 .sota-accounts-panel-row {
 	display: flex;
@@ -82,7 +82,7 @@
 	color: var(--vscode-foreground);
 }
 
-/* ── Meta row (status, expiry, quota) ── */
+/* --Meta row (status, expiry, quota) -- */
 
 .sota-accounts-panel-row-meta {
 	display: flex;
@@ -118,7 +118,7 @@
 	color: var(--vscode-badge-foreground);
 }
 
-/* ── Action button ── */
+/* --Action button -- */
 
 .sota-accounts-panel-row-action {
 	display: flex;

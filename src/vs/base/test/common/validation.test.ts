@@ -78,10 +78,12 @@ suite('Validation', () => {
 
 		const r1 = validator.validate({ a: 123 });
 		assert.strictEqual(r1.content, undefined);
+		// eslint-disable-next-line local/code-no-unexternalized-strings
 		assert.strictEqual(r1.error?.message, "Error in property 'a': Expected string, but got number");
 
 		const r2 = validator.validate({ a: 'hello', b: 'world' });
 		assert.strictEqual(r2.content, undefined);
+		// eslint-disable-next-line local/code-no-unexternalized-strings
 		assert.strictEqual(r2.error?.message, "Error in property 'b': Expected number, but got string");
 
 		const r3 = validator.validate(null);

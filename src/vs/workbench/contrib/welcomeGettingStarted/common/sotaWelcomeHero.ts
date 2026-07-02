@@ -47,9 +47,9 @@ const PIED_PIPER_ART: string = [
  * `gettingStarted.css`.
  *
  * Two element kinds:
- *  - `'building'`  — a persona-coloured extruded block that "rises" into the
+ *  - `'building'`  - a persona-coloured extruded block that "rises" into the
  *                    scene during the build-up animation.
- *  - `'wordmark'`  — a single typographic block carrying the SON OF / ANTON
+ *  - `'wordmark'`  - a single typographic block carrying the SON OF / ANTON
  *                    headline rendered as 3D type via stacked text-shadows.
  */
 export interface ISotaWelcomeHeroSkylineBuilding {
@@ -71,7 +71,7 @@ export interface ISotaWelcomeHeroSkylineBuilding {
 	/** Block depth (side-face thickness), in CSS px. */
 	readonly d: number;
 	/**
-	 * Animation delay in milliseconds — buildings stagger so the skyline reads
+	 * Animation delay in milliseconds - buildings stagger so the skyline reads
 	 * back-to-front rather than landing all at once.
 	 */
 	readonly delayMs: number;
@@ -81,7 +81,7 @@ export interface ISotaWelcomeHeroSkylineWordmarkLine {
 	readonly kind: 'wordmark';
 	/** The text rendered on this line (e.g. "SON OF" or "ANTON"). */
 	readonly text: string;
-	/** Css class modifier — used for per-line stagger. */
+	/** Css class modifier - used for per-line stagger. */
 	readonly cls: string;
 	/** Animation delay in milliseconds. */
 	readonly delayMs: number;
@@ -116,33 +116,33 @@ const PERSONA_ACCENTS: ReadonlyArray<{ readonly id: string; readonly accent: str
  * blocks line the front, and the orchestrator (anton, purple) stands centre.
  *
  * Coordinates are relative to the wrapper's centre. `x` increases rightward,
- * `z` decreases into the page. `y` is always 0 here — the resting baseline —
+ * `z` decreases into the page. `y` is always 0 here - the resting baseline -
  * because the rise animation drives `translateY` from 200px to 0.
  */
 const SKYLINE_BUILDINGS: readonly ISotaWelcomeHeroSkylineBuilding[] = [
-	// Back row — taller, further away. Reads first as silhouette.
+	// Back row - taller, further away. Reads first as silhouette.
 	{ kind: 'building', id: 'anton-security', accent: PERSONA_ACCENTS[3].accent, x: -180, y: 0, z: -90, w: 52, h: 168, d: 52, delayMs: 0 },
-	{ kind: 'building', id: 'anton-ci',       accent: PERSONA_ACCENTS[6].accent, x: -100, y: 0, z: -110, w: 46, h: 144, d: 46, delayMs: 80 },
-	{ kind: 'building', id: 'anton',          accent: PERSONA_ACCENTS[0].accent, x:    0, y: 0, z: -130, w: 64, h: 196, d: 64, delayMs: 160 },
-	{ kind: 'building', id: 'anton-pr',       accent: PERSONA_ACCENTS[7].accent, x:  100, y: 0, z: -110, w: 48, h: 152, d: 48, delayMs: 240 },
-	{ kind: 'building', id: 'anton-spec',     accent: PERSONA_ACCENTS[9].accent, x:  180, y: 0, z: -90,  w: 50, h: 132, d: 50, delayMs: 320 },
-	// Front row — shorter, closer. Frames the wordmark from below.
-	{ kind: 'building', id: 'anton-docs',      accent: PERSONA_ACCENTS[4].accent, x: -220, y: 0, z: 30, w: 44, h: 96,  d: 44, delayMs: 400 },
-	{ kind: 'building', id: 'anton-test',      accent: PERSONA_ACCENTS[2].accent, x: -130, y: 0, z: 50, w: 42, h: 84,  d: 42, delayMs: 480 },
-	{ kind: 'building', id: 'anton-code',      accent: PERSONA_ACCENTS[1].accent, x:  130, y: 0, z: 50, w: 46, h: 104, d: 46, delayMs: 560 },
-	{ kind: 'building', id: 'anton-e2e',       accent: PERSONA_ACCENTS[5].accent, x:  210, y: 0, z: 30, w: 44, h: 92,  d: 44, delayMs: 640 },
-	{ kind: 'building', id: 'anton-moderniser', accent: PERSONA_ACCENTS[8].accent, x:   40, y: 0, z: 70, w: 40, h: 76,  d: 40, delayMs: 720 },
+	{ kind: 'building', id: 'anton-ci', accent: PERSONA_ACCENTS[6].accent, x: -100, y: 0, z: -110, w: 46, h: 144, d: 46, delayMs: 80 },
+	{ kind: 'building', id: 'anton', accent: PERSONA_ACCENTS[0].accent, x: 0, y: 0, z: -130, w: 64, h: 196, d: 64, delayMs: 160 },
+	{ kind: 'building', id: 'anton-pr', accent: PERSONA_ACCENTS[7].accent, x: 100, y: 0, z: -110, w: 48, h: 152, d: 48, delayMs: 240 },
+	{ kind: 'building', id: 'anton-spec', accent: PERSONA_ACCENTS[9].accent, x: 180, y: 0, z: -90, w: 50, h: 132, d: 50, delayMs: 320 },
+	// Front row - shorter, closer. Frames the wordmark from below.
+	{ kind: 'building', id: 'anton-docs', accent: PERSONA_ACCENTS[4].accent, x: -220, y: 0, z: 30, w: 44, h: 96, d: 44, delayMs: 400 },
+	{ kind: 'building', id: 'anton-test', accent: PERSONA_ACCENTS[2].accent, x: -130, y: 0, z: 50, w: 42, h: 84, d: 42, delayMs: 480 },
+	{ kind: 'building', id: 'anton-code', accent: PERSONA_ACCENTS[1].accent, x: 130, y: 0, z: 50, w: 46, h: 104, d: 46, delayMs: 560 },
+	{ kind: 'building', id: 'anton-e2e', accent: PERSONA_ACCENTS[5].accent, x: 210, y: 0, z: 30, w: 44, h: 92, d: 44, delayMs: 640 },
+	{ kind: 'building', id: 'anton-moderniser', accent: PERSONA_ACCENTS[8].accent, x: 40, y: 0, z: 70, w: 40, h: 76, d: 40, delayMs: 720 },
 ];
 
 /**
  * Two-line wordmark "SON OF / ANTON". Each line animates in slightly after
  * the back-row buildings have started rising, so the eye reads buildings
- * first → wordmark second. The CSS uses `text-shadow` chains to fake a 3D
+ * first -> wordmark second. The CSS uses `text-shadow` chains to fake a 3D
  * extrusion without per-letter HTML.
  */
 const SKYLINE_WORDMARK: readonly ISotaWelcomeHeroSkylineWordmarkLine[] = [
 	{ kind: 'wordmark', text: 'SON OF', cls: 'sota-welcome-skyline-wordmark-line-1', delayMs: 600 },
-	{ kind: 'wordmark', text: 'ANTON',  cls: 'sota-welcome-skyline-wordmark-line-2', delayMs: 800 },
+	{ kind: 'wordmark', text: 'ANTON', cls: 'sota-welcome-skyline-wordmark-line-2', delayMs: 800 },
 ];
 
 /** Returns the building blocks (one per persona) that compose the skyline. */
@@ -166,14 +166,17 @@ interface ISiliconValleyQuote {
  */
 const SILICON_VALLEY_QUOTES: readonly ISiliconValleyQuote[] = [
 	{
+		// eslint-disable-next-line local/code-no-unexternalized-strings
 		text: "It's possible that Son of Anton thought the best way to get rid of all the bugs was to get rid of all the software, which is technically and statistically correct.",
 		attribution: 'Gilfoyle',
 	},
 	{
+		// eslint-disable-next-line local/code-no-unexternalized-strings
 		text: "I'm not hiring him. He uses spaces not tabs.",
 		attribution: 'Richard Hendricks',
 	},
 	{
+		// eslint-disable-next-line local/code-no-unexternalized-strings
 		text: "It's not magic, it's talent and sweat.",
 		attribution: 'Gilfoyle',
 	},
@@ -182,14 +185,17 @@ const SILICON_VALLEY_QUOTES: readonly ISiliconValleyQuote[] = [
 		attribution: 'Dinesh',
 	},
 	{
+		// eslint-disable-next-line local/code-no-unexternalized-strings
 		text: "I don't want to live in a world where someone else is making the world a better place better than we are.",
 		attribution: 'Gavin Belson',
 	},
 	{
+		// eslint-disable-next-line local/code-no-unexternalized-strings
 		text: "Welcome to Pied Piper's new home. Hoo-hoo-hoo!",
 		attribution: 'Richard Hendricks',
 	},
 	{
+		// eslint-disable-next-line local/code-no-unexternalized-strings
 		text: "Don't 'think different,' that's Apple.",
 		attribution: 'Gavin Belson',
 	},
@@ -265,7 +271,7 @@ export function getSotaWelcomeHeroActions(): readonly ISotaWelcomeHeroAction[] {
 }
 
 /**
- * Inline isometric "Son of Anton" skyline — letters built as stacked-block
+ * Inline isometric "Son of Anton" skyline - letters built as stacked-block
  * extruded buildings (Silicon Valley title-card energy) with a blueprint
  * draw-in animation on the front face, ground-plane perspective grid,
  * Pied Piper / Hooli balloons floating up, and small cars driving along

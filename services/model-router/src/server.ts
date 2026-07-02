@@ -170,6 +170,14 @@ export function createServer() {
 		const systemPrompt = req.body.system;
 		const maxTokens = req.body.max_tokens ?? 4096;
 
+		// Abort upstream provider connections when the client disconnects (e.g.
+		// user clicks Cancel). Without this the provider fetch runs to completion,
+		// burning tokens and keeping the connection alive unnecessarily.
+		const reqAbort = new AbortController();
+		// Only abort when the response is still in-flight — if the response
+		// already ended normally, ignore the close event.
+		res.on('close', () => { if (!res.writableEnded) { reqAbort.abort(); } });
+
 		const providers = resolveProvidersForRole(context.agentRole, context, router, failoverConfig);
 
 		let lastError: Error | null = null;
@@ -181,6 +189,10 @@ export function createServer() {
 			lastModel = model;
 
 			try {
+				if (reqAbort.signal.aborted) {
+					return;
+				}
+
 				const translatedBody = providerConfig.format === 'anthropic'
 					? toAnthropicFormat(messages, systemPrompt, maxTokens, model, isStreaming)
 					: toOpenAIFormat(messages, systemPrompt, maxTokens, model, isStreaming);
@@ -192,6 +204,7 @@ export function createServer() {
 					method: 'POST',
 					headers,
 					body: JSON.stringify(translatedBody),
+					signal: reqAbort.signal,
 				});
 
 				if (!fetchResponse.ok) {
@@ -218,13 +231,34 @@ export function createServer() {
 						const body = fetchResponse.body as unknown as AsyncIterable<Buffer> | null;
 						if (body) {
 							for await (const chunk of body) {
+								if (reqAbort.signal.aborted) {
+									break;
+								}
 								res.write(chunk);
 							}
 						}
-						res.end();
+						if (!reqAbort.signal.aborted) {
+							res.end();
+						}
 						return;
 					} catch (streamErr) {
-						lastError = streamErr as Error;
+						const err = streamErr as Error;
+						if (err.name === 'AbortError') {
+							// Client cancelled mid-stream. Emit final events if the
+							// socket is still open (e.g. server-initiated abort), then
+							// bail — never retry after a client cancellation.
+							if (!reqAbort.signal.aborted && !res.writableEnded) {
+								try {
+									res.write(`data: ${JSON.stringify({ type: 'message_stop', stopReason: 'error' })}\n\n`);
+									res.write(`data: ${JSON.stringify({ type: 'error', code: 'cancelled', message: 'Request cancelled', retryable: false })}\n\n`);
+									res.end();
+								} catch {
+									// socket already closed — nothing to write
+								}
+							}
+							return;
+						}
+						lastError = err;
 						console.error(`Stream from ${provider} failed mid-flight:`, lastError.message);
 						// Continue to next provider if headers have not been sent yet,
 						// or if the connection is still writable.
@@ -279,6 +313,11 @@ export function createServer() {
 				return;
 
 			} catch (err) {
+				// Client disconnected before the provider responded — bail immediately.
+				// Never retry with other providers for a cancelled request.
+				if ((err as Error).name === 'AbortError') {
+					return;
+				}
 				lastError = err as Error;
 				console.error(`Provider ${provider} failed:`, lastError.message);
 				const errLatencyMs = Date.now() - startTime;

@@ -481,6 +481,7 @@ export class UserDataSyncService extends Disposable implements IUserDataSyncServ
 		const remoteProfileCollectionsSet = new Set(remoteProfileCollections);
 		const allCollections = await this.userDataSyncStoreService.getAllCollections();
 
+		// allow-any-unicode-next-line
 		// ⚡ Bolt Optimization: Use Set.has instead of Array.includes to prevent O(N*M) lookup when checking remote profile collections against all collections.
 		const redundantCollections = allCollections.filter(c => !remoteProfileCollectionsSet.has(c));
 
@@ -491,6 +492,7 @@ export class UserDataSyncService extends Disposable implements IUserDataSyncServ
 		}
 
 		const allCollectionsSet = new Set(allCollections);
+		// allow-any-unicode-next-line
 		// ⚡ Bolt Optimization: Use Set.has instead of Array.includes for matching existing collections.
 		const updatedRemoteProfiles = remoteProfiles.filter(profile => allCollectionsSet.has(profile.collection));
 

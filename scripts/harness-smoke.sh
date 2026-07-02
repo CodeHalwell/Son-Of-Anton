@@ -40,7 +40,9 @@ if [[ "${1:-}" == "--no-live" ]]; then
 fi
 
 ok() { printf '  \033[32m✓\033[0m  %s\n' "$1"; }
+# allow-any-unicode-next-line
 fail() { printf '  \033[31m✗\033[0m  %s\n' "$1"; exit 1; }
+# allow-any-unicode-next-line
 section() { printf '\n\033[1m▶ %s\033[0m\n' "$1"; }
 
 section "1. Build all three packages"
@@ -57,14 +59,14 @@ node "$CLI_BIN" --version >/dev/null && ok "sota --version" || fail "sota --vers
 node "$CLI_BIN" --help >/dev/null && ok "sota --help" || fail "sota --help exited non-zero"
 
 section "3. Tools registry resolves"
-node "$CLI_BIN" tools list 2>&1 | head -5 && ok "sota tools list" || fail "tools list failed"
+tools_out="$(node "$CLI_BIN" tools list 2>&1)" && echo "$tools_out" | head -5 && ok "sota tools list" || fail "tools list failed"
 
 section "4. H16 traces scaffolding"
 node "$CLI_BIN" traces --help >/dev/null && ok "sota traces --help" || fail "traces --help failed"
-node "$CLI_BIN" traces --output json 2>&1 | head -20 && ok "sota traces --output json" || fail "traces failed"
+traces_out="$(node "$CLI_BIN" traces --output json 2>&1)" && echo "$traces_out" | head -20 && ok "sota traces --output json" || fail "traces failed"
 
 section "5. MCP wiring loads"
-node "$CLI_BIN" mcp list 2>&1 | head -5 && ok "sota mcp list" || fail "mcp list failed"
+mcp_out="$(node "$CLI_BIN" mcp list 2>&1)" && echo "$mcp_out" | head -5 && ok "sota mcp list" || fail "mcp list failed"
 
 section "6. Workspace bootstrap"
 TMP_INIT="$(mktemp -d)"
@@ -75,7 +77,7 @@ echo '{"name":"smoke-test","scripts":{"build":"tsc"}}' > "$TMP_INIT/package.json
 [[ -f "$TMP_INIT/.son-of-anton/config.json" ]] && ok "config.json written" || fail "config.json missing"
 
 section "7. Hooks runtime"
-node "$CLI_BIN" hooks list 2>&1 | head -3 && ok "sota hooks list" || fail "hooks list failed"
+hooks_out="$(node "$CLI_BIN" hooks list 2>&1)" && echo "$hooks_out" | head -3 && ok "sota hooks list" || fail "hooks list failed"
 
 if [[ "$LIVE" == "false" ]]; then
 	echo ""

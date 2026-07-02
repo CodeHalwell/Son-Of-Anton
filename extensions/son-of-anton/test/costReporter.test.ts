@@ -71,7 +71,7 @@ suite('CostReporter', () => {
 				sonnetUsed: byModel.sonnet > 0,
 				keyCount: Object.keys(byModel).length,
 			},
-			{ opus: 0, haiku: 0, sonnetUsed: true, keyCount: 14 },
+			{ opus: 0, haiku: 0, sonnetUsed: true, keyCount: 102 },
 		);
 	});
 

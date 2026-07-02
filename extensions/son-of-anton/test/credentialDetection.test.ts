@@ -49,6 +49,7 @@ function makeBroker(statuses: ProviderStatus[] = []): CredentialBroker {
 const ENV_KEYS = [
 	'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'AZURE_OPENAI_API_KEY', 'FOUNDRY_API_KEY',
 	'AWS_ACCESS_KEY_ID', 'AWS_PROFILE', 'GOOGLE_API_KEY', 'GEMINI_API_KEY',
+	'CEREBRAS_API_KEY', 'TOGETHER_API_KEY', 'FIREWORKS_API_KEY',
 ];
 let savedEnv: Record<string, string | undefined>;
 
@@ -81,6 +82,16 @@ suite('credentialDetection', () => {
 			foundry: { hasApiKey: false, hasEndpoint: false },
 			bedrock: { hasAccessKey: false, hasProfile: false },
 			google: { hasApiKey: false },
+			openrouter: { hasApiKey: false },
+			ollama: { hasBaseUrl: false },
+			lmstudio: { hasBaseUrl: false },
+			deepseek: { hasApiKey: false },
+			mistral: { hasApiKey: false },
+			groq: { hasApiKey: false },
+			cerebras: { hasApiKey: false },
+			together: { hasApiKey: false },
+			fireworks: { hasApiKey: false },
+			codex: { hasCli: false },
 		};
 		assert.deepStrictEqual(
 			{ state, hasAny: hasAnyProvider(state) },
@@ -191,6 +202,31 @@ suite('credentialDetection', () => {
 		);
 	});
 
+	test('OpenRouter secret sets openrouter.hasApiKey=true', async () => {
+		const secrets = new FakeSecretStorage();
+		await secrets.store(SECRET_KEYS.openRouter, 'or-key');
+		const state = await detectCredentials(secrets, makeConfig(), makeBroker());
+		assert.deepStrictEqual(state.openrouter, { hasApiKey: true });
+	});
+
+	test('Ollama base URL setting sets ollama.hasBaseUrl=true', async () => {
+		const state = await detectCredentials(
+			new FakeSecretStorage(),
+			makeConfig({ ollamaBaseUrl: 'http://my-server:11434' }),
+			makeBroker(),
+		);
+		assert.deepStrictEqual(state.ollama, { hasBaseUrl: true });
+	});
+
+	test('LM Studio base URL setting sets lmstudio.hasBaseUrl=true', async () => {
+		const state = await detectCredentials(
+			new FakeSecretStorage(),
+			makeConfig({ lmstudioBaseUrl: 'http://localhost:1234' }),
+			makeBroker(),
+		);
+		assert.deepStrictEqual(state.lmstudio, { hasBaseUrl: true });
+	});
+
 	test('hasAnyProvider returns true when any single field is set', () => {
 		const empty: CredentialState = {
 			anthropic: { hasApiKey: false, hasOAuth: false },
@@ -198,16 +234,27 @@ suite('credentialDetection', () => {
 			foundry: { hasApiKey: false, hasEndpoint: false },
 			bedrock: { hasAccessKey: false, hasProfile: false },
 			google: { hasApiKey: false },
+			openrouter: { hasApiKey: false },
+			ollama: { hasBaseUrl: false },
+			lmstudio: { hasBaseUrl: false },
+			deepseek: { hasApiKey: false },
+			mistral: { hasApiKey: false },
+			groq: { hasApiKey: false },
+			cerebras: { hasApiKey: false },
+			together: { hasApiKey: false },
+			fireworks: { hasApiKey: false },
+			codex: { hasCli: false },
 		};
 		const variants: CredentialState[] = [
 			{ ...empty, anthropic: { hasApiKey: true, hasOAuth: false } },
 			{ ...empty, openai: { hasApiKey: false, hasOAuth: true } },
 			{ ...empty, bedrock: { hasAccessKey: false, hasProfile: true } },
 			{ ...empty, google: { hasApiKey: true } },
+			{ ...empty, openrouter: { hasApiKey: true } },
 		];
 		assert.deepStrictEqual(
 			[hasAnyProvider(empty), ...variants.map(hasAnyProvider)],
-			[false, true, true, true, true],
+			[false, true, true, true, true, true],
 		);
 	});
 });

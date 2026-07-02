@@ -32,7 +32,9 @@ suite('Severity', () => {
 
 		assert.strictEqual(Severity.fromValue(''), Severity.Ignore);
 		assert.strictEqual(Severity.fromValue('random'), Severity.Ignore);
+		// eslint-disable-next-line local/code-no-any-casts
 		assert.strictEqual(Severity.fromValue(undefined as any), Severity.Ignore);
+		// eslint-disable-next-line local/code-no-any-casts
 		assert.strictEqual(Severity.fromValue(null as any), Severity.Ignore);
 	});
 

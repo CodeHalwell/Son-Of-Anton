@@ -116,6 +116,7 @@ export class ExtensionsResource implements IProfileResource {
 	toContent(extensions: IProfileExtension[], exclude?: string[]): string {
 		let excludeSet: Set<string> | undefined;
 		if (exclude?.length) {
+			// allow-any-unicode-next-line
 			// ⚡ BOLT OPTIMIZATION:
 			// Convert exclude array to a Set to optimize the O(N*M) nested array traversal during filtering.
 			// `exclude.includes` inside `extensions.filter` is O(N*M).

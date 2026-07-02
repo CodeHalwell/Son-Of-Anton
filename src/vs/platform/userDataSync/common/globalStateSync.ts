@@ -304,6 +304,7 @@ export class GlobalStateSynchroniser extends AbstractSynchroniser implements IUs
 			}
 		}
 		const registered = [...user, ...machine];
+		// allow-any-unicode-next-line
 		// ⚡ BOLT OPTIMIZATION: Convert the registered keys array to a Set before filtering.
 		// This mitigates an O(N*M) nested loop when processing storage keys.
 		const registeredSet = new Set(registered);

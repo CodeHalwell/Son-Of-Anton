@@ -317,6 +317,7 @@ export class FileBasedRecommendations extends ExtensionRecommendations {
 
 		const promptedRecommendations = language !== PLAINTEXT_LANGUAGE_ID ? this.getPromptedRecommendations()[language] : undefined;
 		if (promptedRecommendations) {
+			// allow-any-unicode-next-line
 			// Bolt ⚡ - Convert to Set for O(1) lookup in filter
 			const promptedSet = new Set(promptedRecommendations);
 			recommendations = recommendations.filter(extensionId => !promptedSet.has(extensionId));

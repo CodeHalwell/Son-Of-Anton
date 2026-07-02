@@ -101,7 +101,7 @@ class CodeLensContentWidget implements IContentWidget {
 					children.push(dom.$('a', {
 						id,
 						title: lens.command.tooltip,
-							'aria-label': lens.command.tooltip || lens.command.title,
+						'aria-label': lens.command.tooltip || lens.command.title,
 						role: 'button',
 						tabindex: 0,
 						onkeydown: (e: KeyboardEvent) => {

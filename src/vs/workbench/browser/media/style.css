@@ -335,8 +335,8 @@ body {
 }
 
 /* ============================================
-   Son of Anton — Custom Scrollbars
-   ============================================ */
+	Son of Anton - Custom Scrollbars
+	============================================ */
 
 .monaco-workbench ::-webkit-scrollbar {
 	width: 6px;
@@ -357,8 +357,8 @@ body {
 }
 
 /* ============================================
-   Son of Anton — Tab Label Font
-   ============================================ */
+	Son of Anton - Tab Label Font
+	============================================ */
 
 .monaco-workbench .part.editor > .content .editor-group-container > .title .tabs-container > .tab .tab-label {
 	font-family: 'JetBrains Mono', monospace;
@@ -367,8 +367,8 @@ body {
 }
 
 /* ============================================
-   Son of Anton — Status Bar Font
-   ============================================ */
+	Son of Anton - Status Bar Font
+	============================================ */
 
 .monaco-workbench .part.statusbar {
 	font-family: 'JetBrains Mono', monospace;

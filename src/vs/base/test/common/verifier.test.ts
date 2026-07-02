@@ -152,6 +152,7 @@ suite('Verifier', () => {
 			assert.strictEqual(result.a, true);
 			assert.strictEqual(result.b, 0);
 			assert.strictEqual(result.c, 'b');
+			// eslint-disable-next-line local/code-no-any-casts
 			assert.strictEqual((result as any).d, undefined);
 			assert.strictEqual(Object.getPrototypeOf(result), null); // Object.create(null)
 		});

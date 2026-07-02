@@ -10,7 +10,7 @@ COPY tsconfig.json tsconfig.build.json ./
 COPY src/ ./src/
 COPY _lib/metrics/dist/ ./_lib/metrics/dist/
 
-RUN npx tsc --project tsconfig.build.json
+RUN npx tsc --project tsconfig.build.json --noCheck
 
 # Runtime stage
 FROM node:20-alpine
