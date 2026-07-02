@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Son of Anton Contributors. All rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
@@ -134,6 +134,16 @@ export class SupplyChainGuard {
 	 */
 	isExtensionAllowed(extensionId: string): boolean {
 		return this.extensionAllowlist.has(extensionId);
+	}
+
+	/**
+	 * Add (or update) an MCP server in the trust list at runtime — e.g. after
+	 * the user approves a connection prompt or when seeding from user/global
+	 * configuration. Additive: does not disturb other entries the way
+	 * `loadConfig` does.
+	 */
+	trustMcpServer(name: string, reason: string): void {
+		this.mcpServerTrustList.set(name, { name, url: '', trusted: true, reason });
 	}
 
 	/**

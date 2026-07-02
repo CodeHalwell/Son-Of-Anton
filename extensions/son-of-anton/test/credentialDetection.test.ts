@@ -49,6 +49,8 @@ function makeBroker(statuses: ProviderStatus[] = []): CredentialBroker {
 const ENV_KEYS = [
 	'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'AZURE_OPENAI_API_KEY', 'FOUNDRY_API_KEY',
 	'AWS_ACCESS_KEY_ID', 'AWS_PROFILE', 'GOOGLE_API_KEY', 'GEMINI_API_KEY',
+	'OPENROUTER_API_KEY', 'DEEPSEEK_API_KEY', 'MISTRAL_API_KEY', 'GROQ_API_KEY',
+	'CEREBRAS_API_KEY', 'TOGETHER_API_KEY', 'FIREWORKS_API_KEY',
 ];
 let savedEnv: Record<string, string | undefined>;
 
@@ -81,6 +83,16 @@ suite('credentialDetection', () => {
 			foundry: { hasApiKey: false, hasEndpoint: false },
 			bedrock: { hasAccessKey: false, hasProfile: false },
 			google: { hasApiKey: false },
+			openrouter: { hasApiKey: false },
+			ollama: { hasBaseUrl: false },
+			lmstudio: { hasBaseUrl: false },
+			deepseek: { hasApiKey: false },
+			mistral: { hasApiKey: false },
+			groq: { hasApiKey: false },
+			cerebras: { hasApiKey: false },
+			together: { hasApiKey: false },
+			fireworks: { hasApiKey: false },
+			codex: { hasCli: false },
 		};
 		assert.deepStrictEqual(
 			{ state, hasAny: hasAnyProvider(state) },
@@ -198,6 +210,16 @@ suite('credentialDetection', () => {
 			foundry: { hasApiKey: false, hasEndpoint: false },
 			bedrock: { hasAccessKey: false, hasProfile: false },
 			google: { hasApiKey: false },
+			openrouter: { hasApiKey: false },
+			ollama: { hasBaseUrl: false },
+			lmstudio: { hasBaseUrl: false },
+			deepseek: { hasApiKey: false },
+			mistral: { hasApiKey: false },
+			groq: { hasApiKey: false },
+			cerebras: { hasApiKey: false },
+			together: { hasApiKey: false },
+			fireworks: { hasApiKey: false },
+			codex: { hasCli: false },
 		};
 		const variants: CredentialState[] = [
 			{ ...empty, anthropic: { hasApiKey: true, hasOAuth: false } },

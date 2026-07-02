@@ -301,10 +301,6 @@
 				"title": "Son of Anton: Show Harness Stats"
 			},
 			{
-				"command": "sota.showSandbox",
-				"title": "Anton: Show Sandbox Terminal"
-			},
-			{
 				"command": "sota.triggerPreCommitHook",
 				"title": "Anton: Trigger Pre-Commit Hook"
 			},
@@ -616,6 +612,16 @@
 						":(){:|:&};:"
 					],
 					"markdownDescription": "Regex patterns (one per entry) that force explicit approval for `run_command` calls even when `sota.autoApprove.shell` is enabled. Anton matches the full reconstructed command line (executable + args, joined by spaces) against each pattern; a hit blocks auto-approval."
+				},
+				"sota.runCommand.sandbox": {
+					"type": "string",
+					"enum": [
+						"safe",
+						"workspace-write",
+						"unrestricted"
+					],
+					"default": "safe",
+					"markdownDescription": "Execution policy for the agent `run_command` tool. Commands run **host-side** — there is no container sandbox — and this setting controls which commands are permitted.\n\n- `safe` (default) — only inspection-shaped commands on the built-in allowlist run (e.g. `ls`, `cat`, read-only `git` subcommands, language / package-manager read paths). Write, build, or VCS-mutating commands are rejected with guidance to raise the mode.\n- `workspace-write` — any command runs, but the working directory is held inside the workspace root. Use this for `git commit`, package installs, or build steps.\n- `unrestricted` — no allowlist check (pre-sandbox behaviour).\n\nEvery `run_command` call still passes through the per-call approval UI and the `sota.commandDenylist` block-list regardless of this mode."
 				},
 				"sota.spendLimit.session": {
 					"type": "number",
@@ -1045,6 +1051,15 @@
 						}
 					}
 				},
+				"sota.mcp.trustedServers": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"default": [],
+					"scope": "application",
+					"markdownDescription": "Names of MCP servers (from `#sota.mcp.servers#`) that Son of Anton may connect to **without** prompting. MCP servers spawn a local process and can expose tools that read files and run commands, so any server not listed here — or previously approved via the in-product **Trust Always** prompt — is blocked until you explicitly confirm the connection. This is an **application-scoped** (user/global) list on purpose: a workspace cannot pre-trust a server on your behalf. Edit this list to pre-bless or audit trusted servers; removing a name takes effect on the next window reload."
+				},
 				"sotaAuth.anthropic-oauth.clientId": {
 					"type": "string",
 					"default": "",
@@ -1063,7 +1078,10 @@
 	"scripts": {
 		"build": "npx tsx esbuild.mts",
 		"watch": "npx tsx esbuild.mts --watch",
-		"test": "node ./out/test/runTests.js"
+		"compile-tests": "tsc -p tsconfig.test.json",
+		"pretest": "npm run compile-tests",
+		"test": "vscode-test",
+		"test:node": "npm run compile-tests && mocha --ui tdd --require ./test/coreResolve.cjs --require ./test/vscodeMock.cjs \"out-test/test/**/*.test.js\" \"out-test/src/**/*.test.js\""
 	},
 	"dependencies": {
 		"@aws-sdk/client-bedrock-runtime": "^3.700.0",
@@ -1072,10 +1090,15 @@
 	"devDependencies": {
 		"@copilotkit/react-core": "^1.57.1",
 		"@copilotkit/react-ui": "^1.57.1",
+		"@types/mocha": "^10.0.10",
+		"@types/node": "^22.18.13",
 		"@types/react": "^18.3.28",
 		"@types/react-dom": "^18.3.7",
 		"@types/vscode": "^1.96.0",
+		"@vscode/test-cli": "^0.0.6",
+		"@vscode/test-electron": "^2.4.0",
 		"esbuild": "^0.24.2",
+		"mocha": "^10.8.2",
 		"react": "^18.3.1",
 		"react-dom": "^18.3.1"
 	}

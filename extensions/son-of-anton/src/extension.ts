@@ -36,10 +36,8 @@ import { createAgentStack } from 'son-of-anton-core/agents/AgentStackFactory';
 import { AgentBridge } from './chat/AgentBridge';
 import { WorkspaceContextProvider } from './chat/WorkspaceContextProvider';
 import { WorkspaceAgentsMdProvider } from './agents/AgentsMdLoader';
-import { SandboxManager, defaultSandboxConfig } from './sandbox/SandboxManager';
-import { SandboxTerminal } from './sandbox/SandboxTerminal';
-import { SecurityScanner } from './security/SecurityScanner';
 import { SupplyChainGuard } from './security/SupplyChainGuard';
+import { McpTrustGate } from './security/McpTrustGate';
 import { TrustedFolders } from './security/TrustedFolders';
 import { TrustStatusBarItem } from './security/TrustStatusBarItem';
 import { HookEngine } from './hooks/HookEngine';
@@ -57,6 +55,7 @@ import { activateAuth } from './auth/activation';
 import { maybeShowFirstRunSignInPrompt } from './auth/firstRun';
 import { SetupWizardPanel } from './onboarding/SetupWizardPanel';
 import { CostReporter } from './monitoring/CostReporter';
+import { HealthMonitor } from './monitoring/HealthMonitor';
 import { CheckpointManager } from 'son-of-anton-core/checkpoint/CheckpointManager';
 import { TaskBoardModel, BoardTask, SubtaskState } from './board/TaskBoardModel';
 import { TaskBoardPanel } from './board/TaskBoardPanel';
@@ -72,6 +71,22 @@ import { registerOpenCliInTerminalCommand } from './cli/openCliInTerminal';
 import * as cp from 'node:child_process';
 
 export function activate(context: vscode.ExtensionContext): void {
+	// Run a peripheral subsystem's setup in isolation so one throwing
+	// constructor doesn't abort the rest of activation. Anything already
+	// registered (chat surface, agents, tool wiring) stays live; the failure is
+	// logged and surfaced as a non-blocking warning.
+	const initSubsystem = (label: string, setup: () => void): void => {
+		try {
+			setup();
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			console.error(`[extension] subsystem "${label}" failed to initialise: ${message}`);
+			void vscode.window.showWarningMessage(
+				`Son of Anton: the ${label} subsystem failed to start (${message}). Other features are unaffected.`,
+			);
+		}
+	};
+
 	// --- Credential broker (OAuth-based provider sign-in) ---
 	const auth = activateAuth({
 		secrets: context.secrets,
@@ -131,16 +146,41 @@ export function activate(context: vscode.ExtensionContext): void {
 			try { listener(); } catch (err) { console.warn('[extension] code-graph setting listener threw', err); }
 		}
 	};
+
+	// --- Supply-chain guard + MCP trust gate ---
+	// Constructed before the MCP client so the trust gate can filter untrusted
+	// servers out of `sota.mcp.servers` BEFORE `McpClient` ever spawns them.
+	// Trust is sourced from user/global config (`sota.mcp.trustedServers` +
+	// persisted approvals), never the workspace, so a cloned repo can't silently
+	// pre-trust a server. The bundled code-graph backend is exempt (it's added
+	// by the extension itself, below).
+	const supplyChainGuard = new SupplyChainGuard();
+	const mcpTrustGate = new McpTrustGate({
+		guard: supplyChainGuard,
+		globalState: context.globalState,
+		getConfiguredTrusted: () => {
+			const raw = vscode.workspace.getConfiguration().get<unknown>('sota.mcp.trustedServers');
+			return Array.isArray(raw) ? raw.filter((n): n is string => typeof n === 'string') : [];
+		},
+		isBundledServer: (name) => codeGraphBackendRef?.getMcpServerEntry()?.name === name,
+		requestReconcile: () => fireCodeGraphSettingChange(),
+	});
+	context.subscriptions.push(mcpTrustGate);
+
 	const mcpClientDeps: McpClientDeps = {
 		readServersSetting: () => {
 			const userServers = vscode.workspace.getConfiguration().get<unknown>('sota.mcp.servers');
-			const list: unknown[] = Array.isArray(userServers) ? [...userServers] : [];
+			const rawUserList: unknown[] = Array.isArray(userServers) ? [...userServers] : [];
+			// Gate untrusted user-configured servers out before they reach the
+			// client. Untrusted entries are dropped and trigger an async
+			// confirmation prompt; approving one fires a reconcile so it connects.
+			const list: unknown[] = mcpTrustGate.filterTrusted(rawUserList);
 			const backendEntry: CodeGraphMcpEntry | undefined = codeGraphBackendRef?.getMcpServerEntry();
 			if (backendEntry) {
 				// Skip if the user has manually configured a `code-graph` entry
 				// already — their setting wins so existing Docker users aren't
 				// silently overridden.
-				const userHasOverride = list.some(s =>
+				const userHasOverride = rawUserList.some(s =>
 					s !== null && typeof s === 'object' && (s as { name?: unknown }).name === backendEntry.name,
 				);
 				if (!userHasOverride) {
@@ -161,6 +201,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			const sub = vscode.workspace.onDidChangeConfiguration(e => {
 				if (
 					e.affectsConfiguration('sota.mcp.servers') ||
+					e.affectsConfiguration('sota.mcp.trustedServers') ||
 					e.affectsConfiguration('sota.codeGraph')
 				) {
 					listener();
@@ -204,28 +245,26 @@ export function activate(context: vscode.ExtensionContext): void {
 	const taskQueueProvider = new TaskQueueProvider(agentManager);
 	const statusBarManager = new StatusBarManager(agentManager, auth.broker);
 
-	// --- Sandbox ---
+	// --- Command execution model ---
+	// Agent shell commands run HOST-SIDE through the core `run_command` tool,
+	// gated by (a) the `sota.runCommand.sandbox` allowlist mode, (b) the
+	// `sota.commandDenylist` block-list, and (c) the per-call approval UI
+	// (modal dialog or in-chat webview card). There is no container isolation.
+	//
+	// An earlier design constructed a Docker-based `SandboxManager` +
+	// `SecurityScanner` here, but `SandboxManager.setDockerApi()` was never
+	// called, so `execute()` / `scan()` were unreachable — commands already ran
+	// on the host, and the instantiated sandbox only created a false impression
+	// of isolation. That dead wiring has been removed. The `SandboxManager`,
+	// `SecurityScanner`, `SandboxTerminal`, and `CommandClassifier` classes are
+	// retained as standalone, unit-tested building blocks for a future real
+	// dockerode integration; they are simply not part of the activation path.
 	const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
-	const sandboxTerminal = new SandboxTerminal();
-	const sandboxConfig = defaultSandboxConfig(workspacePath);
-	const sandboxManager = new SandboxManager(sandboxConfig, sandboxTerminal);
 
-	// Confirmation callback for sandbox commands
-	sandboxManager.setConfirmCallback(async (command, reason) => {
-		const choice = await vscode.window.showWarningMessage(
-			`Agent wants to run: ${command}\nReason: ${reason}`,
-			{ modal: true },
-			'Allow',
-			'Deny',
-		);
-		return choice === 'Allow';
-	});
-
-	// --- Security ---
-	const securityScanner = new SecurityScanner(sandboxManager, workspacePath);
-	const supplyChainGuard = new SupplyChainGuard();
-
-	// Load extension allowlist if available
+	// --- Supply-chain guard ---
+	// (`supplyChainGuard` is constructed earlier, alongside the MCP trust gate.)
+	// Load the extension allowlist from the workspace if present. MCP-server
+	// trust is deliberately NOT read from the workspace here — see the gate.
 	loadSupplyChainConfig(supplyChainGuard, workspacePath);
 
 	// Start extension watcher
@@ -1300,13 +1339,6 @@ export function activate(context: vscode.ExtensionContext): void {
 		}),
 	);
 
-	// Sandbox terminal command
-	context.subscriptions.push(
-		vscode.commands.registerCommand('sota.showSandbox', () => {
-			sandboxTerminal.ensureVisible();
-		})
-	);
-
 	// Pre-commit hook trigger command (called by git hook script)
 	context.subscriptions.push(
 		vscode.commands.registerCommand('sota.triggerPreCommitHook', async () => {
@@ -1463,11 +1495,32 @@ export function activate(context: vscode.ExtensionContext): void {
 	});
 	codeGraphBackendRef = codeGraphBackend;
 	context.subscriptions.push(codeGraphBackend);
+
+	// Backend health monitoring. Runs a periodic staleness/alert sweep and
+	// accepts health-check samples from subsystems. Wired to the code-graph
+	// backend's lifecycle so its up/down transitions surface as component
+	// health (and, for `failed`, a warning alert). Disposed with the window.
+	const healthMonitor = new HealthMonitor();
+	healthMonitor.start();
+	context.subscriptions.push(healthMonitor);
+
 	// Trigger an McpClient reconcile whenever the backend transitions between
 	// off / starting / embedded / docker / failed so the server entry is
-	// added/removed in lock-step with the lifecycle.
+	// added/removed in lock-step with the lifecycle. Also feed the transition
+	// into the health monitor.
 	context.subscriptions.push(
-		codeGraphBackend.onDidChangeState(() => fireCodeGraphSettingChange()),
+		codeGraphBackend.onDidChangeState(() => {
+			fireCodeGraphSettingChange();
+			const state = codeGraphBackend.currentState;
+			const status = state === 'embedded' || state === 'docker'
+				? 'healthy'
+				: state === 'failed'
+					? 'unhealthy'
+					: state === 'starting'
+						? 'degraded'
+						: 'unknown';
+			healthMonitor.recordHealthCheck('code-graph', status, 0, codeGraphBackend.failureReason ?? state);
+		}),
 	);
 	const codeGraphBackendStatusItem = new CodeGraphStatusBarItem(codeGraphBackend);
 	context.subscriptions.push(codeGraphBackendStatusItem);
@@ -1560,36 +1613,38 @@ export function activate(context: vscode.ExtensionContext): void {
 	void maybePromptCodeGraphFirstRun(context, workspacePath);
 
 	// --- Personality ---
-	StartupMessages.show(context.extensionUri, context);
+	// Wrapped in a log-and-continue guard: this group reads bundled resources
+	// (startup messages, ASCII art) at construction, so a missing/corrupt
+	// resource must not take down the rest of activation.
+	initSubsystem('personality', () => {
+		StartupMessages.show(context.extensionUri, context);
 
-	const terminalBanner = new TerminalBanner();
-	context.subscriptions.push(terminalBanner);
+		const terminalBanner = new TerminalBanner();
+		context.subscriptions.push(terminalBanner);
 
-	const konamiCode = new KonamiCode();
-	context.subscriptions.push(konamiCode);
+		const konamiCode = new KonamiCode();
+		context.subscriptions.push(konamiCode);
 
-	const gitBlameEasterEgg = new GitBlameEasterEgg();
-	context.subscriptions.push(gitBlameEasterEgg);
+		const gitBlameEasterEgg = new GitBlameEasterEgg();
+		context.subscriptions.push(gitBlameEasterEgg);
 
-	const antonIsWatching = new AntonIsWatching();
-	context.subscriptions.push(antonIsWatching);
-	// Manual trigger so the user can test the surface without waiting for
-	// the random in-window timer to fire. Bound to the palette as
-	// "Son of Anton: Trigger Anton is Watching".
-	context.subscriptions.push(
-		vscode.commands.registerCommand('sota.triggerAntonIsWatching', () => antonIsWatching.triggerNow()),
-	);
+		const antonIsWatching = new AntonIsWatching();
+		context.subscriptions.push(antonIsWatching);
+		// Manual trigger so the user can test the surface without waiting for
+		// the random in-window timer to fire. Bound to the palette as
+		// "Son of Anton: Trigger Anton is Watching".
+		context.subscriptions.push(
+			vscode.commands.registerCommand('sota.triggerAntonIsWatching', () => antonIsWatching.triggerNow()),
+		);
 
-	context.subscriptions.push(...registerPersonalityCommands());
+		context.subscriptions.push(...registerPersonalityCommands());
+	});
 
-	// Dispose sandbox, security, spec sync, and background client on deactivation
+	// Dispose supply-chain guard, hooks, spec sync, and background client on deactivation
 	context.subscriptions.push({
 		dispose: () => {
-			sandboxManager.destroy();
-			securityScanner.dispose();
 			supplyChainGuard.dispose();
 			hookEngine.dispose();
-			sandboxTerminal.dispose();
 			specSyncWatcher.dispose();
 			backgroundClient.dispose();
 		}
@@ -1598,6 +1653,12 @@ export function activate(context: vscode.ExtensionContext): void {
 
 /**
  * Load supply chain configuration from .son-of-anton/supply-chain.json.
+ *
+ * Only the **extension allowlist** is honoured from this workspace file. MCP
+ * server trust is intentionally sourced from user/global config
+ * (`sota.mcp.trustedServers` + the in-product approval prompt handled by
+ * `McpTrustGate`), never the workspace, so cloning a repository can't silently
+ * pre-trust an MCP server that would spawn a process on the host.
  */
 async function loadSupplyChainConfig(guard: SupplyChainGuard, workspacePath: string): Promise<void> {
 	if (!workspacePath) {
@@ -1608,7 +1669,11 @@ async function loadSupplyChainConfig(guard: SupplyChainGuard, workspacePath: str
 		const configUri = vscode.Uri.file(`${workspacePath}/.son-of-anton/supply-chain.json`);
 		const content = await vscode.workspace.fs.readFile(configUri);
 		const config = JSON.parse(Buffer.from(content).toString('utf-8'));
-		guard.loadConfig(config);
+		guard.loadConfig({
+			extensionAllowlist: Array.isArray(config?.extensionAllowlist) ? config.extensionAllowlist : [],
+			// Deliberately dropped: workspace files must not grant MCP trust.
+			mcpServerTrustList: [],
+		});
 	} catch {
 		// No config file — use defaults
 	}

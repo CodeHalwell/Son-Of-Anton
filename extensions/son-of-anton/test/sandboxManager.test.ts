@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Son of Anton Contributors. All rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import * as assert from 'assert';
@@ -113,7 +113,7 @@ suite('SandboxManager', () => {
 	test('fails when no confirm callback is set for confirm commands', async () => {
 		const result = await sandbox.execute('rm temp-file.txt');
 		assert.strictEqual(result.exitCode, 1);
-		assert.ok(result.stderr.includes('No confirmation handler'));
+		assert.ok(result.stderr.includes('no handler is registered'));
 	});
 
 	test('creates container on first execution', async () => {

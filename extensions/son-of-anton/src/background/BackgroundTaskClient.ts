@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Son of Anton Contributors. All rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
@@ -79,6 +79,8 @@ export interface CreateTaskRequest {
 export class BackgroundTaskClient {
 	private readonly baseUrl: string;
 	private readonly pollingIntervalMs: number;
+	/** Per-request timeout so a hung service can't wedge a fetch forever. */
+	private readonly requestTimeoutMs: number;
 	private pollingTimer: ReturnType<typeof setInterval> | null = null;
 
 	private readonly onDidUpdateTaskEmitter = new vscode.EventEmitter<BackgroundTask>();
@@ -92,13 +94,31 @@ export class BackgroundTaskClient {
 	constructor(baseUrl?: string) {
 		this.baseUrl = baseUrl ?? `http://localhost:${process.env.BACKGROUND_TASKS_PORT ?? '8093'}`;
 		this.pollingIntervalMs = 15000;
+		this.requestTimeoutMs = 10000;
+	}
+
+	/**
+	 * `fetch` wrapper that aborts after `requestTimeoutMs` so a hung or missing
+	 * background-tasks service can't leave a request pending indefinitely
+	 * (mirrors `ChatPanel.pingHttpEndpoint`). On timeout the underlying fetch
+	 * rejects with an `AbortError`, which the callers below treat like any other
+	 * network failure.
+	 */
+	private async fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
+		const controller = new AbortController();
+		const timer = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+		try {
+			return await fetch(url, { ...init, signal: controller.signal });
+		} finally {
+			clearTimeout(timer);
+		}
 	}
 
 	/**
 	 * Create and start a new background task.
 	 */
 	async createTask(config: CreateTaskRequest): Promise<BackgroundTask> {
-		const response = await fetch(`${this.baseUrl}/tasks`, {
+		const response = await this.fetchWithTimeout(`${this.baseUrl}/tasks`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify(config),
@@ -119,7 +139,7 @@ export class BackgroundTaskClient {
 	 */
 	async getTask(taskId: string): Promise<BackgroundTask | null> {
 		try {
-			const response = await fetch(`${this.baseUrl}/tasks/${taskId}`);
+			const response = await this.fetchWithTimeout(`${this.baseUrl}/tasks/${taskId}`);
 			if (!response.ok) {
 				return null;
 			}
@@ -135,7 +155,7 @@ export class BackgroundTaskClient {
 	async listTasks(filter?: 'active' | 'completed'): Promise<BackgroundTask[]> {
 		const query = filter ? `?filter=${filter}` : '';
 		try {
-			const response = await fetch(`${this.baseUrl}/tasks${query}`);
+			const response = await this.fetchWithTimeout(`${this.baseUrl}/tasks${query}`);
 			if (!response.ok) {
 				return [];
 			}
@@ -150,7 +170,7 @@ export class BackgroundTaskClient {
 	 */
 	async cancelTask(taskId: string): Promise<boolean> {
 		try {
-			const response = await fetch(`${this.baseUrl}/tasks/${taskId}/cancel`, {
+			const response = await this.fetchWithTimeout(`${this.baseUrl}/tasks/${taskId}/cancel`, {
 				method: 'POST',
 			});
 			const result = await response.json() as { cancelled: boolean };
@@ -165,7 +185,7 @@ export class BackgroundTaskClient {
 	 */
 	async getTaskResults(taskId: string): Promise<Record<string, string>> {
 		try {
-			const response = await fetch(`${this.baseUrl}/tasks/${taskId}/results`);
+			const response = await this.fetchWithTimeout(`${this.baseUrl}/tasks/${taskId}/results`);
 			if (!response.ok) {
 				return {};
 			}

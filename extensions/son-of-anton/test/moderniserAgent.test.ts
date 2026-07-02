@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Son of Anton Contributors. All rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import * as assert from 'assert';
@@ -8,7 +8,10 @@ import * as path from 'path';
 
 suite('ModerniserAgent', () => {
 	suite('Agent definition file', () => {
-		const agentDefPath = path.join(__dirname, '..', '..', '..', '.son-of-anton', 'agents', 'moderniser.agent.md');
+		// __dirname is the compiled location (out-test/test); walk up past
+		// out-test/ → son-of-anton/ → extensions/ to reach the repo root where
+		// `.son-of-anton/` lives.
+		const agentDefPath = path.join(__dirname, '..', '..', '..', '..', '.son-of-anton', 'agents', 'moderniser.agent.md');
 
 		test('definition file exists', () => {
 			assert.ok(fs.existsSync(agentDefPath), `Expected agent definition at ${agentDefPath}`);
@@ -45,7 +48,8 @@ suite('ModerniserAgent', () => {
 
 		suiteSetup(() => {
 			const raw = fs.readFileSync(
-				path.join(__dirname, '..', 'package.json'),
+				// out-test/test → out-test → son-of-anton (extension root).
+				path.join(__dirname, '..', '..', 'package.json'),
 				'utf-8',
 			);
 			packageJson = JSON.parse(raw);

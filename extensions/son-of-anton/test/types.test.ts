@@ -12,7 +12,6 @@ import {
 	ReviewFeedback,
 	SecurityFinding,
 	Subtask,
-	SubtaskResult,
 	TokenUsage,
 } from 'son-of-anton-core/agents/types';
 

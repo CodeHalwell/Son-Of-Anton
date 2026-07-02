@@ -24,10 +24,14 @@ interface FakeAgent {
 	readonly handle: AgentHandle;
 	lastPrompt?: string;
 	tokensEmitted: boolean;
-	runChatTurn(
-		prompt: string,
-		emit: (t: string) => void,
+	// AgentBridge.runSpecialist drives specialists through `runAgenticTurn`,
+	// whose callback receives structured events (token / tool-call) rather than
+	// bare token strings.
+	runAgenticTurn(
+		userMessage: string,
+		onEvent: (event: { type: 'token'; token: string } | { type: 'tool-call'; id: string; name: string; input: unknown; status?: string; output?: unknown }) => void,
 		cancellation: vscode.CancellationToken,
+		opts?: unknown,
 	): Promise<string>;
 }
 
@@ -35,13 +39,13 @@ function makeFakeAgent(handle: AgentHandle, tokens: readonly string[], failWith?
 	const agent: FakeAgent = {
 		handle,
 		tokensEmitted: false,
-		async runChatTurn(prompt, emit) {
+		async runAgenticTurn(userMessage, onEvent) {
 			if (failWith) {
 				throw new Error(failWith);
 			}
-			agent.lastPrompt = prompt;
+			agent.lastPrompt = userMessage;
 			let full = '';
-			for (const t of tokens) { emit(t); full += t; }
+			for (const t of tokens) { onEvent({ type: 'token', token: t }); full += t; }
 			agent.tokensEmitted = true;
 			return full;
 		},
@@ -99,6 +103,8 @@ function makeStack(specialists: ReadonlyMap<AgentHandle, FakeAgent>, orchestrato
 		metricsTracker: {} as never,
 		projectMemory: {} as never,
 		specialistMemory: {} as never,
+		cacheOptimizer: {} as never,
+		modelRouter: {} as never,
 		dispose: () => { /* no-op */ },
 	} as AgentStack;
 }

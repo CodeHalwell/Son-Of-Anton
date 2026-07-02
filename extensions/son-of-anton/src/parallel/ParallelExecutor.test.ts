@@ -1,15 +1,15 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Son of Anton Contributors. All rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
 import { ParallelExecutor, ParallelTask } from './ParallelExecutor';
 
-describe('ParallelExecutor', () => {
+suite('ParallelExecutor', () => {
 	let executor: ParallelExecutor;
 
-	beforeEach(() => {
+	setup(() => {
 		executor = new ParallelExecutor({
 			repoRoot: '/tmp/test-repo',
 			lockHost: 'localhost',
@@ -18,11 +18,11 @@ describe('ParallelExecutor', () => {
 		});
 	});
 
-	afterEach(async () => {
+	teardown(async () => {
 		await executor.dispose();
 	});
 
-	describe('planExecution', () => {
+	suite('planExecution', () => {
 		test('non-overlapping tasks are parallelized', () => {
 			const tasks: ParallelTask[] = [
 				{ id: 't1', agentId: 'agent-1', instruction: 'Update auth', scopeFiles: ['auth.ts'], dependencies: [] },
@@ -107,7 +107,7 @@ describe('ParallelExecutor', () => {
 		});
 	});
 
-	describe('getLockStatus', () => {
+	suite('getLockStatus', () => {
 		test('returns empty array when no locks held', () => {
 			const status = executor.getLockStatus();
 			assert.deepStrictEqual(status, []);
