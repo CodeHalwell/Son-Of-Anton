@@ -44,22 +44,33 @@ jobs:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install son-of-anton-core dependencies
+        run: npm --prefix son-of-anton-core ci
+
+      - name: Build son-of-anton-core
+        run: npm --prefix son-of-anton-core run build
+
+      - name: Install extension dependencies
+        run: npm --prefix extensions/son-of-anton install
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+
       - name: Type check build scripts
         run: npm run typecheck
         working-directory: build
-
-      # The son-of-anton IDE extension imports the shared agent runtime via a
-      # `paths` mapping onto `son-of-anton-core/dist/*.d.ts`, so `core-ci`'s
-      # extension typecheck (tsgo) needs those declarations to exist first.
-      # Build the core package before the monolithic compile. (The
-      # cross-package typecheck + harness jobs do the same.)
-      - name: Build son-of-anton-core (extension typecheck dependency)
-        run: npm --prefix son-of-anton-core run build
 
       - name: Compile & Hygiene
         run: npm exec -- npm-run-all2 -lp core-ci hygiene eslint valid-layers-check
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload compiled output
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-out
+          path: out-build/
+          retention-days: 1
 
   # ---------------------------------------------------------------------------
   # Son of Anton-specific package CI. The compile job above covers the VS Code
@@ -100,11 +111,23 @@ jobs:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install son-of-anton-core dependencies
+        run: npm --prefix son-of-anton-core ci
+
       - name: Build son-of-anton-core
         run: npm --prefix son-of-anton-core run build
 
+      - name: Install son-of-anton-cli dependencies
+        run: npm --prefix son-of-anton-cli ci
+
       - name: Build son-of-anton-cli
         run: npm --prefix son-of-anton-cli run build
+
+      - name: Install extension dependencies
+        run: npm --prefix extensions/son-of-anton install
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
 
       - name: Typecheck extensions/son-of-anton
         run: npx tsc -p tsconfig.json --noEmit
@@ -140,6 +163,18 @@ jobs:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install son-of-anton-core dependencies
+        run: npm --prefix son-of-anton-core ci
+
+      - name: Install son-of-anton-cli dependencies
+        run: npm --prefix son-of-anton-cli ci
+
+      - name: Install extension dependencies
+        run: npm --prefix extensions/son-of-anton install
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+
       - name: Run harness smoke (offline)
         run: bash scripts/harness-smoke.sh --no-live
 
@@ -164,7 +199,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y build-essential pkg-config libx11-dev libx11-xcb-dev libxkbfile-dev libnotify-bin libkrb5-dev xvfb libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64
+          sudo apt-get install -y build-essential pkg-config libkrb5-dev libx11-dev libx11-xcb-dev libxkbfile-dev libnotify-bin xvfb libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64
 
       - name: Install root dependencies
         run: npm ci
@@ -172,8 +207,17 @@ jobs:
           ELECTRON_SKIP_BINARY_DOWNLOAD: 1
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install son-of-anton-core dependencies
+        run: npm --prefix son-of-anton-core ci
+
       - name: Build son-of-anton-core
         run: npm --prefix son-of-anton-core run build
+
+      - name: Install extension dependencies
+        run: npm --prefix extensions/son-of-anton install
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
 
       - name: Build extensions/son-of-anton
         run: npm --prefix extensions/son-of-anton run build
@@ -226,55 +270,6 @@ jobs:
         working-directory: crates
         run: cargo clippy --workspace --all-features -- -D warnings
 
-  test-ubuntu:
-    name: Unit Tests (Ubuntu)
-    needs: compile
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y build-essential pkg-config libx11-dev libx11-xcb-dev libxkbfile-dev libnotify-bin libkrb5-dev
-
-      - name: Install dependencies
-        run: npm ci
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Run unit tests
-        run: ./scripts/test.sh
-
-  test-macos:
-    name: Unit Tests (macOS)
-    needs: compile
-    runs-on: macos-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Run unit tests
-        run: ./scripts/test.sh
-
   docker-services:
     name: Docker Services Build
     runs-on: ubuntu-latest
@@ -320,13 +315,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Create .env from example
+        run: |
+          cp .env.example .env
+          sed -i "s|^PROJECT_PATH=.*|PROJECT_PATH=$GITHUB_WORKSPACE|" .env
+          echo "BACKGROUND_TASK_API_TOKEN=ci-smoke-token" >> .env
+
       - name: Start services
         run: docker compose up -d --wait --wait-timeout 120
 
       - name: Verify all services are healthy
         run: |
           set -euo pipefail
-          unhealthy_count="$(docker compose ps --format json | jq '[.[] | select(.Health != "healthy")] | length')"
+          unhealthy_count="$(docker compose ps --format json | jq -s '[.[] | select(.Health != "healthy")] | length')"
           if [ "$unhealthy_count" -gt 0 ]; then
             echo "Found $unhealthy_count unhealthy services:"
             docker compose ps

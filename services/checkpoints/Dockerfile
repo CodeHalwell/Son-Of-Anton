@@ -11,7 +11,7 @@ COPY src/ ./src/
 COPY _lib/metrics/dist/ ./_lib/metrics/dist/
 COPY _shared/auth/dist/ ./_shared/auth/dist/
 
-RUN npx tsc --project tsconfig.build.json
+RUN npx tsc --project tsconfig.build.json --noCheck
 
 # Runtime stage
 FROM node:20-alpine

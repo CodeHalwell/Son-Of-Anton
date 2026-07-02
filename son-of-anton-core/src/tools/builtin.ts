@@ -523,6 +523,7 @@ const SAFE_COMMANDS: ReadonlyArray<string> = [
 	'npm', 'pnpm', 'yarn', 'bun',
 	'jq', 'yq', 'curl',
 	'echo', 'printf',
+	'sleep', 'false', 'true',
 ];
 
 /**

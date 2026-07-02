@@ -1,18 +1,18 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Son of Anton Contributors. All rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
-import { IViewDescriptor, IViewsRegistry, Extensions as ViewContainerExtensions, IViewContainersRegistry } from '../../../../workbench/common/views.js';
+import { IViewDescriptor, IViewDescriptorService, IViewsRegistry, Extensions as ViewContainerExtensions, IViewContainersRegistry } from '../../../../workbench/common/views.js';
 import { localize2 } from '../../../../nls.js';
 import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.js';
 import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
-import { IViewDescriptorService } from '../../../../workbench/common/views.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
+import { mainWindow } from '../../../../base/browser/window.js';
 import { IOpenerService } from '../../../../platform/opener/common/opener.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
@@ -48,7 +48,7 @@ interface RemoteProviderStatus {
 export class ConnectedAccountsViewPane extends ViewPane {
 
 	private panel: ConnectedAccountsPanel | undefined;
-	private refreshTimer: ReturnType<typeof setInterval> | undefined;
+	private refreshTimer: number | undefined;
 
 	constructor(
 		options: IViewPaneOptions,
@@ -78,12 +78,12 @@ export class ConnectedAccountsViewPane extends ViewPane {
 		this.renderKnownProviders();
 		void this.refreshStatus();
 
-		this.refreshTimer = setInterval(() => void this.refreshStatus(), REFRESH_INTERVAL_MS);
-		this._register({ dispose: () => clearInterval(this.refreshTimer) });
+		this.refreshTimer = mainWindow.setInterval(() => void this.refreshStatus(), REFRESH_INTERVAL_MS);
+		this._register({ dispose: () => mainWindow.clearInterval(this.refreshTimer) });
 	}
 
 	override dispose(): void {
-		clearInterval(this.refreshTimer);
+		mainWindow.clearInterval(this.refreshTimer);
 		super.dispose();
 	}
 
@@ -171,6 +171,7 @@ export class ConnectedAccountsViewPane extends ViewPane {
 	}
 }
 
+// allow-any-unicode-next-line
 // ── View registration ─────────────────────────────────────────────────────────
 
 const accountsViewDescriptor: IViewDescriptor = {

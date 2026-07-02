@@ -33,6 +33,12 @@ interface FakeAgent {
 		cancellation: vscode.CancellationToken,
 		opts?: unknown,
 	): Promise<string>;
+	runAgenticTurn(
+		prompt: string,
+		emit: (event: { type: 'token'; token: string } | { type: 'tool-call'; id: string; name: string; input: Record<string, unknown>; status: 'running' | 'done' | 'error'; output?: string }) => void,
+		cancellation: vscode.CancellationToken,
+		options?: unknown,
+	): Promise<string>;
 }
 
 function makeFakeAgent(handle: AgentHandle, tokens: readonly string[], failWith?: string): FakeAgent {
@@ -48,6 +54,9 @@ function makeFakeAgent(handle: AgentHandle, tokens: readonly string[], failWith?
 			for (const t of tokens) { onEvent({ type: 'token', token: t }); full += t; }
 			agent.tokensEmitted = true;
 			return full;
+		},
+		async runAgenticTurn(prompt, emit, cancellation, _options) {
+			return agent.runChatTurn(prompt, t => emit({ type: 'token', token: t }), cancellation);
 		},
 	};
 	return agent;

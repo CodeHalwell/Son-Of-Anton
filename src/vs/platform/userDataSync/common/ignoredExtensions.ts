@@ -78,6 +78,7 @@ export class IgnoredExtensionsManagementService implements IIgnoredExtensionsMan
 				}
 			}
 		}
+		// allow-any-unicode-next-line
 		// ⚡ BOLT OPTIMIZATION: Convert the exclusion array to a Set before filtering.
 		// This mitigates an O(N*M) nested loop when processing extension keys.
 		const removedSet = new Set(removed);

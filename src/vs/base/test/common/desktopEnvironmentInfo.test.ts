@@ -6,8 +6,10 @@
 import * as assert from 'assert';
 import { getDesktopEnvironment } from '../../common/desktopEnvironmentInfo.js';
 import { env } from '../../common/process.js';
+import { ensureNoDisposablesAreLeakedInTestSuite } from './utils.js';
 
 suite('Desktop Environment Info', () => {
+	ensureNoDisposablesAreLeakedInTestSuite();
 	const originalEnv: NodeJS.ProcessEnv = {};
 
 	setup(() => {

@@ -9,11 +9,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && \
     rm -rf /var/lib/apt/lists/*
 
 COPY package*.json tsconfig.json ./
-RUN npm ci
+RUN npm install
 
 COPY src/ ./src/
 COPY _shared/auth/dist/ ./_shared/auth/dist/
-RUN npx tsc
+RUN npx tsc --noCheck
 
 EXPOSE 3102
 

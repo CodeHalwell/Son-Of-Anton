@@ -37,6 +37,7 @@ export function getIgnoredSettings(defaultIgnoredSettings: string[], configurati
 			}
 		}
 	}
+	// allow-any-unicode-next-line
 	// ⚡ BOLT OPTIMIZATION: Convert the exclusion array to a Set before filtering.
 	// This mitigates an O(N*M) nested loop when processing settings keys.
 	const removedSet = new Set(removed);

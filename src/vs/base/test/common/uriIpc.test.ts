@@ -26,6 +26,7 @@ suite('URI IPC', () => {
 	test('transformOutgoingURIs - simple URI', () => {
 		const uri = URI.parse('file://server/path');
 		const result = transformOutgoingURIs(uri, transformer);
+		// eslint-disable-next-line local/code-no-any-casts
 		assert.strictEqual((result as any).scheme, 'vscode-file');
 	});
 
@@ -36,6 +37,7 @@ suite('URI IPC', () => {
 		};
 		const result = transformOutgoingURIs(obj, transformer);
 		assert.strictEqual(result.name, 'test');
+		// eslint-disable-next-line local/code-no-any-casts
 		assert.strictEqual((result.uri as any).scheme, 'vscode-file');
 	});
 
@@ -43,6 +45,7 @@ suite('URI IPC', () => {
 		const arr = ['test', URI.parse('file://server/path')];
 		const result = transformOutgoingURIs(arr, transformer);
 		assert.strictEqual(result[0], 'test');
+		// eslint-disable-next-line local/code-no-any-casts
 		assert.strictEqual((result[1] as any).scheme, 'vscode-file');
 	});
 
@@ -55,11 +58,13 @@ suite('URI IPC', () => {
 		};
 		const result = transformOutgoingURIs(obj, transformer);
 		assert.strictEqual(result.name, 'test');
+		// eslint-disable-next-line local/code-no-any-casts
 		assert.strictEqual((result.nested.uri as any).scheme, 'vscode-file');
 	});
 
 	test('transformOutgoingURIs - max depth limit', () => {
 		// Create an object deeper than 200 levels
+		// eslint-disable-next-line prefer-const
 		let obj: any = {};
 		let current = obj;
 		for (let i = 0; i < 205; i++) {
@@ -78,6 +83,7 @@ suite('URI IPC', () => {
 		}
 
 		// The original scheme should remain, meaning it wasn't transformed.
+		// eslint-disable-next-line local/code-no-any-casts
 		assert.strictEqual((deepest.uri as any).scheme, 'file');
 	});
 

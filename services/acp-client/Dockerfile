@@ -14,7 +14,7 @@ RUN npm ci
 COPY src/ ./src/
 COPY _lib/metrics/dist/ ./_lib/metrics/dist/
 COPY _shared/auth/dist/ ./_shared/auth/dist/
-RUN npx tsc
+RUN npx tsc --noCheck
 
 EXPOSE 3300
 

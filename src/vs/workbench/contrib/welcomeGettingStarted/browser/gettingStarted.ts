@@ -129,8 +129,8 @@ const REDUCED_MOTION_KEY = 'workbench.welcomePage.preferReducedMotion';
 // The policy is NOT a pass-through. It compares the candidate string
 // against the snapshot of `SOTA_WELCOME_HERO_SKYLINE_SVG` taken once
 // at module load and throws when the two don't match. That way, if a
-// future refactor accidentally makes the SVG dynamic — say, by
-// interpolating a user-controlled string into the markup — the policy
+// future refactor accidentally makes the SVG dynamic - say, by
+// interpolating a user-controlled string into the markup - the policy
 // fires immediately at the assignment site rather than silently letting
 // untrusted HTML reach `innerHTML`. The cost is one string comparison
 // per welcome-page mount, which is dwarfed by the SVG render itself.
@@ -138,6 +138,7 @@ const KNOWN_SOTA_WELCOME_SKYLINE = getSotaWelcomeHeroContent().skylineSvg;
 const sotaWelcomeHeroTTPolicy = createTrustedTypesPolicy('sotaWelcomeHero', {
 	createHTML: (value: string) => {
 		if (value !== KNOWN_SOTA_WELCOME_SKYLINE) {
+			// allow-any-unicode-next-line
 			throw new Error('sotaWelcomeHero TT policy rejects unrecognised HTML — the skyline SVG must be the hardcoded constant from sotaWelcomeHero.ts.');
 		}
 		return value;
@@ -927,7 +928,7 @@ export class GettingStartedPage extends EditorPane {
 	private buildSotaWelcomeHero(): HTMLElement {
 		const content = getSotaWelcomeHeroContent();
 
-		// Inline isometric "Son of Anton" SVG skyline — letters built as
+		// Inline isometric "Son of Anton" SVG skyline - letters built as
 		// stacked-block extruded buildings (Silicon Valley title-card energy)
 		// with a blueprint draw-in animation, perspective grid, balloons, and
 		// cars. The whole scene is self-contained in
@@ -949,7 +950,9 @@ export class GettingStartedPage extends EditorPane {
 		const title = $('h1.sota-welcome-title', {}, content.title);
 		const tagline = $('p.sota-welcome-tagline', {}, content.tagline);
 
-		const quoteText = $('span.sota-welcome-quote-text', {}, `“${content.quote.text}”`);
+		// allow-any-unicode-next-line
+		const quoteText = $('span.sota-welcome-quote-text', {}, `”${content.quote.text}”`);
+		// allow-any-unicode-next-line
 		const quoteCite = $('cite.sota-welcome-quote-cite', {}, `— ${content.quote.attribution}`);
 		const quote = $('blockquote.sota-welcome-quote', {}, quoteText, quoteCite);
 

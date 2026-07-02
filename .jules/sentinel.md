@@ -36,3 +36,8 @@
 **Vulnerability:** Found unsanitized dynamic fields (`span.id` and `span.type`) directly embedded into the webview's HTML generation in `TraceViewerPanel.ts`.
 **Learning:** Even internal backend IDs and types can contain malicious payloads if compromised or manipulated before display, leading to XSS inside VS Code webviews.
 **Prevention:** Always use the internal `escapeHtml` string sanitizer function on all dynamic data injected into HTML strings, even for supposedly "safe" fields like identifiers or types.
+
+## 2026-06-03 - Cypher Injection in Memory Graph
+**Vulnerability:** Found `db.query` calls in `services/mcp-gateway/src/tools/memoryQuery.ts` where values like `params.type`, `id`, and `now` were being interpolated directly into Cypher query strings instead of parameterized. Wait, what about labels? Cypher graph labels like `(:Decision)` cannot be parameterized normally in Neo4j/FalkorDB.
+**Learning:** In FalkorDB/Neo4j, while values should always be parameterized (e.g. `$content`), node labels (like `:${params.type}`) cannot be parameterized via query parameters. If a label is user-controlled and directly interpolated, it allows Cypher injection.
+**Prevention:** For node labels or property keys that cannot be parameterized in Cypher, always validate them against a strict predefined allowlist before interpolation to prevent Cypher injection vulnerabilities. Always use query parameters for standard values like `$id` and `$createdAt`.

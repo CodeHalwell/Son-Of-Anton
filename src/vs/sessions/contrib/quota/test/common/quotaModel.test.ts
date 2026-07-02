@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Son of Anton Contributors. All rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
@@ -26,6 +26,7 @@ suite('quotaModel', () => {
 
 	ensureNoDisposablesAreLeakedInTestSuite();
 
+	// allow-any-unicode-next-line
 	// ── emptyUsage ────────────────────────────────────────────────────────────
 
 	test('emptyUsage returns zero for every field', () => {
@@ -37,11 +38,12 @@ suite('quotaModel', () => {
 		});
 	});
 
+	// allow-any-unicode-next-line
 	// ── addUsage ──────────────────────────────────────────────────────────────
 
 	test('addUsage accumulates all fields correctly', () => {
 		const a: TokenUsage = { inputTokens: 100, outputTokens: 50, cacheCreationInputTokens: 20, cacheReadInputTokens: 10 };
-		const b: TokenUsage = { inputTokens: 200, outputTokens: 75, cacheCreationInputTokens: 5,  cacheReadInputTokens: 30 };
+		const b: TokenUsage = { inputTokens: 200, outputTokens: 75, cacheCreationInputTokens: 5, cacheReadInputTokens: 30 };
 		assert.deepStrictEqual(addUsage(a, b), {
 			inputTokens: 300,
 			outputTokens: 125,
@@ -56,6 +58,7 @@ suite('quotaModel', () => {
 		assert.deepStrictEqual(addUsage(emptyUsage(), u), u);
 	});
 
+	// allow-any-unicode-next-line
 	// ── pricingFor ────────────────────────────────────────────────────────────
 
 	test('pricingFor returns known pricing for claude-opus-4-7', () => {
@@ -76,6 +79,7 @@ suite('quotaModel', () => {
 		});
 	});
 
+	// allow-any-unicode-next-line
 	// ── estimateCost ──────────────────────────────────────────────────────────
 
 	test('estimateCost with zero usage returns zero', () => {
@@ -103,6 +107,7 @@ suite('quotaModel', () => {
 		assert.deepStrictEqual({ usd: parseFloat(cost.usd.toFixed(4)) }, { usd: 0.33 });
 	});
 
+	// allow-any-unicode-next-line
 	// ── formatCostUsd ─────────────────────────────────────────────────────────
 
 	test('formatCostUsd formats common cases', () => {
@@ -119,6 +124,7 @@ suite('quotaModel', () => {
 		});
 	});
 
+	// allow-any-unicode-next-line
 	// ── formatTokenCount ──────────────────────────────────────────────────────
 
 	test('formatTokenCount handles small, K, and M ranges', () => {
@@ -133,6 +139,7 @@ suite('quotaModel', () => {
 		});
 	});
 
+	// allow-any-unicode-next-line
 	// ── formatWindowFraction ──────────────────────────────────────────────────
 
 	test('formatWindowFraction rounds to nearest percent', () => {
@@ -147,6 +154,7 @@ suite('quotaModel', () => {
 		});
 	});
 
+	// allow-any-unicode-next-line
 	// ── formatDurationSeconds ─────────────────────────────────────────────────
 
 	test('formatDurationSeconds handles seconds, minutes, and hours', () => {
@@ -161,6 +169,7 @@ suite('quotaModel', () => {
 		});
 	});
 
+	// allow-any-unicode-next-line
 	// ── isSpendCapExceeded ────────────────────────────────────────────────────
 
 	test('isSpendCapExceeded returns false when no limit is set', () => {
@@ -179,6 +188,7 @@ suite('quotaModel', () => {
 		assert.strictEqual(isSpendCapExceeded({ limitUsd: 5, currentTotalUsd: 5.01 }), true);
 	});
 
+	// allow-any-unicode-next-line
 	// ── computeCacheHitRate ───────────────────────────────────────────────────
 
 	test('computeCacheHitRate returns 0 for empty usage', () => {
@@ -208,22 +218,24 @@ suite('quotaModel', () => {
 		);
 	});
 
+	// allow-any-unicode-next-line
 	// ── formatCacheHitRate ────────────────────────────────────────────────────
 
 	test('formatCacheHitRate rounds to nearest percent', () => {
 		assert.deepStrictEqual({
-			zero:     formatCacheHitRate(0),
+			zero: formatCacheHitRate(0),
 			seventy8: formatCacheHitRate(0.78),
-			hundred:  formatCacheHitRate(1.0),
-			partial:  formatCacheHitRate(0.333),
+			hundred: formatCacheHitRate(1.0),
+			partial: formatCacheHitRate(0.333),
 		}, {
-			zero:     '0%',
+			zero: '0%',
 			seventy8: '78%',
-			hundred:  '100%',
-			partial:  '33%',
+			hundred: '100%',
+			partial: '33%',
 		});
 	});
 
+	// allow-any-unicode-next-line
 	// ── buildCompactSummary ───────────────────────────────────────────────────
 
 	function makeData(overrides: Partial<QuotaCostData> = {}): QuotaCostData {

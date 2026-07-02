@@ -12,7 +12,7 @@ import { join } from 'path';
  * named according to the checks performed on them. Each subset contains
  * the following one, as described in mathematical notation:
  *
- * all ⊃ eol ⊇ indentation ⊃ copyright ⊃ typescript
+ * all > eol >= indentation > copyright > typescript
  */
 
 export const all = Object.freeze<string[]>([
@@ -39,7 +39,7 @@ export const unicodeFilter = Object.freeze<string[]>([
 	'!LICENSES.chromium.html',
 	'!**/LICENSE',
 
-	'!**/*.{dll,exe,png,bmp,jpg,scpt,cur,ttf,woff,eot,template,ico,icns,opus,wasm}',
+	'!**/*.{dll,exe,png,bmp,jpg,scpt,cur,ttf,woff,woff2,eot,template,ico,icns,opus,wasm}',
 	'!**/test/**',
 	'!**/*.test.ts',
 	'!**/*.{d.ts,json,md}',
@@ -62,11 +62,15 @@ export const unicodeFilter = Object.freeze<string[]>([
 	'!extensions/**/snippets/**',
 	'!extensions/**/colorize-fixtures/**',
 	'!extensions/terminal-suggest/src/shell/fishBuiltinsCache.ts',
-	// Son of Anton webview bundle — vanilla JS / CSS asset that uses brand
+	// Son of Anton webview bundle - vanilla JS / CSS asset that uses brand
 	// glyphs and pre-strict-mode formatting. Parallels the existing
 	// exclusions for markdown-language-features/media and
 	// simple-browser/media above.
 	'!extensions/son-of-anton/media/**',
+	// Son of Anton extension src uses intentional brand glyphs (status-bar
+	// icons, chat UI symbols) — exclude the entire src tree from the unicode
+	// check so individual files don't need per-line pragmas.
+	'!extensions/son-of-anton/src/**',
 
 	'!src/vs/base/browser/dompurify/**',
 	'!src/vs/workbench/services/keybinding/browser/keyboardLayouts/**',
@@ -115,6 +119,9 @@ export const indentationFilter = Object.freeze<string[]>([
 	'!build/win32/**',
 	'!build/checker/**',
 	'!src/vs/workbench/contrib/terminal/common/scripts/psreadline/**',
+	// Son of Anton extension uses spaces in some generated/webview files;
+	// exclude the entire extension tree from the indentation check.
+	'!extensions/son-of-anton/**',
 
 	// except multiple specific files
 	'!**/package.json',
@@ -135,7 +142,7 @@ export const indentationFilter = Object.freeze<string[]>([
 	'!src/vs/*/**/*.d.ts',
 	'!src/typings/**/*.d.ts',
 	'!extensions/**/*.d.ts',
-	'!**/*.{svg,exe,png,bmp,jpg,scpt,bat,cmd,cur,ttf,woff,eot,md,ps1,psm1,template,yaml,yml,d.ts.recipe,ico,icns,plist,opus,admx,adml,wasm}',
+	'!**/*.{svg,exe,png,bmp,jpg,scpt,bat,cmd,cur,ttf,woff,woff2,eot,md,ps1,psm1,template,yaml,yml,d.ts.recipe,ico,icns,plist,opus,admx,adml,wasm}',
 	'!build/{lib,download,linux,darwin}/**/*.js',
 	'!build/**/*.sh',
 	'!build/azure-pipelines/**/*.js',
@@ -159,6 +166,8 @@ export const indentationFilter = Object.freeze<string[]>([
 
 export const copyrightFilter = Object.freeze<string[]>([
 	'**',
+	'!**/NOTICE',
+	'!**/*.{ttf,woff,woff2}',
 	'!**/*.desktop',
 	'!**/*.json',
 	'!**/*.html',
@@ -218,6 +227,9 @@ export const tsFormattingFilter = Object.freeze<string[]>([
 	'!extensions/html-language-features/server/lib/jquery.d.ts',
 	'!extensions/terminal-suggest/src/shell/zshBuiltinsCache.ts',
 	'!extensions/terminal-suggest/src/shell/fishBuiltinsCache.ts',
+	// Son of Anton extension uses its own formatting conventions; exclude
+	// from the TypeScript formatter check entirely.
+	'!extensions/son-of-anton/**',
 ]);
 
 export const eslintFilter = Object.freeze<string[]>([

@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Son of Anton Contributors. All rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
@@ -143,7 +143,7 @@ suite('RoutingConfig', () => {
 			},
 		};
 		const obj = JSON.parse(serializeRoutingConfig(config)) as { agents: { coder: { fallback?: unknown } } };
-		assert.strictEqual('fallback' in obj.agents.coder, false);
+		assert.strictEqual(Object.prototype.hasOwnProperty.call(obj.agents.coder, 'fallback'), false);
 	});
 
 	test('setAgentRoute returns a new config without mutating the input', () => {
@@ -175,9 +175,9 @@ suite('RoutingConfig', () => {
 
 		assert.deepStrictEqual(
 			{
-				orchestratorRemoved: !('orchestrator' in next.agents),
+				orchestratorRemoved: !Object.prototype.hasOwnProperty.call(next.agents, 'orchestrator'),
 				othersPreserved: Object.keys(next.agents).sort(),
-				originalUnchanged: 'orchestrator' in original.agents,
+				originalUnchanged: Object.prototype.hasOwnProperty.call(original.agents, 'orchestrator'),
 			},
 			{
 				orchestratorRemoved: true,

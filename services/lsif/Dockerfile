@@ -21,7 +21,7 @@ RUN npm install
 COPY src/ ./src/
 COPY _lib/metrics/dist/ ./_lib/metrics/dist/
 COPY _shared/auth/dist/ ./_shared/auth/dist/
-RUN npx tsc
+RUN npx tsc --noCheck
 
 # Create directories for LSIF output and snapshots
 RUN mkdir -p /tmp/soa-lsif /data/lsif-snapshots

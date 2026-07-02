@@ -23,4 +23,4 @@ COPY _shared/auth/dist/ ./dist/_shared/auth/dist/
 
 EXPOSE 3202
 
-CMD ["node", "dist/src/index.js"]
+CMD ["node", "dist/src/main.js"]

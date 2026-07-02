@@ -69,12 +69,9 @@ suite('CostReporter', () => {
 				opus: byModel.opus,
 				haiku: byModel.haiku,
 				sonnetUsed: byModel.sonnet > 0,
-				// The full model catalogue is seeded to zero, so every known
-				// model appears even when unused. Assert "many models present"
-				// rather than an exact count so the test survives catalogue growth.
-				manyModels: Object.keys(byModel).length > 3,
+				keyCount: Object.keys(byModel).length,
 			},
-			{ opus: 0, haiku: 0, sonnetUsed: true, manyModels: true },
+			{ opus: 0, haiku: 0, sonnetUsed: true, keyCount: 102 },
 		);
 	});
 

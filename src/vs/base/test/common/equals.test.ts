@@ -100,7 +100,7 @@ suite('Equals', () => {
 		assert.strictEqual(structuralEquals({ a: [1, 2] }, { a: [1, 2] }), true);
 
 		// Custom Prototypes / Classes (should use strict equality)
-		class A { constructor(public val: number) {} }
+		class A { constructor(public val: number) { } }
 		const a1 = new A(1);
 		const a2 = new A(1);
 		assert.strictEqual(structuralEquals(a1, a1), true);
@@ -126,7 +126,7 @@ suite('Equals', () => {
 		assert.notStrictEqual(getStructuralKey({ a: 1 }), getStructuralKey({ a: 2 }));
 
 		// Custom prototypes
-		class A { constructor(public val: number) {} }
+		class A { constructor(public val: number) { } }
 		const a1 = new A(1);
 		const a2 = new A(1);
 		assert.strictEqual(getStructuralKey(a1), getStructuralKey(a1));
@@ -149,7 +149,7 @@ suite('Equals', () => {
 
 	test('thisEqualsC', () => {
 		class TestItem {
-			constructor(public val: number) {}
+			constructor(public val: number) { }
 			equals(other: TestItem): boolean {
 				return this.val === other.val;
 			}

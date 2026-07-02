@@ -266,7 +266,11 @@ export abstract class Pane extends Disposable implements IView {
 		const onKeyDown = this._register(new DomEmitter(this.header, 'keydown'));
 		const onHeaderKeyDown = Event.map(onKeyDown.event, e => new StandardKeyboardEvent(e), eventDisposables);
 
-		this._register(Event.filter(onHeaderKeyDown, e => e.keyCode === KeyCode.Enter || e.keyCode === KeyCode.Space, eventDisposables)(() => this.setExpanded(!this.isExpanded()), null));
+		this._register(Event.filter(onHeaderKeyDown, e => e.keyCode === KeyCode.Enter || e.keyCode === KeyCode.Space, eventDisposables)(e => {
+			e.preventDefault();
+			e.stopPropagation();
+			this.setExpanded(!this.isExpanded());
+		}, null));
 
 		this._register(Event.filter(onHeaderKeyDown, e => e.keyCode === KeyCode.LeftArrow, eventDisposables)(() => this.setExpanded(false), null));
 

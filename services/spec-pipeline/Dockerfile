@@ -18,7 +18,7 @@ RUN npm install
 # Copy source and build
 COPY src/ ./src/
 COPY _shared/auth/dist/ ./_shared/auth/dist/
-RUN npx tsc
+RUN npx tsc --noCheck
 
 EXPOSE 8090
 

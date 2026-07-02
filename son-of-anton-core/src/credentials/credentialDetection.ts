@@ -2,6 +2,7 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
+import { isCodexAvailable } from '../llm/codexRunner';
 import type { CredentialBroker } from '../auth/CredentialBroker';
 import type { ConfigStore, SecretStore } from '../host';
 
@@ -126,46 +127,39 @@ export async function detectCredentials(
 		|| nonEmpty(env.GOOGLE_API_KEY)
 		|| nonEmpty(env.GEMINI_API_KEY);
 
-	const openRouterHasKey = nonEmpty(openRouterSecret)
+	const openrouterHasKey = nonEmpty(openRouterSecret)
 		|| nonEmpty(config.get<string>('openRouterApiKey'))
 		|| nonEmpty(env.OPENROUTER_API_KEY);
 
-	// Local-server providers don't carry a "key" — having the base URL set
-	// (or the daemon being installed at the default port) is the proxy for
-	// "configured". We cheat slightly here and report `hasBaseUrl: true`
-	// when the user has explicitly stored a URL or when they've completed
-	// the saver flow (which always writes the default URL into settings).
 	const ollamaHasBaseUrl = nonEmpty(config.get<string>('ollamaBaseUrl'));
-	const lmstudioHasBaseUrl = nonEmpty(config.get<string>('lmstudioBaseUrl'))
-		|| nonEmpty(lmstudioSecret);
 
-	const deepSeekHasKey = nonEmpty(deepSeekSecret)
+	const lmstudioHasBaseUrl = nonEmpty(lmstudioSecret)
+		|| nonEmpty(config.get<string>('lmstudioApiKey'))
+		|| nonEmpty(config.get<string>('lmstudioBaseUrl'));
+
+	const deepseekHasKey = nonEmpty(deepSeekSecret)
 		|| nonEmpty(config.get<string>('deepSeekApiKey'))
 		|| nonEmpty(env.DEEPSEEK_API_KEY);
+
 	const mistralHasKey = nonEmpty(mistralSecret)
 		|| nonEmpty(config.get<string>('mistralApiKey'))
 		|| nonEmpty(env.MISTRAL_API_KEY);
+
 	const groqHasKey = nonEmpty(groqSecret)
 		|| nonEmpty(config.get<string>('groqApiKey'))
 		|| nonEmpty(env.GROQ_API_KEY);
+
 	const cerebrasHasKey = nonEmpty(cerebrasSecret)
 		|| nonEmpty(config.get<string>('cerebrasApiKey'))
 		|| nonEmpty(env.CEREBRAS_API_KEY);
+
 	const togetherHasKey = nonEmpty(togetherSecret)
 		|| nonEmpty(config.get<string>('togetherApiKey'))
 		|| nonEmpty(env.TOGETHER_API_KEY);
+
 	const fireworksHasKey = nonEmpty(fireworksSecret)
 		|| nonEmpty(config.get<string>('fireworksApiKey'))
 		|| nonEmpty(env.FIREWORKS_API_KEY);
-
-	// Codex CLI — `codex` binary on PATH is the proxy for "configured".
-	let codexHasCli = false;
-	try {
-		const { isCodexAvailable } = await import('../llm/codexRunner.js');
-		codexHasCli = isCodexAvailable();
-	} catch {
-		codexHasCli = false;
-	}
 
 	return {
 		anthropic: { hasApiKey: anthropicHasKey, hasOAuth: oauthConnected('anthropic-oauth') },
@@ -173,16 +167,16 @@ export async function detectCredentials(
 		foundry: { hasApiKey: foundryHasKey, hasEndpoint: foundryHasEndpoint },
 		bedrock: { hasAccessKey: bedrockHasAccessKey, hasProfile: bedrockHasProfile },
 		google: { hasApiKey: googleHasKey },
-		openrouter: { hasApiKey: openRouterHasKey },
+		openrouter: { hasApiKey: openrouterHasKey },
 		ollama: { hasBaseUrl: ollamaHasBaseUrl },
 		lmstudio: { hasBaseUrl: lmstudioHasBaseUrl },
-		deepseek: { hasApiKey: deepSeekHasKey },
+		deepseek: { hasApiKey: deepseekHasKey },
 		mistral: { hasApiKey: mistralHasKey },
 		groq: { hasApiKey: groqHasKey },
 		cerebras: { hasApiKey: cerebrasHasKey },
 		together: { hasApiKey: togetherHasKey },
 		fireworks: { hasApiKey: fireworksHasKey },
-		codex: { hasCli: codexHasCli },
+		codex: { hasCli: isCodexAvailable() },
 	};
 }
 
