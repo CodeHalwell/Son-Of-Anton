@@ -4,9 +4,10 @@
 	"description": "Son of Anton — MCP gateway exposing code graph and vector search tools",
 	"main": "dist/index.js",
 	"scripts": {
-		"build": "tsc",
+		"build": "node build.mjs",
+		"typecheck": "tsc --noEmit",
 		"start": "node dist/index.js",
-		"dev": "tsc --watch & nodemon dist/index.js",
+		"dev": "node build.mjs --watch & nodemon dist/index.js",
 		"test": "node --test test/**/*.test.js",
 		"lint": "eslint src/**/*.ts"
 	},
@@ -18,6 +19,7 @@
 	},
 	"devDependencies": {
 		"@types/node": "^20.0.0",
+		"esbuild": "^0.24.2",
 		"typescript": "^5.6.0"
 	},
 	"private": true

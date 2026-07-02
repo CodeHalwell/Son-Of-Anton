@@ -5,8 +5,7 @@
 import * as vscode from 'vscode';
 import { globalScopedConfig } from './globalScopedConfig';
 import { LlmClient, LlmContentPart, LlmMessage, ModelId, ToolDefinition as LlmToolDefinition } from 'son-of-anton-core/llm/LlmClient';
-import { ToolRegistry, createInstrumentedWorkspaceToolContext } from '../tools/registry';
-import type { ApprovalRequest } from '../tools/registry';
+import { ToolRegistry, createInstrumentedWorkspaceToolContext, type ApprovalRequest } from '../tools/registry';
 import { clearActiveApproval, getActiveApproval, setActiveApproval } from './approvalRegistry';
 import type { HookRunner } from 'son-of-anton-core/persistence/HookRunner';
 import { ToolExecutionResult, ToolCategory } from 'son-of-anton-core/tools/types';
@@ -369,6 +368,7 @@ export class ChatSession {
 	/**
 	 * Generative-UI block ids that have already been rendered for the
 	 * current session. The first emit creates the block; subsequent emits
+	 * allow-any-unicode-next-line
 	 * with the same id are logged-and-ignored (per spec §"No re-render on
 	 * subsequent emits with the same blockId"). Cleared on
 	 * `clearConversation` and on reload paths so reloaded sessions can
@@ -1634,9 +1634,9 @@ export class ChatSession {
 						// we drive the rename directly via the store with an inline
 						// input box for the new title.
 						const id = typeof message.id === 'string' ? message.id : '';
-						if (!id) break;
+						if (!id) { break; }
 						const current = this.conversationStore.list().find(s => s.id === id);
-						if (!current) break;
+						if (!current) { break; }
 						const next = await vscode.window.showInputBox({
 							prompt: 'Rename conversation',
 							value: current.title,
@@ -1652,11 +1652,11 @@ export class ChatSession {
 						// delete flow without requiring a TreeItem argument so the
 						// History tab can call it directly.
 						const id = typeof message.id === 'string' ? message.id : '';
-						if (!id) break;
+						if (!id) { break; }
 						const current = this.conversationStore.list().find(s => s.id === id);
-						if (!current) break;
+						if (!current) { break; }
 						const choice = await vscode.window.showWarningMessage(
-							`Delete conversation “${current.title}”?`,
+							`Delete conversation "${current.title}"?`,
 							{ modal: true },
 							'Delete',
 						);
@@ -2016,7 +2016,7 @@ export class ChatSession {
 			bedrock: parseMap('bedrockProfiles'),
 			google: parseMap('googleProfiles'),
 		};
-		if (provider && provider in profiles) {
+		if (provider && Object.hasOwn(profiles, provider)) {
 			this.webview.postMessage({ type: 'providerProfiles', provider, profiles: profiles[provider] });
 			return;
 		}
@@ -2248,17 +2248,17 @@ export class ChatSession {
 		readonly displayName: string;
 		readonly defaultModel: string;
 	}> = [
-		{ handle: 'anton', displayName: 'Orchestrator', defaultModel: 'opus' },
-		{ handle: 'anton-code', displayName: 'Code', defaultModel: 'sonnet' },
-		{ handle: 'anton-test', displayName: 'Test', defaultModel: 'sonnet' },
-		{ handle: 'anton-e2e', displayName: 'E2E', defaultModel: 'sonnet' },
-		{ handle: 'anton-security', displayName: 'Security', defaultModel: 'sonnet' },
-		{ handle: 'anton-docs', displayName: 'Docs', defaultModel: 'haiku' },
-		{ handle: 'anton-ci', displayName: 'CI', defaultModel: 'sonnet' },
-		{ handle: 'anton-pr', displayName: 'PR', defaultModel: 'sonnet' },
-		{ handle: 'anton-moderniser', displayName: 'Moderniser', defaultModel: 'sonnet' },
-		{ handle: 'anton-review', displayName: 'Review', defaultModel: 'sonnet' },
-	];
+			{ handle: 'anton', displayName: 'Orchestrator', defaultModel: 'opus' },
+			{ handle: 'anton-code', displayName: 'Code', defaultModel: 'sonnet' },
+			{ handle: 'anton-test', displayName: 'Test', defaultModel: 'sonnet' },
+			{ handle: 'anton-e2e', displayName: 'E2E', defaultModel: 'sonnet' },
+			{ handle: 'anton-security', displayName: 'Security', defaultModel: 'sonnet' },
+			{ handle: 'anton-docs', displayName: 'Docs', defaultModel: 'haiku' },
+			{ handle: 'anton-ci', displayName: 'CI', defaultModel: 'sonnet' },
+			{ handle: 'anton-pr', displayName: 'PR', defaultModel: 'sonnet' },
+			{ handle: 'anton-moderniser', displayName: 'Moderniser', defaultModel: 'sonnet' },
+			{ handle: 'anton-review', displayName: 'Review', defaultModel: 'sonnet' },
+		];
 
 	/**
 	 * Resolve a webview-supplied scope discriminator to a
@@ -4373,7 +4373,7 @@ export class ChatSession {
 							</button>
 							<button class="provider-card" type="button" data-provider="foundry">
 								<div class="provider-card-header">
-									<span class="provider-card-icon provider-card-icon-foundry" aria-hidden="true">⌬</span>
+									<span class="provider-card-icon provider-card-icon-foundry" aria-hidden="true">&#9004;</span>
 									<span class="provider-card-name">Microsoft Foundry / Azure OpenAI</span>
 									<span class="provider-card-status" data-status="foundry">Not configured</span>
 								</div>
@@ -4474,7 +4474,7 @@ export class ChatSession {
 					</div>
 
 					<!-- Inline form for the selected provider. Rendered into this slot
-					     by JS when a card is clicked; cleared when the user backs out. -->
+					by JS when a card is clicked; cleared when the user backs out. -->
 					<div class="provider-form-host" id="providerFormHost" hidden></div>
 				</div>
 			</div>
@@ -4724,9 +4724,9 @@ export class ChatSession {
 						<label class="settings-field" id="settingsAntonIsWatchingFrequencyField">
 							<span class="settings-field-label">Frequency</span>
 							<select class="settings-input" data-setting-select="sota.personality.antonIsWatching.frequency">
-								<option value="rare">Rare (2–4 hour window)</option>
-								<option value="normal">Normal (30 min – 4 hour window)</option>
-								<option value="often">Often (10 min – 2 hour window)</option>
+								<option value="rare">Rare (2-4 hour window)</option>
+								<option value="normal">Normal (30 min - 4 hour window)</option>
+								<option value="often">Often (10 min - 2 hour window)</option>
 							</select>
 						</label>
 					</section>
@@ -4819,9 +4819,9 @@ export class ChatSession {
 							<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 6l4 4 4-4"/></svg>
 						</button>
 						<!-- Phase 4 — reasoning controls. The two chips below are
-						     hidden by default and toggled in JS based on the active
-						     model id. Keeping the markup permanent (vs. injecting on
-						     demand) avoids re-rendering the toolbar on model swaps. -->
+						hidden by default and toggled in JS based on the active
+						model id. Keeping the markup permanent (vs. injecting on
+						demand) avoids re-rendering the toolbar on model swaps. -->
 						<button class="toolbar-chip toolbar-chip-reasoning" id="reasoningEffortChip" aria-haspopup="true" hidden title="Reasoning effort">
 							<span class="toolbar-chip-prefix">Effort:</span>
 							<span id="reasoningEffortLabel">medium</span>

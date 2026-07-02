@@ -16,10 +16,13 @@ COPY src/ ./src/
 COPY _lib/metrics/dist/ ./_lib/metrics/dist/
 COPY _lib/tracing/dist/ ./_lib/tracing/dist/
 COPY _shared/auth/dist/ ./_shared/auth/dist/
-# Give tsc explicit heap headroom: in the memory-constrained CI Docker builder
-# (running alongside the heavy native indexer build) the default V8 heap limit
-# was exhausted, aborting `tsc` with SIGABRT (exit 134).
-RUN NODE_OPTIONS="--max-old-space-size=4096" npx tsc
+# Transpile with esbuild rather than `tsc`. tsc has to resolve and instantiate
+# the MCP SDK's deeply-nested Zod tool-schema types, which balloons past a 4 GB
+# heap (SIGABRT / exit 134) in the CI Docker builder even with `skipLibCheck`.
+# esbuild strips types without resolving the declaration graph, so the image
+# build is fast and deterministic. Type-checking stays available out-of-band via
+# `npm run typecheck`.
+RUN npm run build
 
 EXPOSE 3100
 

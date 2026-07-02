@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import { readFileSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
@@ -150,6 +151,14 @@ export function createServer() {
 	app.use(express.json({ limit: '10mb' }));
 	app.use(expressTracingMiddleware('model-router'));
 	app.use(expressMetricsMiddleware('model-router'));
+	// Throttle inter-service traffic; health and metrics probes are exempt.
+	app.use(rateLimit({
+		windowMs: 60_000,
+		max: 1000,
+		standardHeaders: true,
+		legacyHeaders: false,
+		skip: (req) => req.path === '/health' || req.path === '/metrics',
+	}));
 	// Enforce inter-service auth (exempts /health and /metrics).
 	app.use(createAuthMiddleware());
 

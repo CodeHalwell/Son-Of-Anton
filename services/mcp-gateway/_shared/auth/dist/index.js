@@ -69,8 +69,15 @@ function extractBearer(header) {
     if (typeof value !== 'string') {
         return undefined;
     }
-    const match = value.match(/^Bearer\s+(.+)$/i);
-    return match ? match[1].trim() : undefined;
+    // Linear-time parse: match only the fixed "Bearer" scheme plus one whitespace
+    // character, then slice the remainder as the token. A single regex such as
+    // /^Bearer\s+(.+)$/ backtracks polynomially on crafted whitespace (e.g.
+    // "bearer\t\t…\t"), so we deliberately avoid the ambiguous `\s+(.+)`.
+    if (!/^Bearer[ \t]/i.test(value)) {
+        return undefined;
+    }
+    const token = value.slice('Bearer'.length).trim();
+    return token.length > 0 ? token : undefined;
 }
 /** Normalise a request path, stripping any query string. */
 function normalisePath(pathname) {

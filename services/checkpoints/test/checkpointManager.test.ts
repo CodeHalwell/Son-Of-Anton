@@ -12,19 +12,20 @@ import * as crypto from 'node:crypto';
 import { CheckpointManager } from '../src/checkpointManager.js';
 import { CheckpointStorage } from '../src/storage.js';
 
-function tmpDir(): string {
-	return path.join(os.tmpdir(), `checkpoints-test-${crypto.randomUUID()}`);
-}
-
 describe('CheckpointManager', () => {
+	let baseDir: string;
 	let workspaceRoot: string;
 	let storagePath: string;
 	let storage: CheckpointStorage;
 	let manager: CheckpointManager;
 
 	beforeEach(async () => {
-		workspaceRoot = tmpDir();
-		storagePath = tmpDir();
+		// Create a single unpredictable base directory under the system temp dir; the
+		// workspace and storage roots (and their sibling fixtures) all live inside it,
+		// so nothing is written to a predictable path directly under os.tmpdir().
+		baseDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sota-checkpoints-'));
+		workspaceRoot = path.join(baseDir, 'workspace');
+		storagePath = path.join(baseDir, 'storage');
 		await fs.mkdir(workspaceRoot, { recursive: true });
 		await fs.mkdir(storagePath, { recursive: true });
 
@@ -33,8 +34,7 @@ describe('CheckpointManager', () => {
 	});
 
 	afterEach(async () => {
-		await fs.rm(workspaceRoot, { recursive: true, force: true });
-		await fs.rm(storagePath, { recursive: true, force: true });
+		await fs.rm(baseDir, { recursive: true, force: true });
 	});
 
 	test('creating a checkpoint captures file content correctly', async () => {

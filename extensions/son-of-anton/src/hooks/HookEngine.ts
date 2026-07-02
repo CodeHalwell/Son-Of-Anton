@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Son of Anton Contributors. All rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
@@ -115,16 +115,16 @@ export class HookEngine {
 			const pattern = hook.filter ?? '**/*';
 			const watcher = vscode.workspace.createFileSystemWatcher(pattern);
 
-            const handleChange = async (uri: vscode.Uri) => {
-                if (this.isDisabled(hook.name)) {
-                    return;
-                }
-                try {
-                    await this.executeHook(hook, { filePath: uri.fsPath, trigger: 'onFileSave' });
-                } catch (err) {
-                    console.error(`Error executing onFileSave hook '${hook.name}':`, err);
-                }
-            };
+			const handleChange = async (uri: vscode.Uri) => {
+				if (this.isDisabled(hook.name)) {
+					return;
+				}
+				try {
+					await this.executeHook(hook, { filePath: uri.fsPath, trigger: 'onFileSave' });
+				} catch (err) {
+					console.error(`Error executing onFileSave hook '${hook.name}':`, err);
+				}
+			};
 
 			watcher.onDidChange(handleChange);
 			watcher.onDidCreate(handleChange);

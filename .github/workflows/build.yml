@@ -48,6 +48,14 @@ jobs:
         run: npm run typecheck
         working-directory: build
 
+      # The son-of-anton IDE extension imports the shared agent runtime via a
+      # `paths` mapping onto `son-of-anton-core/dist/*.d.ts`, so `core-ci`'s
+      # extension typecheck (tsgo) needs those declarations to exist first.
+      # Build the core package before the monolithic compile. (The
+      # cross-package typecheck + harness jobs do the same.)
+      - name: Build son-of-anton-core (extension typecheck dependency)
+        run: npm --prefix son-of-anton-core run build
+
       - name: Compile & Hygiene
         run: npm exec -- npm-run-all2 -lp core-ci hygiene eslint valid-layers-check
         env:
@@ -156,7 +164,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y build-essential pkg-config libx11-dev libx11-xcb-dev libxkbfile-dev libnotify-bin libkrb5-dev xvfb libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2
+          sudo apt-get install -y build-essential pkg-config libx11-dev libx11-xcb-dev libxkbfile-dev libnotify-bin libkrb5-dev xvfb libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64
 
       - name: Install root dependencies
         run: npm ci

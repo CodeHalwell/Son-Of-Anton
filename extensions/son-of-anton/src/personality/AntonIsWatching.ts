@@ -15,20 +15,21 @@ import { ChatPanel } from '../chat/ChatPanel';
  */
 const MESSAGES: ReadonlyArray<string> = [
 	'I see you renamed that variable. The variable saw you, too.',
-	"You've had console.log('here') open for 47 minutes. Just leaving that there.",
-	"That tab is unused. I know. I see it. We don't have to talk about it.",
-	"Your last commit message was 'fix'. I have notes.",
+	'You\'ve had console.log(\'here\') open for 47 minutes. Just leaving that there.',
+	'That tab is unused. I know. I see it. We don\'t have to talk about it.',
+	'Your last commit message was \'fix\'. I have notes.',
+	// allow-any-unicode-next-line
 	'You opened the same file 12 times today. You can pin it, you know. (You won’t.)',
 	'I noticed you used a switch statement. I have so many feelings about this.',
-	"Just so we're clear, I see all the TODO comments. All of them.",
-	"That function is 200 lines long. I'm not judging. I'm noticing.",
+	'Just so we\'re clear, I see all the TODO comments. All of them.',
+	'That function is 200 lines long. I\'m not judging. I\'m noticing.',
 	'You alt-tabbed three times in the last minute. The code is right here.',
 	'There is unsaved work in another window. I will remember this.',
 	'You ran the same test 8 times. The result will not improve through repetition.',
 	'I observed you accept that suggestion. We will revisit this decision.',
 	'Your indentation is mixed tabs and spaces in this file. I see you.',
-	"You've been writing TypeScript for 4 hours. The compiler is not your friend; I am.",
-	"That's the third time you've opened the file picker. The file you want is README.md.",
+	'You\'ve been writing TypeScript for 4 hours. The compiler is not your friend; I am.',
+	'That\'s the third time you\'ve opened the file picker. The file you want is README.md.',
 	'I have indexed every regex in this codebase. They are all wrong.',
 ];
 
@@ -151,6 +152,7 @@ export class AntonIsWatching implements vscode.Disposable {
 			// Fallback: chat surface isn't mounted, so we can't render the
 			// animated overlay. Surface the line as a plain notification —
 			// the bit still lands, just without the SVG flourish.
+			// allow-any-unicode-next-line
 			void vscode.window.showInformationMessage(`◇ Anton: ${message}`);
 		}
 	}
@@ -174,6 +176,7 @@ export class AntonIsWatching implements vscode.Disposable {
 		const message = pickAntonMessage();
 		const posted = ChatPanel.broadcastAntonIsWatching(message);
 		if (!posted) {
+			// allow-any-unicode-next-line
 			void vscode.window.showInformationMessage(`◇ Anton: ${message}`);
 		}
 	}

@@ -171,7 +171,7 @@ export class CodeGraphBackend implements vscode.Disposable {
 			// embedded backend would contradict the setting; surface it as a
 			// failure with actionable guidance instead.
 			const reason =
-				"backend=docker but no legacy services/{indexer,lsif,mcp-gateway} stack found on ports " +
+				'backend=docker but no legacy services/{indexer,lsif,mcp-gateway} stack found on ports ' +
 				`${LEGACY_DOCKER_PORTS.join(', ')} — start the legacy stack or set sota.codeGraph.backend to 'auto' / 'embedded'`;
 			this.log(reason);
 			this.setState('failed', reason);

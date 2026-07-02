@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import type { Request, Response } from 'express';
 import { CheckpointManager } from './checkpointManager.js';
 import { CheckpointStorage } from './storage.js';
@@ -15,6 +16,14 @@ export function createServer(manager: CheckpointManager): express.Express {
 	const app = express();
 	app.use(express.json());
 	app.use(expressMetricsMiddleware('checkpoints'));
+	// Throttle inter-service traffic; health and metrics probes are exempt.
+	app.use(rateLimit({
+		windowMs: 60_000,
+		max: 1000,
+		standardHeaders: true,
+		legacyHeaders: false,
+		skip: (req) => req.path === '/health' || req.path === '/metrics',
+	}));
 	// Enforce inter-service auth (exempts /health and /metrics).
 	app.use(createAuthMiddleware());
 

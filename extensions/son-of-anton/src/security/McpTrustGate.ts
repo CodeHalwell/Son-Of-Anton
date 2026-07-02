@@ -34,8 +34,6 @@ export interface McpTrustGateDeps {
 	readonly globalState: vscode.Memento;
 	/** Server names the user/admin has pre-trusted via user/global settings. */
 	readonly getConfiguredTrusted: () => string[];
-	/** True for the bundled internal code-graph server, which is never gated. */
-	readonly isBundledServer: (name: string) => boolean;
 	/** Ask the MCP client to re-read servers after an async approval. */
 	readonly requestReconcile: () => void;
 	/** Prompt the user for a decision. Defaults to a modal warning dialog. */
@@ -97,7 +95,13 @@ export class McpTrustGate implements vscode.Disposable {
 				out.push(entry);
 				continue;
 			}
-			if (this.deps.isBundledServer(name) || this.approved.has(name) || configured.has(name)) {
+			// Only names the user/admin has explicitly trusted (persisted approvals
+			// or the `sota.mcp.trustedServers` setting) pass unprompted. We do NOT
+			// exempt by "bundled" name: the genuine code-graph backend is appended
+			// by the extension *after* this filter runs, so it never flows through
+			// here — and a name-based exemption would let a workspace-supplied
+			// `sota.mcp.servers` entry claim the bundled name to bypass the prompt.
+			if (this.approved.has(name) || configured.has(name)) {
 				out.push(entry);
 				continue;
 			}

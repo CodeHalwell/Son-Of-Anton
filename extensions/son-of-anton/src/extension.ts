@@ -139,7 +139,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	// MCP server. The closure captures the reference and reads it at call
 	// time — the backend's `onDidChangeState` re-fires `onSettingChange` so
 	// the McpClient reconciles when the embedded server comes up or down.
-	let codeGraphBackendRef: CodeGraphBackend | undefined;
+	const codeGraphBackendRef: { current: CodeGraphBackend | undefined } = { current: undefined };
 	const codeGraphSettingChangeListeners: Array<() => void> = [];
 	const fireCodeGraphSettingChange = (): void => {
 		for (const listener of codeGraphSettingChangeListeners) {
@@ -152,8 +152,11 @@ export function activate(context: vscode.ExtensionContext): void {
 	// servers out of `sota.mcp.servers` BEFORE `McpClient` ever spawns them.
 	// Trust is sourced from user/global config (`sota.mcp.trustedServers` +
 	// persisted approvals), never the workspace, so a cloned repo can't silently
-	// pre-trust a server. The bundled code-graph backend is exempt (it's added
-	// by the extension itself, below).
+	// pre-trust a server. The bundled code-graph backend needs no exemption: it's
+	// appended by `readServersSetting` *after* the gate runs (below), so it never
+	// passes through the filter. (Exempting it by name would let a
+	// workspace-supplied `sota.mcp.servers` entry claim the bundled name and
+	// bypass the prompt.)
 	const supplyChainGuard = new SupplyChainGuard();
 	const mcpTrustGate = new McpTrustGate({
 		guard: supplyChainGuard,
@@ -162,7 +165,6 @@ export function activate(context: vscode.ExtensionContext): void {
 			const raw = vscode.workspace.getConfiguration().get<unknown>('sota.mcp.trustedServers');
 			return Array.isArray(raw) ? raw.filter((n): n is string => typeof n === 'string') : [];
 		},
-		isBundledServer: (name) => codeGraphBackendRef?.getMcpServerEntry()?.name === name,
 		requestReconcile: () => fireCodeGraphSettingChange(),
 	});
 	context.subscriptions.push(mcpTrustGate);
@@ -175,7 +177,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			// client. Untrusted entries are dropped and trigger an async
 			// confirmation prompt; approving one fires a reconcile so it connects.
 			const list: unknown[] = mcpTrustGate.filterTrusted(rawUserList);
-			const backendEntry: CodeGraphMcpEntry | undefined = codeGraphBackendRef?.getMcpServerEntry();
+			const backendEntry: CodeGraphMcpEntry | undefined = codeGraphBackendRef.current?.getMcpServerEntry();
 			if (backendEntry) {
 				// Skip if the user has manually configured a `code-graph` entry
 				// already — their setting wins so existing Docker users aren't
@@ -369,15 +371,16 @@ export function activate(context: vscode.ExtensionContext): void {
 			warn: (message: string) => { void vscode.window.showWarningMessage(message); },
 			error: (message: string) => { void vscode.window.showErrorMessage(message); },
 		};
-		const hostStub = {
-			// Only the surface HookRunner reads is populated; the rest is
-			// asserted via cast since the runner never touches it.
+		// Only the surface HookRunner reads is populated; the rest is
+		// asserted via cast since the runner never touches it.
+		const hostStubShape = {
 			workspace: {
 				folders: [{ fsPath: workspacePath, name: folderName }],
 				isTrusted: true,
 			},
 			notifier,
-		} as unknown as CoreHost;
+		};
+		const hostStub = hostStubShape as unknown as CoreHost;
 		return new HookRunner(hostStub);
 	})();
 
@@ -641,7 +644,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		if (typeof arg === 'string' && arg.length > 0) {
 			return arg;
 		}
-		if (arg && typeof arg === 'object' && 'id' in arg) {
+		if (arg && typeof arg === 'object' && Object.hasOwn(arg, 'id')) {
 			const id = (arg as { id?: unknown }).id;
 			if (typeof id === 'string' && id.length > 0) {
 				return id;
@@ -1493,7 +1496,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		storageDir: context.globalStorageUri.fsPath,
 		output: codeGraphChannel,
 	});
-	codeGraphBackendRef = codeGraphBackend;
+	codeGraphBackendRef.current = codeGraphBackend;
 	context.subscriptions.push(codeGraphBackend);
 
 	// Backend health monitoring. Runs a periodic staleness/alert sweep and
@@ -1697,10 +1700,10 @@ async function runEnableCodeGraph(
 ): Promise<void> {
 	if (!(await controller.isDockerAvailable())) {
 		const choice = await vscode.window.showErrorMessage(
-			"Son of Anton's code graph backend uses Docker (FalkorDB + Qdrant). Docker isn't installed on this machine.",
+			'Son of Anton\'s code graph backend uses Docker (FalkorDB + Qdrant). Docker isn\'t installed on this machine.',
 			{
 				modal: true,
-				detail: "Install Docker Desktop, restart this window, then try Enable Code Graph again. An embedded mode that doesn't need Docker is planned for the next release — chat works fine without the code graph in the meantime.",
+				detail: 'Install Docker Desktop, restart this window, then try Enable Code Graph again. An embedded mode that doesn\'t need Docker is planned for the next release — chat works fine without the code graph in the meantime.',
 			},
 			'Install Docker Desktop',
 			'Open release notes',
@@ -1807,16 +1810,16 @@ async function maybePromptCodeGraphFirstRun(
 		return;
 	}
 	const choice = await vscode.window.showInformationMessage(
-		"Enable Son of Anton's code graph for richer context? Requires Docker Desktop. " +
-		"(An embedded mode that doesn't need Docker is planned for the next release.)",
+		'Enable Son of Anton\'s code graph for richer context? Requires Docker Desktop. ' +
+		'(An embedded mode that doesn\'t need Docker is planned for the next release.)',
 		'Yes',
 		'Not now',
-		"Don't ask again",
+		'Don\'t ask again',
 	);
 	if (choice === 'Yes') {
 		await context.globalState.update(PROMPTED_KEY, true);
 		void vscode.commands.executeCommand('sota.enableCodeGraph');
-	} else if (choice === "Don't ask again") {
+	} else if (choice === 'Don\'t ask again') {
 		await context.globalState.update(PROMPTED_KEY, true);
 	}
 	// "Not now" leaves the flag unset so we ask again next session.

@@ -129,7 +129,7 @@ export class CompletionProvider implements vscode.InlineCompletionItemProvider {
 				i++; // skip escaped character
 				continue;
 			}
-			if (ch === "'") {
+			if (ch === '\'') {
 				singleQuotes++;
 			}
 			if (ch === '"') {

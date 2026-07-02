@@ -40,8 +40,26 @@ if [[ "${1:-}" == "--no-live" ]]; then
 fi
 
 ok() { printf '  \033[32m✓\033[0m  %s\n' "$1"; }
+# allow-any-unicode-next-line
 fail() { printf '  \033[31m✗\033[0m  %s\n' "$1"; exit 1; }
+# allow-any-unicode-next-line
 section() { printf '\n\033[1m▶ %s\033[0m\n' "$1"; }
+
+# Run a command, echo the first N lines of its output, and pass/fail on the
+# command's OWN exit code. Piping straight into `head -N` is unsafe here: once
+# head has read N lines it closes the pipe, the producing command gets SIGPIPE
+# on its next write, and `set -o pipefail` then reports the whole pipeline as
+# failed — turning "printed more than N lines" into a false failure. `sed`
+# consumes all of stdin, so the producer never receives SIGPIPE, and capturing
+# the command inside an `if` keeps `set -e` from aborting on a real non-zero.
+check_cmd() {
+	local desc="$1" lines="$2"
+	shift 2
+	local out rc
+	if out="$("$@" 2>&1)"; then rc=0; else rc=$?; fi
+	printf '%s\n' "$out" | sed -n "1,${lines}p"
+	if [[ $rc -eq 0 ]]; then ok "$desc"; else fail "$desc"; fi
+}
 
 section "1. Build all three packages"
 (cd "$REPO_ROOT/son-of-anton-core" && npm run build >/dev/null 2>&1) && ok "core builds clean" || fail "core build failed"
@@ -57,14 +75,14 @@ node "$CLI_BIN" --version >/dev/null && ok "sota --version" || fail "sota --vers
 node "$CLI_BIN" --help >/dev/null && ok "sota --help" || fail "sota --help exited non-zero"
 
 section "3. Tools registry resolves"
-node "$CLI_BIN" tools list 2>&1 | head -5 && ok "sota tools list" || fail "tools list failed"
+check_cmd "sota tools list" 5 node "$CLI_BIN" tools list
 
 section "4. H16 traces scaffolding"
 node "$CLI_BIN" traces --help >/dev/null && ok "sota traces --help" || fail "traces --help failed"
-node "$CLI_BIN" traces --output json 2>&1 | head -20 && ok "sota traces --output json" || fail "traces failed"
+check_cmd "sota traces --output json" 20 node "$CLI_BIN" traces --output json
 
 section "5. MCP wiring loads"
-node "$CLI_BIN" mcp list 2>&1 | head -5 && ok "sota mcp list" || fail "mcp list failed"
+check_cmd "sota mcp list" 5 node "$CLI_BIN" mcp list
 
 section "6. Workspace bootstrap"
 TMP_INIT="$(mktemp -d)"
@@ -75,7 +93,7 @@ echo '{"name":"smoke-test","scripts":{"build":"tsc"}}' > "$TMP_INIT/package.json
 [[ -f "$TMP_INIT/.son-of-anton/config.json" ]] && ok "config.json written" || fail "config.json missing"
 
 section "7. Hooks runtime"
-node "$CLI_BIN" hooks list 2>&1 | head -3 && ok "sota hooks list" || fail "hooks list failed"
+check_cmd "sota hooks list" 3 node "$CLI_BIN" hooks list
 
 if [[ "$LIVE" == "false" ]]; then
 	echo ""

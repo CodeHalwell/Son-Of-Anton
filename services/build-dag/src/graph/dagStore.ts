@@ -214,7 +214,7 @@ function matchesGlob(filePath: string, pattern: string): boolean {
 		} else if (char === '?') {
 			regexStr += '[^/]';
 		} else {
-			regexStr += char.replace(/[.*+?^${}()|[\]\\]/, '\\$&');
+			regexStr += char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 		}
 	}
 

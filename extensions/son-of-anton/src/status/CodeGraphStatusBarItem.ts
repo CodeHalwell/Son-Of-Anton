@@ -16,6 +16,7 @@ const STATUS_COMMAND = 'sota.codeGraph.statusMenu';
  * Visual states:
  *   $(database) code-graph ●           — embedded server healthy
  *   $(database) code-graph (docker) ●  — legacy Docker stack detected
+ * allow-any-unicode-next-line
  *   $(database) code-graph ○           — off, starting, or failed
  *
  * Distinct from the older `sidebar/CodeGraphStatusBarItem` which surfaces
@@ -107,12 +108,12 @@ export class CodeGraphStatusBarItem implements vscode.Disposable {
 			},
 			{
 				label: '$(server) Use Docker stack',
-				description: "Set sota.codeGraph.backend = 'docker'",
+				description: 'Set sota.codeGraph.backend = \'docker\'',
 				action: 'use-docker',
 			},
 			{
 				label: '$(rocket) Use embedded backend',
-				description: "Set sota.codeGraph.backend = 'embedded'",
+				description: 'Set sota.codeGraph.backend = \'embedded\'',
 				action: 'use-embedded',
 			},
 			{

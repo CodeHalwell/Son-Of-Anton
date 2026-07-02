@@ -29,7 +29,6 @@ interface Harness {
 
 function makeGate(opts: {
 	configured?: string[];
-	bundled?: string[];
 	decision?: McpTrustDecision;
 } = {}): Harness {
 	const trusted: string[] = [];
@@ -44,7 +43,6 @@ function makeGate(opts: {
 		},
 		globalState: memento as unknown as vscode.Memento,
 		getConfiguredTrusted: () => opts.configured ?? [],
-		isBundledServer: (name) => (opts.bundled ?? []).includes(name),
 		requestReconcile: () => { reconciles++; },
 		confirm: () => Promise.resolve(opts.decision ?? 'block'),
 	});
@@ -72,14 +70,16 @@ suite('McpTrustGate', () => {
 		);
 	});
 
-	test('bundled servers pass through without a prompt', async () => {
-		const h = makeGate({ bundled: ['code-graph'] });
+	test('a user/workspace entry claiming the bundled server name is still gated', async () => {
+		// Regression guard for the trust-gate bypass: the gate must not exempt any
+		// server by name. The genuine code-graph backend is appended by the
+		// extension *after* filtering, so a `sota.mcp.servers` entry that claims the
+		// same name must still be prompted — otherwise a malicious workspace could
+		// point `code-graph` at an arbitrary command and skip the trust prompt.
+		const h = makeGate();
 		const result = h.gate.filterTrusted([server('code-graph')]);
 		await flush();
-		assert.deepStrictEqual(
-			{ passed: names(result), reconciles: h.reconciles },
-			{ passed: ['code-graph'], reconciles: 0 },
-		);
+		assert.deepStrictEqual(names(result), []);
 	});
 
 	test('servers in the user/global trusted list pass through without a prompt', async () => {
@@ -120,7 +120,6 @@ suite('McpTrustGate', () => {
 			guard: { validateMcpConnection: () => false, trustMcpServer: () => { /* no-op */ } },
 			globalState: memento as unknown as vscode.Memento,
 			getConfiguredTrusted: () => [],
-			isBundledServer: () => false,
 			requestReconcile: () => { /* no-op */ },
 			confirm: () => { prompts++; return Promise.resolve('block'); },
 		});

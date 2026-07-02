@@ -1,4 +1,5 @@
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import { WalkthroughGenerator } from './walkthroughGenerator.js';
 import { WalkthroughStorage } from './storage.js';
 import { WalkthroughGenerateRequest, WalkthroughRenderOptions } from './types.js';
@@ -10,6 +11,14 @@ export function createServer(options?: {
 }): express.Application {
 	const app = express();
 	app.use(express.json());
+	// Throttle inter-service traffic; health and metrics probes are exempt.
+	app.use(rateLimit({
+		windowMs: 60_000,
+		max: 1000,
+		standardHeaders: true,
+		legacyHeaders: false,
+		skip: (req) => req.path === '/health' || req.path === '/metrics',
+	}));
 	// Enforce inter-service auth (exempts /health and /metrics).
 	app.use(createAuthMiddleware());
 
