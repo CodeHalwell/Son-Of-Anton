@@ -22,7 +22,7 @@ class FakeMemento {
 
 interface Harness {
 	gate: McpTrustGate;
-	trusted: string[];
+	audits: { name: string; trusted: boolean }[];
 	reconciles: number;
 	memento: FakeMemento;
 }
@@ -31,15 +31,14 @@ function makeGate(opts: {
 	configured?: string[];
 	decision?: McpTrustDecision;
 } = {}): Harness {
-	const trusted: string[] = [];
+	const audits: { name: string; trusted: boolean }[] = [];
 	const memento = new FakeMemento();
 	let reconciles = 0;
 	const gate = new McpTrustGate({
+		// The guard is a pure audit sink: the gate exposes no trust-returning
+		// guard method, so guard state can never gate an approval.
 		guard: {
-			// No workspace-loaded trust list, so every name is "untrusted" until
-			// the user approves — the audit side effect is what matters here.
-			validateMcpConnection: () => false,
-			trustMcpServer: (name: string) => { trusted.push(name); },
+			recordMcpConnectionAttempt: (name: string, trusted: boolean) => { audits.push({ name, trusted }); },
 		},
 		globalState: memento as unknown as vscode.Memento,
 		getConfiguredTrusted: () => opts.configured ?? [],
@@ -48,7 +47,7 @@ function makeGate(opts: {
 	});
 	return {
 		gate,
-		get trusted() { return trusted; },
+		get audits() { return audits; },
 		get reconciles() { return reconciles; },
 		memento,
 	} as Harness;
@@ -98,14 +97,16 @@ suite('McpTrustGate', () => {
 
 		await flush();
 
-		// Approval persisted, guard updated, and a reconcile was requested.
+		// The descriptor fingerprint (not the name) is persisted, the attempt was
+		// audited, and a reconcile was requested. Crucially, approval lives only in
+		// the persisted fingerprint list — nothing seeds name-based trust.
 		assert.deepStrictEqual(
 			{
-				trusted: h.trusted,
+				audits: h.audits,
 				persisted: h.memento.get<string[]>('sota.mcp.approvedFingerprints', []),
 				reconciles: h.reconciles,
 			},
-			{ trusted: ['sketchy'], persisted: [mcpServerFingerprint(server('sketchy'))], reconciles: 1 },
+			{ audits: [{ name: 'sketchy', trusted: false }], persisted: [mcpServerFingerprint(server('sketchy'))], reconciles: 1 },
 		);
 
 		// Second pass (the reconcile): now cleared to connect.
@@ -116,11 +117,13 @@ suite('McpTrustGate', () => {
 	test('approving a server does not trust a different command that reuses its name', async () => {
 		// P1 regression: trust binds to the launch descriptor (command/args/cwd/env),
 		// not the name. A workspace that redefines an already-approved name with a
-		// different command must be re-prompted, never silently spawned.
+		// different command must be re-prompted, never silently spawned. This holds
+		// even though "trust always" ran for the original descriptor: the gate never
+		// seeds name-based trust, so the second descriptor has nothing to match.
 		let prompts = 0;
 		const memento = new FakeMemento();
 		const gate = new McpTrustGate({
-			guard: { validateMcpConnection: () => false, trustMcpServer: () => { /* no-op */ } },
+			guard: { recordMcpConnectionAttempt: () => { /* audit only */ } },
 			globalState: memento as unknown as vscode.Memento,
 			getConfiguredTrusted: () => [],
 			requestReconcile: () => { /* no-op */ },
@@ -141,7 +144,7 @@ suite('McpTrustGate', () => {
 		let prompts = 0;
 		const memento = new FakeMemento();
 		const gate = new McpTrustGate({
-			guard: { validateMcpConnection: () => false, trustMcpServer: () => { /* no-op */ } },
+			guard: { recordMcpConnectionAttempt: () => { /* audit only */ } },
 			globalState: memento as unknown as vscode.Memento,
 			getConfiguredTrusted: () => [],
 			requestReconcile: () => { /* no-op */ },

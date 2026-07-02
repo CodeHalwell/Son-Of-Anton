@@ -170,6 +170,23 @@ export class SupplyChainGuard {
 	}
 
 	/**
+	 * Record an MCP connection attempt in the audit log. Unlike
+	 * {@link validateMcpConnection}, this neither reads nor mutates the trust
+	 * list and shows no UI. The trust decision for `sota.mcp.servers` entries is
+	 * made by {@link McpTrustGate} from the full launch descriptor; the guard
+	 * must never double as a name-based approval source, because an interactive
+	 * "trust always" for one descriptor would otherwise leave the *name* trusted
+	 * and silently bless a different command that later reuses that name.
+	 */
+	recordMcpConnectionAttempt(serverName: string, trusted: boolean): void {
+		this.mcpConnectionLog.push({
+			server: serverName,
+			timestamp: Date.now(),
+			trusted,
+		});
+	}
+
+	/**
 	 * Get the MCP connection log for auditing.
 	 */
 	getMcpConnectionLog(): ReadonlyArray<{ server: string; timestamp: number; trusted: boolean }> {

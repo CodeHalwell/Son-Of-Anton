@@ -58,8 +58,14 @@ export function mcpServerFingerprint(entry: unknown): string | undefined {
  * tested without the live VS Code window / global state.
  */
 export interface McpTrustGateDeps {
-	/** Supply-chain guard whose `validateMcpConnection` records the audit log. */
-	readonly guard: Pick<SupplyChainGuard, 'validateMcpConnection' | 'trustMcpServer'>;
+	/**
+	 * Supply-chain guard, used purely as an audit sink. The gate deliberately
+	 * depends only on `recordMcpConnectionAttempt` — never a trust-returning
+	 * method — so guard state can never gate an approval. (An interactive
+	 * "trust always" that seeded name-based guard trust could otherwise bless a
+	 * different command that later reuses the same name.)
+	 */
+	readonly guard: Pick<SupplyChainGuard, 'recordMcpConnectionAttempt'>;
 	/** User/global persisted state (never workspace-scoped). */
 	readonly globalState: vscode.Memento;
 	/** Server names the user/admin has pre-trusted via user/global settings. */
@@ -102,7 +108,7 @@ export class McpTrustGate implements vscode.Disposable {
 	private readonly approvedFingerprints = new Set<string>();
 	/** Fingerprints the user blocked this session — excluded without re-prompting. */
 	private readonly deniedFingerprints = new Set<string>();
-	/** Fingerprints already run through `validateMcpConnection` / prompt (dedupe). */
+	/** Fingerprints already audited / prompted this session (dedupe). */
 	private readonly evaluatedFingerprints = new Set<string>();
 
 	constructor(deps: McpTrustGateDeps) {
@@ -153,15 +159,11 @@ export class McpTrustGate implements vscode.Disposable {
 			}
 			if (!this.evaluatedFingerprints.has(fingerprint)) {
 				this.evaluatedFingerprints.add(fingerprint);
-				// Wire the supply-chain guard's trust check into the bring-up
-				// path: it records an audit-log entry for the attempt and honours
-				// any explicitly loaded trust list. `false` means "not trusted" —
-				// block now and ask the user.
-				if (this.deps.guard.validateMcpConnection(name)) {
-					this.approvedFingerprints.add(fingerprint);
-					out.push(entry);
-					continue;
-				}
+				// Record the attempt for auditing, then ask the user. The guard is
+				// only an audit sink here — it is NEVER consulted for approval, so
+				// no amount of guard trust state (e.g. a prior interactive "trust
+				// always" that reused this name) can auto-clear a fresh descriptor.
+				this.deps.guard.recordMcpConnectionAttempt(name, false);
 				void this.promptForServer(name, fingerprint);
 			}
 			// Not trusted (prompt in flight or awaiting a fresh decision): exclude.
@@ -185,8 +187,11 @@ export class McpTrustGate implements vscode.Disposable {
 		}
 
 		if (decision === 'trust-always') {
+			// Persist the DESCRIPTOR fingerprint only. Deliberately not
+			// `guard.trustMcpServer(name, …)`: seeding name-based guard trust
+			// would let a later same-name/different-command entry clear itself
+			// without a prompt. Descriptor-bound approval is the whole point.
 			this.approvedFingerprints.add(fingerprint);
-			this.deps.guard.trustMcpServer(name, 'user approved (trust always)');
 			await this.persistApproval(fingerprint);
 			this.deps.requestReconcile();
 		} else if (decision === 'trust-session') {
