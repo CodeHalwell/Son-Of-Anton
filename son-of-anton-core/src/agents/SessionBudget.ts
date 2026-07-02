@@ -124,12 +124,18 @@ export class SessionBudget implements ISpendGuard {
 	}
 
 	recordUsage(sample: SpendSample): void {
-		// Clamp each field at 0 so a stray negative (e.g. a provider quirk) can
-		// never *reduce* accumulated spend and defeat the kill switch.
-		this.inputTokens += Math.max(0, sample.inputTokens ?? 0);
-		this.outputTokens += Math.max(0, sample.outputTokens ?? 0);
-		this.cachedTokens += Math.max(0, sample.cachedTokens ?? 0);
-		this.costUsd += Math.max(0, sample.costUsd ?? 0);
+		// Clamp each field to a non-negative FINITE number. A stray negative
+		// (provider quirk) must never *reduce* accumulated spend, and a NaN or
+		// Infinity (parse error / missing metadata) must never poison the
+		// totals — `Math.max(0, NaN)` is NaN, and once a total is NaN every
+		// isExceeded() comparison evaluates to false, silently disabling the
+		// kill switch. `?? 0` does not help because NaN is not null/undefined.
+		const clamp = (value: number | undefined): number =>
+			typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0;
+		this.inputTokens += clamp(sample.inputTokens);
+		this.outputTokens += clamp(sample.outputTokens);
+		this.cachedTokens += clamp(sample.cachedTokens);
+		this.costUsd += clamp(sample.costUsd);
 		this.requestCount += 1;
 	}
 

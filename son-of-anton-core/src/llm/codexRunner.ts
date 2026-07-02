@@ -143,9 +143,15 @@ export async function* runCodex(options: CodexRunOptions): AsyncGenerator<CodexC
 		}
 	}
 
-	// Send the message history as a JSON array on stdin.
-	proc.stdin.write(JSON.stringify(options.messages));
-	proc.stdin.end();
+	// Send the message history as a JSON array on stdin. If the signal was
+	// already aborted above we killed the child, so its stdin is closed and a
+	// write would emit an 'error' (EPIPE); with no listener that crashes the
+	// process. Swallow stdin errors and skip the write when the pipe is gone.
+	proc.stdin.on('error', () => { /* stdin closed (child already exited/killed) */ });
+	if (!proc.killed && proc.stdin.writable) {
+		proc.stdin.write(JSON.stringify(options.messages));
+		proc.stdin.end();
+	}
 
 	let stderrBuf = '';
 	proc.stderr.on('data', (data: Buffer) => { stderrBuf += data.toString(); });

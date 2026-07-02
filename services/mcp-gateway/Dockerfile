@@ -16,7 +16,10 @@ COPY src/ ./src/
 COPY _lib/metrics/dist/ ./_lib/metrics/dist/
 COPY _lib/tracing/dist/ ./_lib/tracing/dist/
 COPY _shared/auth/dist/ ./_shared/auth/dist/
-RUN npx tsc
+# Give tsc explicit heap headroom: in the memory-constrained CI Docker builder
+# (running alongside the heavy native indexer build) the default V8 heap limit
+# was exhausted, aborting `tsc` with SIGABRT (exit 134).
+RUN NODE_OPTIONS="--max-old-space-size=4096" npx tsc
 
 EXPOSE 3100
 

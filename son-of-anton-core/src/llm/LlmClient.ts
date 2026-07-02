@@ -350,6 +350,13 @@ export function isOpenAIReasoningModel(model: ModelId): boolean {
 	return /^(?:o1|o3|o4|gpt-5)/.test(model);
 }
 
+/** Throw a standard `AbortError` if the given signal is already aborted. */
+function throwIfAborted(signal: AbortSignal | undefined): void {
+	if (signal?.aborted) {
+		throw new DOMException('The LLM request was aborted.', 'AbortError');
+	}
+}
+
 /**
  * Normalise an `LlmMessageContent` into a structured part array. Strings are
  * promoted to a single text part. Empty strings still produce a part so
@@ -1585,9 +1592,16 @@ export class LlmClient {
 		// concurrency slot. The permit is released in `finally`, which also
 		// runs if the consumer abandons the generator early (for-await break
 		// triggers the generator's return()).
+		//
+		// Check the abort signal around each wait so a request cancelled while
+		// queued fails fast instead of waiting out the rate limit / occupying a
+		// concurrency permit it will never use.
+		throwIfAborted(options.signal);
 		await this.rateLimiter.acquire(options.agentHandle ?? 'default');
+		throwIfAborted(options.signal);
 		await this.requestSemaphore.acquire();
 		try {
+			throwIfAborted(options.signal);
 			// Intercept the provider's stream so we can record per-completion
 			// cache metrics in one place. The optimizer is set lazily via
 			// `setCacheOptimizer`; when undefined the interceptor degrades to

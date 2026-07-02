@@ -1,4 +1,6 @@
-package-lock.json
+# package-lock.json IS committed: this extension is listed in build/npm/dirs.ts,
+# so the root postinstall runs `npm ci` here, which requires the lockfile
+# (matching every other extension in that manifest).
 out/
 out-test/
 dist/

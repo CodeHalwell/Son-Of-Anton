@@ -6,6 +6,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { TypedEventEmitter, type Event } from '../eventEmitter';
+import { serviceAuthHeader } from '../util/serviceAuth';
 import { RequirementsAgent } from './RequirementsAgent';
 import { DesignAgent } from './DesignAgent';
 import { TaskDecompositionAgent } from './TaskDecompositionAgent';
@@ -124,7 +125,7 @@ export class SpecPipelineManager {
 			// First, parse the markdown requirements into a structured RequirementsSpec
 			const parseResponse = await fetch('http://localhost:8090/parse/requirements', {
 				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
+				headers: { 'Content-Type': 'application/json', ...serviceAuthHeader() },
 				body: JSON.stringify({
 					requirementsContent,
 				}),
@@ -139,7 +140,7 @@ export class SpecPipelineManager {
 			// Call the spec-pipeline service to generate property tests from the structured spec
 			const response = await fetch('http://localhost:8090/generate/property-tests', {
 				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
+				headers: { 'Content-Type': 'application/json', ...serviceAuthHeader() },
 				body: JSON.stringify({
 					spec: parsedSpec,
 					featureName,
