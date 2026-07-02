@@ -162,7 +162,12 @@ export function activate(context: vscode.ExtensionContext): void {
 		guard: supplyChainGuard,
 		globalState: context.globalState,
 		getConfiguredTrusted: () => {
-			const raw = vscode.workspace.getConfiguration().get<unknown>('sota.mcp.trustedServers');
+			// Read ONLY the user/global value, never a workspace/folder one.
+			// `sota.mcp.trustedServers` is declared application-scoped, but we
+			// inspect the global value explicitly as defence-in-depth: a workspace
+			// `.vscode/settings.json` must never be able to pre-trust an MCP server
+			// on the user's behalf (that would let a cloned repo bypass the prompt).
+			const raw = vscode.workspace.getConfiguration().inspect<unknown>('sota.mcp.trustedServers')?.globalValue;
 			return Array.isArray(raw) ? raw.filter((n): n is string => typeof n === 'string') : [];
 		},
 		requestReconcile: () => fireCodeGraphSettingChange(),
