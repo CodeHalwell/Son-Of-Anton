@@ -32,3 +32,37 @@ updates:
         patterns:
           - "@vscode/component-explorer"
           - "@vscode/component-explorer-vite-plugin"
+  # Son of Anton agent runtime, CLI, primary extension, and backend services.
+  - package-ecosystem: "npm"
+    directory: "/son-of-anton-core"
+    schedule:
+      interval: "weekly"
+    groups:
+      son-of-anton-core:
+        patterns:
+          - "*"
+  - package-ecosystem: "npm"
+    directory: "/son-of-anton-cli"
+    schedule:
+      interval: "weekly"
+    groups:
+      son-of-anton-cli:
+        patterns:
+          - "*"
+  - package-ecosystem: "npm"
+    directory: "/extensions/son-of-anton"
+    schedule:
+      interval: "weekly"
+    groups:
+      son-of-anton-extension:
+        patterns:
+          - "*"
+  - package-ecosystem: "npm"
+    directories:
+      - "/services/*"
+    schedule:
+      interval: "weekly"
+    groups:
+      services:
+        patterns:
+          - "*"

@@ -37,8 +37,14 @@ export function hygiene(some: NodeJS.ReadWriteStream | string[] | undefined, run
 	const productJson = es.through(function (file: VinylFile) {
 		const product = JSON.parse(file.contents!.toString('utf8'));
 
-		if (product.extensionsGallery) {
-			console.error(`product.json: Contains 'extensionsGallery'`);
+		// Upstream OSS forbids shipping any `extensionsGallery`. Son of Anton
+		// intentionally ships the Open VSX gallery (see product.json; this is a
+		// deliberate fork decision that also satisfies the "no Microsoft
+		// domains" policy). Allow Open VSX, but still flag a Microsoft
+		// Marketplace gallery — the thing the original rule guarded against.
+		const galleryServiceUrl: string = product.extensionsGallery?.serviceUrl ?? '';
+		if (product.extensionsGallery && !/(^|\.)open-vsx\.org/.test(new URL(galleryServiceUrl, 'https://invalid.example').hostname)) {
+			console.error(`product.json: Contains a non-Open-VSX 'extensionsGallery' (${galleryServiceUrl})`);
 			errorCount++;
 		}
 

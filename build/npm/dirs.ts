@@ -43,6 +43,7 @@ export const dirs = [
 	'extensions/references-view',
 	'extensions/search-result',
 	'extensions/simple-browser',
+	'extensions/son-of-anton',
 	'extensions/tunnel-forwarding',
 	'extensions/terminal-suggest',
 	'extensions/typescript-language-features',
@@ -60,6 +61,8 @@ export const dirs = [
 	'.vscode/extensions/vscode-selfhost-import-aid',
 	'.vscode/extensions/vscode-selfhost-test-provider',
 	'.vscode/extensions/vscode-extras',
+	'son-of-anton-core',
+	'son-of-anton-cli',
 ];
 
 if (existsSync(`${import.meta.dirname}/../../.build/distro/npm`)) {
