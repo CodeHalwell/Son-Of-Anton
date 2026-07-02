@@ -113,7 +113,7 @@ suite('SandboxManager', () => {
 	test('fails when no confirm callback is set for confirm commands', async () => {
 		const result = await sandbox.execute('rm temp-file.txt');
 		assert.strictEqual(result.exitCode, 1);
-		assert.ok(result.stderr.includes('no handler is registered'));
+		assert.ok(result.stderr.includes('No confirmation handler'));
 	});
 
 	test('creates container on first execution', async () => {
