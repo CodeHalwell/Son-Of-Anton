@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 import http from 'http';
+import { enforceHttpAuth, requireServiceToken } from '../_shared/auth/dist/index.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { z } from 'zod';
@@ -337,6 +338,11 @@ const activeTransports = new Map<string, SSEServerTransport>();
 const httpServer = http.createServer(async (req, res) => {
 	const url = new URL(req.url ?? '/', `http://localhost:${PORT}`);
 
+	// Enforce inter-service auth (exempts /health and /metrics).
+	if (!enforceHttpAuth(req, res)) {
+		return;
+	}
+
 	if (url.pathname === '/health') {
 		res.writeHead(200, { 'Content-Type': 'application/json' });
 		res.end(JSON.stringify({ status: 'ok', service: 'mcp-playwright' }));
@@ -371,6 +377,8 @@ process.on('SIGTERM', async () => {
 	await browserManager.close();
 	httpServer.close();
 });
+
+requireServiceToken('mcp-playwright');
 
 httpServer.listen(PORT, () => {
 	console.log(`[mcp-playwright] Listening on port ${PORT}`);

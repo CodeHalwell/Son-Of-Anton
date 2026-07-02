@@ -30,6 +30,7 @@ export class QdrantClient {
 		this.client = new QdrantSDKClient({
 			host,
 			port,
+			apiKey: process.env.QDRANT_API_KEY || undefined,
 		});
 		this.collectionName = collectionName;
 		this.vectorSize = vectorSize;

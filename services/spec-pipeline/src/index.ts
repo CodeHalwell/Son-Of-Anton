@@ -3,6 +3,7 @@
 
 import { SpecPipelineServer } from './server';
 import { SpecPipelineConfig } from './types';
+import { requireServiceToken } from '../_shared/auth/dist/index.js';
 
 const config: SpecPipelineConfig = {
 	server: {
@@ -10,6 +11,8 @@ const config: SpecPipelineConfig = {
 	},
 	specsDir: process.env['SPECS_DIR'] ?? '.son-of-anton/specs',
 };
+
+requireServiceToken('spec-pipeline');
 
 const server = new SpecPipelineServer(config);
 server.start();

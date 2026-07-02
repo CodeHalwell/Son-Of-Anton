@@ -5,6 +5,7 @@ import http from 'http';
 import { LsifPipeline } from './pipeline';
 import { LsifConfig } from './config';
 import { prometheusHandler } from '../_lib/metrics/dist/index.js';
+import { enforceHttpAuth } from '../_shared/auth/dist/index.js';
 
 export class LsifServer {
 	private server: http.Server | null = null;
@@ -45,6 +46,11 @@ export class LsifServer {
 	private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
 		const url = new URL(req.url ?? '/', `http://localhost:${this.config.server.port}`);
 		const method = req.method ?? 'GET';
+
+		// Enforce inter-service auth (exempts /health and /metrics).
+		if (!enforceHttpAuth(req, res)) {
+			return;
+		}
 
 		// GET /health
 		if (method === 'GET' && url.pathname === '/health') {

@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 import http from 'http';
+import { enforceHttpAuth, requireServiceToken } from '../_shared/auth/dist/index.js';
 import { Pool } from 'pg';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
@@ -199,6 +200,11 @@ const activeTransports = new Map<string, SSEServerTransport>();
 const httpServer = http.createServer(async (req, res) => {
 	const url = new URL(req.url ?? '/', `http://localhost:${PORT}`);
 
+	// Enforce inter-service auth (exempts /health and /metrics).
+	if (!enforceHttpAuth(req, res)) {
+		return;
+	}
+
 	if (url.pathname === '/health') {
 		try {
 			await pool.query('SELECT 1');
@@ -234,6 +240,8 @@ const httpServer = http.createServer(async (req, res) => {
 	res.writeHead(404);
 	res.end('Not found');
 });
+
+requireServiceToken('mcp-database');
 
 httpServer.listen(PORT, () => {
 	console.log(`[mcp-database] Listening on port ${PORT}`);

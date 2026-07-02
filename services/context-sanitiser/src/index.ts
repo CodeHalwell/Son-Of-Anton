@@ -5,6 +5,7 @@ import http from 'http';
 import { ContextSanitiser } from './sanitiser';
 import { WorkspaceScanner } from './scanner';
 import { prometheusHandler } from '../_lib/metrics/dist/index.js';
+import { enforceHttpAuth, requireServiceToken } from '../_shared/auth/dist/index.js';
 
 const PORT = parseInt(process.env.SANITISER_PORT ?? '3302', 10);
 const PROJECT_PATH = process.env.PROJECT_PATH ?? '/workspace';
@@ -14,6 +15,11 @@ const scanner = new WorkspaceScanner();
 
 const httpServer = http.createServer(async (req, res) => {
 	const url = new URL(req.url ?? '/', `http://localhost:${PORT}`);
+
+	// Enforce inter-service auth (exempts /health and /metrics).
+	if (!enforceHttpAuth(req, res)) {
+		return;
+	}
 
 	// Health endpoint
 	if (url.pathname === '/health') {
@@ -106,6 +112,7 @@ function readBody(req: http.IncomingMessage): Promise<string> {
 }
 
 async function start(): Promise<void> {
+	requireServiceToken('context-sanitiser');
 	httpServer.listen(PORT, () => {
 		console.log(`[context-sanitiser] Context sanitiser listening on port ${PORT}`);
 		console.log(`[context-sanitiser] Health endpoint: http://localhost:${PORT}/health`);

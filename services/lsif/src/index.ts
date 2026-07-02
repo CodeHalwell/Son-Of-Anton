@@ -4,8 +4,10 @@
 import { loadConfig } from './config';
 import { LsifPipeline } from './pipeline';
 import { LsifServer } from './server';
+import { requireServiceToken } from '../_shared/auth/dist/index.js';
 
 async function main(): Promise<void> {
+	requireServiceToken('lsif');
 	const config = loadConfig();
 
 	console.log('[main] Son of Anton — LSIF/SCIP Generator');

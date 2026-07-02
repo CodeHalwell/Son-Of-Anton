@@ -15,12 +15,15 @@ services:
   falkordb:
     image: falkordb/falkordb:latest
     container_name: soa-falkordb
+    environment:
+      # Require a password only when FALKORDB_PASSWORD is set; empty leaves FalkorDB open (dev default).
+      - REDIS_ARGS=${FALKORDB_PASSWORD:+--requirepass ${FALKORDB_PASSWORD}}
     ports:
       - "127.0.0.1:${FALKORDB_PORT:-6379}:6379"
     volumes:
       - falkordb-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli ping 2>&1 | grep -qE 'PONG|NOAUTH'"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -34,6 +37,9 @@ services:
   qdrant:
     image: qdrant/qdrant:latest
     container_name: soa-qdrant
+    environment:
+      # Require an API key on data endpoints only when QDRANT_API_KEY is set; /readyz stays open for probes.
+      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY:-}
     ports:
       - "127.0.0.1:${QDRANT_REST_PORT:-6333}:6333"
       - "127.0.0.1:${QDRANT_GRPC_PORT:-6334}:6334"
@@ -65,6 +71,9 @@ services:
       - QDRANT_GRPC_PORT=${QDRANT_GRPC_PORT:-6334}
       - PROJECT_PATH=${PROJECT_PATH:-/workspace}
       - LANGUAGES=${LANGUAGES:-typescript,python,rust,csharp,cpp}
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
+      - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:-}
+      - QDRANT_API_KEY=${QDRANT_API_KEY:-}
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:ro
     healthcheck:
@@ -89,6 +98,8 @@ services:
       - PROJECT_PATH=${PROJECT_PATH:-/workspace}
       - LANGUAGES=${LANGUAGES:-typescript,python,rust,csharp,cpp}
       - PREFER_SCIP=${PREFER_SCIP:-false}
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
+      - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:-}
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:ro
       - lsif-snapshots:/data/lsif-snapshots
@@ -120,6 +131,9 @@ services:
       - QDRANT_GRPC_PORT=${QDRANT_GRPC_PORT:-6334}
       - MCP_PORT=${MCP_PORT:-3100}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
+      - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:-}
+      - QDRANT_API_KEY=${QDRANT_API_KEY:-}
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:3100/health || exit 1"]
       interval: 15s
@@ -142,6 +156,7 @@ services:
       - DB_USER=${DB_USER:-readonly}
       - DB_PASSWORD=${DB_PASSWORD:-}
       - MCP_DATABASE_PORT=3102
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:3102/health || exit 1"]
       interval: 15s
@@ -161,6 +176,7 @@ services:
       - GITHUB_REPOSITORY=${GITHUB_REPOSITORY:-CodeHalwell/Son-Of-Anton}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - MCP_DEPLOYMENT_PORT=3103
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:3103/health || exit 1"]
       interval: 15s
@@ -180,6 +196,7 @@ services:
       - GITHUB_REPOSITORY=${GITHUB_REPOSITORY:-CodeHalwell/Son-Of-Anton}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - MCP_TICKETS_PORT=3104
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:3104/health || exit 1"]
       interval: 15s
@@ -225,6 +242,8 @@ services:
       - FALKORDB_PORT=${FALKORDB_PORT:-6379}
       - MAX_REQUESTS_PER_TEST=${MAX_REQUESTS_PER_TEST:-100}
       - TEST_TIMEOUT_MS=${TEST_TIMEOUT_MS:-60000}
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
+      - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:-}
     networks:
       - sandbox-net
     healthcheck:
@@ -245,6 +264,7 @@ services:
     environment:
       - SPEC_PIPELINE_PORT=${SPEC_PIPELINE_PORT:-8090}
       - SPECS_DIR=${SPECS_DIR:-.son-of-anton/specs}
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:ro
     healthcheck:
@@ -265,6 +285,7 @@ services:
     environment:
       - MCP_PLAYWRIGHT_PORT=3105
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-localhost,127.0.0.1}
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
     networks:
       - sandbox-net
     healthcheck:
@@ -303,6 +324,7 @@ services:
       - BACKGROUND_TASK_ALLOWED_IMAGES=${BACKGROUND_TASK_ALLOWED_IMAGES:-}
       # SECURITY: Bind-mount sources from POST /tasks must be inside this prefix.
       - BACKGROUND_TASK_WORKSPACE_ROOT=${BACKGROUND_TASK_WORKSPACE_ROOT:-/workspace}
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
     networks:
       - sandbox-net
     volumes:
@@ -328,6 +350,7 @@ services:
       - VISUAL_REGRESSION_PORT=${VISUAL_REGRESSION_PORT:-8094}
       - BASELINES_DIR=/workspace/.son-of-anton/visual-baselines
       - DIFF_THRESHOLD=${DIFF_THRESHOLD:-0.01}
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:rw
     healthcheck:
@@ -367,6 +390,7 @@ services:
       - CHECKPOINT_PORT=${CHECKPOINT_PORT:-3201}
       - WORKSPACE_ROOT=/workspace
       - CHECKPOINT_STORAGE_PATH=/workspace/.son-of-anton/checkpoints
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:rw
     healthcheck:
@@ -391,6 +415,7 @@ services:
       - WALKTHROUGH_PORT=${WALKTHROUGH_PORT:-3202}
       - MODEL_ROUTER_URL=${MODEL_ROUTER_URL:-http://model-router:3200}
       - WALKTHROUGH_BASE_PATH=/workspace/.son-of-anton/walkthroughs
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:rw
     healthcheck:
@@ -411,6 +436,7 @@ services:
     environment:
       - ACP_PORT=${ACP_PORT:-3300}
       - ACP_CONFIG_PATH=/workspace/.son-of-anton/agents/acp-agents.json
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
       - PROJECT_PATH=${PROJECT_PATH:-/workspace}
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:ro
@@ -434,6 +460,8 @@ services:
       - "127.0.0.1:${BUILD_DAG_PORT:-3301}:3301"
     environment:
       - BUILD_DAG_PORT=${BUILD_DAG_PORT:-3301}
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
+      - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:-}
       - PROJECT_PATH=${PROJECT_PATH:-/workspace}
       - FALKORDB_HOST=${FALKORDB_HOST:-falkordb}
       - FALKORDB_PORT=${FALKORDB_PORT:-6379}
@@ -456,6 +484,7 @@ services:
       - "127.0.0.1:${SANITISER_PORT:-3302}:3302"
     environment:
       - SANITISER_PORT=${SANITISER_PORT:-3302}
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
       - PROJECT_PATH=${PROJECT_PATH:-/workspace}
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:ro

@@ -8,6 +8,7 @@ import { QdrantClient } from './clients/qdrant';
 import { createMcpServer } from './server';
 import { prometheusHandler } from '../_lib/metrics/dist/index.js';
 import { extractOrCreateTraceContext, formatTraceparent, logHttpRequest, exportHttpSpan } from '../_lib/tracing/dist/index.js';
+import { enforceHttpAuth, requireServiceToken } from '../_shared/auth/dist/index.js';
 
 const PORT = parseInt(process.env.MCP_PORT ?? '3100', 10);
 
@@ -31,6 +32,11 @@ const httpServer = http.createServer(async (req, res) => {
 		logHttpRequest('mcp-gateway', traceCtx, req.method ?? 'GET', url.pathname, res.statusCode, Number(durationNs) / 1_000_000);
 		exportHttpSpan('mcp-gateway', traceCtx, req.method ?? 'GET', url.pathname, res.statusCode, startEpochNs, durationNs);
 	});
+
+	// Enforce inter-service auth (exempts /health and /metrics).
+	if (!enforceHttpAuth(req, res)) {
+		return;
+	}
 
 	// Health endpoint
 	if (url.pathname === '/health') {
@@ -93,6 +99,7 @@ const httpServer = http.createServer(async (req, res) => {
 });
 
 async function start(): Promise<void> {
+	requireServiceToken('mcp-gateway');
 	try {
 		await db.connect();
 		console.log('[mcp-gateway] Connected to FalkorDB');

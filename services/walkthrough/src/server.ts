@@ -2,6 +2,7 @@ import express from 'express';
 import { WalkthroughGenerator } from './walkthroughGenerator.js';
 import { WalkthroughStorage } from './storage.js';
 import { WalkthroughGenerateRequest, WalkthroughRenderOptions } from './types.js';
+import { createAuthMiddleware, requireServiceToken } from '../_shared/auth/dist/index.js';
 
 export function createServer(options?: {
 	modelRouterUrl?: string;
@@ -9,6 +10,8 @@ export function createServer(options?: {
 }): express.Application {
 	const app = express();
 	app.use(express.json());
+	// Enforce inter-service auth (exempts /health and /metrics).
+	app.use(createAuthMiddleware());
 
 	const generator = new WalkthroughGenerator({
 		modelRouterUrl: options?.modelRouterUrl ?? process.env.MODEL_ROUTER_URL ?? 'http://localhost:3200',
@@ -124,6 +127,7 @@ export function createServer(options?: {
 }
 
 export function startServer(): void {
+	requireServiceToken('walkthrough');
 	const port = parseInt(process.env.WALKTHROUGH_PORT ?? '3202', 10);
 	const app = createServer();
 

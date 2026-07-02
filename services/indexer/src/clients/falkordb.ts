@@ -33,6 +33,7 @@ export class FalkorDBClient {
 					return Math.min(retries * 200, 3000);
 				},
 			},
+			password: process.env.FALKORDB_PASSWORD || undefined,
 		});
 
 		this.client.on('error', (err) => {

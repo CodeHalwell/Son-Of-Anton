@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 import http from 'http';
+import { serviceAuthHeaders } from '../../_shared/auth/dist/index.js';
 
 /**
  * MCP tools for the build system DAG.
@@ -18,10 +19,13 @@ async function fetchBuildDag(path: string, method = 'GET', body?: string): Promi
 		const url = new URL(path, BUILD_DAG_URL);
 		const options: http.RequestOptions = {
 			method,
-			headers: body ? {
-				'Content-Type': 'application/json',
-				'Content-Length': Buffer.byteLength(body),
-			} : undefined,
+			headers: {
+				...serviceAuthHeaders(),
+				...(body ? {
+					'Content-Type': 'application/json',
+					'Content-Length': Buffer.byteLength(body),
+				} : {}),
+			},
 		};
 
 		const req = http.request(url, options, (res) => {

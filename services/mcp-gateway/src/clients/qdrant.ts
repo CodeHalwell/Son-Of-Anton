@@ -25,6 +25,7 @@ export class QdrantClient {
 		this.collectionName = collectionName ?? 'son-of-anton-code';
 		this.client = new QdrantSDKClient({
 			url: `http://${qdrantHost}:${qdrantPort}`,
+			apiKey: process.env.QDRANT_API_KEY || undefined,
 		});
 	}
 

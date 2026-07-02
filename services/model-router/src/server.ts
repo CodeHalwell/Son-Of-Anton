@@ -12,6 +12,7 @@ import { toAnthropicFormat, toOpenAIFormat, fromAnthropicResponse, fromOpenAIRes
 import type { FailoverConfig } from './failover/types.js';
 import { counter, gauge, histogram, expressMetricsMiddleware, prometheusHandler } from '../_lib/metrics/dist/index.js';
 import { expressTracingMiddleware, extractOrCreateTraceContext, addTraceHeaders } from '../_lib/tracing/dist/index.js';
+import { createAuthMiddleware } from '../_shared/auth/dist/index.js';
 import type { UsageObserver } from './providers/types.js';
 
 function loadConfig(): ModelRoutesConfig {
@@ -149,6 +150,8 @@ export function createServer() {
 	app.use(express.json({ limit: '10mb' }));
 	app.use(expressTracingMiddleware('model-router'));
 	app.use(expressMetricsMiddleware('model-router'));
+	// Enforce inter-service auth (exempts /health and /metrics).
+	app.use(createAuthMiddleware());
 
 	// Health endpoint
 	app.get('/health', (_req, res) => {

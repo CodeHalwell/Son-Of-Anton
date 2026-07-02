@@ -15,6 +15,7 @@ RUN npm install
 COPY src/ ./src/
 COPY _lib/metrics/dist/ ./_lib/metrics/dist/
 COPY _lib/tracing/dist/ ./_lib/tracing/dist/
+COPY _shared/auth/dist/ ./_shared/auth/dist/
 RUN npx tsc
 
 EXPOSE 3100

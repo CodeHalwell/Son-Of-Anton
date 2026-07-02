@@ -10,8 +10,10 @@ import { Coordinator } from './coordinator/coordinator';
 import { SandboxAgent } from './sandbox/sandboxAgent';
 import { ValidationAgent } from './validation/validationAgent';
 import { PenTestServer } from './server';
+import { requireServiceToken } from '../_shared/auth/dist/index.js';
 
 async function main(): Promise<void> {
+	requireServiceToken('penetration-tester');
 	const config = loadConfig();
 
 	console.log('Son of Anton — Penetration Testing Service');

@@ -7,6 +7,7 @@ import { generateRequirementsMarkdown, generateDesignMarkdown, generateTasksMark
 import { generatePropertyTests, generatePropertyTestFile } from './propertyTestGenerator';
 import { checkCodeToSpecSync, checkSpecToCodeSync } from './syncChecker';
 import { SpecPipelineConfig } from './types';
+import { enforceHttpAuth } from '../_shared/auth/dist/index.js';
 
 /**
  * HTTP server for the spec pipeline service.
@@ -55,6 +56,11 @@ export class SpecPipelineServer {
 	private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
 		const url = new URL(req.url ?? '/', `http://localhost:${this.config.server.port}`);
 		const method = req.method ?? 'GET';
+
+		// Enforce inter-service auth (exempts /health and /metrics).
+		if (!enforceHttpAuth(req, res)) {
+			return;
+		}
 
 		// GET /health
 		if (method === 'GET' && url.pathname === '/health') {

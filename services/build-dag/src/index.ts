@@ -8,6 +8,7 @@ import { extractDockerComposeDag } from './extractors/dockerComposeExtractor';
 import { DagStore } from './graph/dagStore';
 import type { ExtractionResult } from './types';
 import { prometheusHandler } from '../_lib/metrics/dist/index.js';
+import { enforceHttpAuth, requireServiceToken } from '../_shared/auth/dist/index.js';
 
 const PORT = parseInt(process.env.BUILD_DAG_PORT ?? '3301', 10);
 const PROJECT_PATH = process.env.PROJECT_PATH ?? '/workspace';
@@ -49,6 +50,11 @@ async function extractAll(): Promise<void> {
 
 const httpServer = http.createServer(async (req, res) => {
 	const url = new URL(req.url ?? '/', `http://localhost:${PORT}`);
+
+	// Enforce inter-service auth (exempts /health and /metrics).
+	if (!enforceHttpAuth(req, res)) {
+		return;
+	}
 
 	// Health endpoint
 	if (url.pathname === '/health') {
@@ -156,6 +162,8 @@ function readBody(req: http.IncomingMessage): Promise<string> {
 }
 
 async function start(): Promise<void> {
+	requireServiceToken('build-dag');
+
 	// Extract DAG on startup
 	await extractAll();
 

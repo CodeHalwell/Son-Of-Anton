@@ -34,6 +34,7 @@ RUN npm ci
 RUN npx playwright install chromium
 
 COPY src/ ./src/
+COPY _shared/auth/dist/ ./_shared/auth/dist/
 RUN npx tsc
 
 EXPOSE 3105

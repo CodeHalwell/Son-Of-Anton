@@ -7,6 +7,7 @@ import { ACPClientImpl } from './client';
 import { AgentRegistry } from './registry/agentRegistry';
 import { ACPDispatcher } from './dispatcher';
 import { prometheusHandler } from '../_lib/metrics/dist/index.js';
+import { enforceHttpAuth, requireServiceToken } from '../_shared/auth/dist/index.js';
 
 const PORT = parseInt(process.env.ACP_PORT ?? '3300', 10);
 const CONFIG_PATH = process.env.ACP_CONFIG_PATH
@@ -18,6 +19,11 @@ const dispatcher = new ACPDispatcher(client);
 
 const httpServer = http.createServer(async (req, res) => {
 	const url = new URL(req.url ?? '/', `http://localhost:${PORT}`);
+
+	// Enforce inter-service auth (exempts /health and /metrics).
+	if (!enforceHttpAuth(req, res)) {
+		return;
+	}
 
 	// Health endpoint
 	if (url.pathname === '/health') {
@@ -128,6 +134,7 @@ function readBody(req: http.IncomingMessage): Promise<string> {
 }
 
 async function start(): Promise<void> {
+	requireServiceToken('acp-client');
 	await registry.load();
 	console.log(`[acp-client] Loaded ${(await client.listAgents()).length} agents from registry`);
 
