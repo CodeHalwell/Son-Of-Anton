@@ -6,6 +6,7 @@
 import * as fs from 'fs';
 import { AgentManager } from 'son-of-anton-core/dist/agents/AgentManager';
 import { createAgentStack, type AgentStack } from 'son-of-anton-core/dist/agents/AgentStackFactory';
+import { SessionBudget } from 'son-of-anton-core/dist/agents/SessionBudget';
 import type { CoreHost, Disposable } from 'son-of-anton-core/dist/host';
 import { LlmClient } from 'son-of-anton-core/dist/llm/LlmClient';
 import { McpClient, type McpClientDeps } from 'son-of-anton-core/dist/mcp/McpClient';
@@ -22,6 +23,33 @@ import { buildCliToolExecutionContext } from './toolExecutionContext';
  */
 export interface CliAgentStackOptions {
 	readonly approvalGate?: ApprovalGate;
+}
+
+/**
+ * Build the session spend kill switch from opt-in environment variables so
+ * headless `sota run` loops honour a cost / token / request cap. Off by
+ * default: with none of the vars set the run stays uncapped (the historical
+ * behaviour). Only positive, finite values are applied.
+ */
+function buildCliSpendGuard(): SessionBudget | undefined {
+	const num = (raw: string | undefined): number | undefined => {
+		if (raw === undefined || raw.trim() === '') {
+			return undefined;
+		}
+		const value = Number(raw);
+		return Number.isFinite(value) && value > 0 ? value : undefined;
+	};
+	const maxCostUsd = num(process.env.SOTA_SESSION_MAX_COST_USD);
+	const maxTotalTokens = num(process.env.SOTA_SESSION_MAX_TOKENS);
+	const maxRequests = num(process.env.SOTA_SESSION_MAX_REQUESTS);
+	if (maxCostUsd === undefined && maxTotalTokens === undefined && maxRequests === undefined) {
+		return undefined;
+	}
+	return new SessionBudget({
+		...(maxCostUsd !== undefined ? { maxCostUsd } : {}),
+		...(maxTotalTokens !== undefined ? { maxTotalTokens } : {}),
+		...(maxRequests !== undefined ? { maxRequests } : {}),
+	});
 }
 
 /**
@@ -78,6 +106,7 @@ export function buildCliAgentStack(host: CoreHost, options?: CliAgentStackOption
 		projectContext: host.projectContext,
 		toolExecutionContext,
 		configStore: host.config,
+		spendGuard: buildCliSpendGuard(),
 	});
 
 	const dispose = (): void => {

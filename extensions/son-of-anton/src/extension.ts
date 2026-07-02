@@ -33,6 +33,8 @@ import { bridgeMcpToolsIntoRegistry, subscribeMcpToolBridge } from 'son-of-anton
 import { StatusBarManager } from './sidebar/StatusBarManager';
 import { registerAgentParticipants } from './agents/AgentParticipants';
 import { createAgentStack } from 'son-of-anton-core/agents/AgentStackFactory';
+import { SessionBudget } from 'son-of-anton-core/agents/SessionBudget';
+import { readSpendLimits } from './monitoring/SpendGuard';
 import { AgentBridge } from './chat/AgentBridge';
 import { WorkspaceContextProvider } from './chat/WorkspaceContextProvider';
 import { WorkspaceAgentsMdProvider } from './agents/AgentsMdLoader';
@@ -403,6 +405,16 @@ export function activate(context: vscode.ExtensionContext): void {
 		},
 	};
 
+	// Session spend kill switch. Build the core SessionBudget from the user's
+	// `sota.spendLimit.*` settings and thread it into the stack so BaseAgent
+	// (per-call) and OrchestratorAgent (per-subtask) actually enforce the cap —
+	// without this the guard stays undefined and the checks are silent no-ops.
+	// Disabled or a zero/negative session cap → uncapped (historical default).
+	const spendLimits = readSpendLimits();
+	const spendGuard = spendLimits.enabled && spendLimits.sessionCapUsd > 0
+		? new SessionBudget({ maxCostUsd: spendLimits.sessionCapUsd })
+		: undefined;
+
 	const agentStack = createAgentStack({
 		llmClient,
 		mcpClient,
@@ -411,6 +423,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		workspaceRoot: workspacePath || undefined,
 		projectContext: projectContextProvider,
 		configStore: agentConfigStore,
+		spendGuard,
 		toolExecutionContext: workspacePath
 			? createInstrumentedWorkspaceToolContext(hookRunner, {
 				// Approval routing: consult the chat panel's webview-card
