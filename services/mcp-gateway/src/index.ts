@@ -62,6 +62,9 @@ const httpServer = http.createServer(async (req, res) => {
 
 		res.on('close', () => {
 			activeTransports.delete(sessionId);
+			// Close the transport so the MCP SDK aborts any in-flight request
+			// signals, allowing streaming tool handlers to exit cooperatively.
+			transport.close().catch(() => { /* ignore errors during cleanup */ });
 		});
 
 		await mcpServer.connect(transport);

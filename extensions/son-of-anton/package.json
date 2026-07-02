@@ -210,27 +210,27 @@
 			},
 			{
 				"command": "sota.openCliHere",
-				"title": "Open sota CLI in Terminal",
+				"title": "Anton: Open CLI in Terminal",
 				"category": "Son of Anton"
 			},
 			{
 				"command": "sota.cli.openMenu",
-				"title": "Show sota CLI Menu",
+				"title": "Anton: Show CLI Menu",
 				"category": "Son of Anton"
 			},
 			{
 				"command": "sota.harness.openMenu",
-				"title": "Show Harness State Menu",
+				"title": "Anton: Show Harness State Menu",
 				"category": "Son of Anton"
 			},
 			{
 				"command": "sota.openTaskBoard",
-				"title": "Open Task Board",
+				"title": "Anton: Open Task Board",
 				"category": "Son of Anton"
 			},
 			{
 				"command": "sota.openSetupWizard",
-				"title": "Open Setup Wizard",
+				"title": "Anton: Open Setup Wizard",
 				"category": "Son of Anton"
 			},
 			{
@@ -263,33 +263,33 @@
 			},
 			{
 				"command": "sota.newConversation",
-				"title": "New Conversation",
+				"title": "Anton: New Conversation",
 				"category": "Son of Anton",
 				"icon": "$(add)"
 			},
 			{
 				"command": "sota.openConversation",
-				"title": "Open Conversation",
+				"title": "Anton: Open Conversation",
 				"category": "Son of Anton"
 			},
 			{
 				"command": "sota.openCliConversation",
-				"title": "Open CLI Conversation",
+				"title": "Anton: Open CLI Conversation",
 				"category": "Son of Anton"
 			},
 			{
 				"command": "sota.renameConversation",
-				"title": "Rename Conversation",
+				"title": "Anton: Rename Conversation",
 				"category": "Son of Anton"
 			},
 			{
 				"command": "sota.deleteConversation",
-				"title": "Delete Conversation",
+				"title": "Anton: Delete Conversation",
 				"category": "Son of Anton"
 			},
 			{
 				"command": "sota.exportConversation",
-				"title": "Export Conversation",
+				"title": "Anton: Export Conversation",
 				"category": "Son of Anton"
 			},
 			{
@@ -298,7 +298,7 @@
 			},
 			{
 				"command": "sota.showHarnessStats",
-				"title": "Son of Anton: Show Harness Stats"
+				"title": "Anton: Show Harness Stats"
 			},
 			{
 				"command": "sota.showSandbox",
@@ -334,17 +334,17 @@
 			},
 			{
 				"command": "sota.captureCheckpoint",
-				"title": "Capture Checkpoint",
+				"title": "Anton: Capture Checkpoint",
 				"category": "Son of Anton: Checkpoints"
 			},
 			{
 				"command": "sota.listCheckpoints",
-				"title": "List Checkpoints",
+				"title": "Anton: List Checkpoints",
 				"category": "Son of Anton: Checkpoints"
 			},
 			{
 				"command": "sota.restoreCheckpoint",
-				"title": "Restore Checkpoint",
+				"title": "Anton: Restore Checkpoint",
 				"category": "Son of Anton: Checkpoints"
 			},
 			{
@@ -365,87 +365,87 @@
 			},
 			{
 				"command": "sota.showSiliconValleyQuote",
-				"title": "Show Silicon Valley Quote",
+				"title": "Anton: Show Silicon Valley Quote",
 				"category": "Son of Anton: Easter Eggs"
 			},
 			{
 				"command": "sota.showPiedPiperLogo",
-				"title": "Show Pied Piper Logo",
+				"title": "Anton: Show Pied Piper Logo",
 				"category": "Son of Anton: Easter Eggs"
 			},
 			{
 				"command": "sota.celebrate",
-				"title": "Celebrate (Compression Animation)",
+				"title": "Anton: Celebrate (Compression Animation)",
 				"category": "Son of Anton: Easter Eggs"
 			},
 			{
 				"command": "sota.grantWorkspaceTrust",
-				"title": "Grant Workspace Trust",
+				"title": "Anton: Grant Workspace Trust",
 				"category": "Son of Anton: Trust"
 			},
 			{
 				"command": "sota.revokeWorkspaceTrust",
-				"title": "Revoke Workspace Trust",
+				"title": "Anton: Revoke Workspace Trust",
 				"category": "Son of Anton: Trust"
 			},
 			{
 				"command": "sota.manageTrustedFolders",
-				"title": "Manage Trusted Folders",
+				"title": "Anton: Manage Trusted Folders",
 				"category": "Son of Anton: Trust"
 			},
 			{
 				"command": "sota.specialistRoster.startThread",
-				"title": "Start a Thread",
+				"title": "Anton: Start a Thread",
 				"category": "Anton Roster"
 			},
 			{
 				"command": "sota.specialistRoster.viewMemory",
-				"title": "View Memory",
+				"title": "Anton: View Memory",
 				"category": "Anton Roster"
 			},
 			{
 				"command": "sota.specialistRoster.clearThread",
-				"title": "Clear Thread",
+				"title": "Anton: Clear Thread",
 				"category": "Anton Roster"
 			},
 			{
 				"command": "sota.specialistRoster.showLastTrace",
-				"title": "Show Last Trace",
+				"title": "Anton: Show Last Trace",
 				"category": "Anton Roster"
 			},
 			{
 				"command": "sota.enableCodeGraph",
-				"title": "Enable Code Graph",
+				"title": "Anton: Enable Code Graph",
 				"category": "Son of Anton"
 			},
 			{
 				"command": "sota.triggerAntonIsWatching",
-				"title": "Trigger \"Anton is Watching\" (test)",
+				"title": "Anton: Trigger \"Anton is Watching\" (test)",
 				"category": "Son of Anton"
 			},
 			{
 				"command": "sota.codeGraph.menu",
-				"title": "Code Graph Actions",
+				"title": "Anton: Code Graph Actions",
 				"category": "Son of Anton"
 			},
 			{
 				"command": "sota.codeGraph.indexWorkspace",
-				"title": "Code Graph: Index Workspace",
+				"title": "Anton: Code Graph: Index Workspace",
 				"category": "Son of Anton"
 			},
 			{
 				"command": "sota.codeGraph.restart",
-				"title": "Code Graph: Restart Backend",
+				"title": "Anton: Code Graph: Restart Backend",
 				"category": "Son of Anton"
 			},
 			{
 				"command": "sota.codeGraph.showStatus",
-				"title": "Code Graph: Show Status",
+				"title": "Anton: Code Graph: Show Status",
 				"category": "Son of Anton"
 			},
 			{
 				"command": "sota.codeGraph.openLogs",
-				"title": "Code Graph: Open Logs",
+				"title": "Anton: Code Graph: Open Logs",
 				"category": "Son of Anton"
 			}
 		],
@@ -1063,20 +1063,23 @@
 	"scripts": {
 		"build": "npx tsx esbuild.mts",
 		"watch": "npx tsx esbuild.mts --watch",
-		"test": "node ./out/test/runTests.js"
+		"test": "mocha"
 	},
 	"dependencies": {
 		"@aws-sdk/client-bedrock-runtime": "^3.700.0",
 		"@aws-sdk/credential-providers": "^3.700.0"
 	},
 	"devDependencies": {
-		"@copilotkit/react-core": "^1.57.1",
-		"@copilotkit/react-ui": "^1.57.1",
+		"@copilotkit/react-core": "1.57.1",
+		"@copilotkit/react-ui": "1.57.1",
+		"@types/mocha": "^10.0.10",
 		"@types/react": "^18.3.28",
 		"@types/react-dom": "^18.3.7",
 		"@types/vscode": "^1.96.0",
 		"esbuild": "^0.24.2",
+		"mocha": "^10.7.3",
 		"react": "^18.3.1",
-		"react-dom": "^18.3.1"
+		"react-dom": "^18.3.1",
+		"tsx": "^4.19.2"
 	}
 }

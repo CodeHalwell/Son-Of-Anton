@@ -6,8 +6,10 @@
 import * as assert from 'assert';
 import { toErrorMessage, isErrorWithActions, createErrorWithActions } from '../../common/errorMessage.js';
 import { IAction } from '../../common/actions.js';
+import { ensureNoDisposablesAreLeakedInTestSuite } from './utils.js';
 
 suite('ErrorMessage', () => {
+	ensureNoDisposablesAreLeakedInTestSuite();
 
 	test('toErrorMessage - null/undefined', () => {
 		assert.strictEqual(toErrorMessage(null), 'An unknown error occurred. Please consult the log for more details.');
@@ -51,14 +53,19 @@ suite('ErrorMessage', () => {
 
 	test('toErrorMessage - custom node error', () => {
 		const err = new Error('Host not allowed');
+		// eslint-disable-next-line local/code-no-any-casts
 		(err as any).code = 'ERR_UNC_HOST_NOT_ALLOWED';
+		// eslint-disable-next-line local/code-no-unexternalized-strings
 		assert.strictEqual(toErrorMessage(err), "Host not allowed. Please update the 'security.allowedUNCHosts' setting if you want to allow this host.");
 	});
 
 	test('toErrorMessage - system error', () => {
 		const err = new Error('System error');
+		// eslint-disable-next-line local/code-no-any-casts
 		(err as any).code = 'ENOENT';
+		// eslint-disable-next-line local/code-no-any-casts
 		(err as any).errno = -2;
+		// eslint-disable-next-line local/code-no-any-casts
 		(err as any).syscall = 'open';
 		assert.strictEqual(toErrorMessage(err), 'A system error occurred (System error)');
 	});
@@ -67,7 +74,7 @@ suite('ErrorMessage', () => {
 		assert.strictEqual(isErrorWithActions(null), false);
 		assert.strictEqual(isErrorWithActions(new Error()), false);
 
-		const action: IAction = { id: 'test', label: 'Test', tooltip: '', class: '', enabled: true, run: async () => {} };
+		const action: IAction = { id: 'test', label: 'Test', tooltip: '', class: '', enabled: true, run: async () => { } };
 		const err = createErrorWithActions('Error with actions', [action]);
 		assert.strictEqual(isErrorWithActions(err), true);
 		assert.strictEqual(err.message, 'Error with actions');

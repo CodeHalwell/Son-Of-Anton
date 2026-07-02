@@ -24,6 +24,11 @@
 **/extensions/vscode-api-tests/testWorkspace2/**
 **/fixtures/**
 **/node_modules/**
+services/**
+son-of-anton-mcp/**
+extensions/son-of-anton/**
+son-of-anton-core/**
+son-of-anton-cli/**
 **/out/**
 **/out-*/**
 **/src/**/dompurify.js

@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Disposable, DisposableStore, IDisposable, MutableDisposable } from '../../../../base/common/lifecycle.js';
-import { CancellationToken } from '../../../../base/common/cancellation.js';
+import { CancellationToken, CancellationTokenSource } from '../../../../base/common/cancellation.js';
 import { AgentEvent } from '../../../common/agentEvents.js';
 import { IObservable, observableValue } from '../../../../base/common/observable.js';
 import { URI } from '../../../../base/common/uri.js';
@@ -90,7 +90,7 @@ export interface ISessionsManagementService {
 	 * When `openNewSessionView` is true, opens a new session view after sending
 	 * instead of navigating to the newly created session.
 	 */
-	sendRequestForNewSession(sessionResource: URI, options?: { openNewSessionView?: boolean }): Promise<void>;
+	sendRequestForNewSession(sessionResource: URI, options?: { openNewSessionView?: boolean }, cancellation?: CancellationToken): Promise<void>;
 
 	/**
 	 * Stream agent events for a new-session request.
@@ -103,7 +103,7 @@ export interface ISessionsManagementService {
 	 * streaming for this session type; callers must fall back to
 	 * `sendRequestForNewSession` in that case.
 	 *
-	 * The `signal` is wired to the provider connection — aborting it cancels
+	 * The `signal` is wired to the provider connection - aborting it cancels
 	 * the in-flight request and closes the SSE stream.
 	 */
 	streamRequestForNewSession(
@@ -322,17 +322,36 @@ export class SessionsManagementService extends Disposable implements ISessionsMa
 
 	async streamRequestForNewSession(
 		sessionResource: URI,
-		_signal: AbortSignal,
+		signal: AbortSignal,
 		options?: { openNewSessionView?: boolean },
 	): Promise<AsyncIterable<AgentEvent> | null> {
 		// Streaming infrastructure (model-router direct connection) is not yet
-		// wired into the IDE. Fall back to the non-streaming path and signal
-		// to the caller that no event stream is available.
-		await this.sendRequestForNewSession(sessionResource, options);
+		// wired into the IDE. Fall back to the non-streaming path, but propagate
+		// the AbortSignal so that cancelling from the UI stops the underlying
+		// VS Code chat request.
+		const cts = new CancellationTokenSource();
+		const onAbort = () => {
+			cts.cancel();
+			// Also cancel any in-flight provider request that was already dispatched
+			// via chatService.sendRequest (which has no cancellation token parameter).
+			this.chatService.cancelCurrentRequestForSession(sessionResource, 'user-abort');
+		};
+		if (signal.aborted) {
+			cts.cancel();
+			cts.dispose();
+			return null;
+		}
+		signal.addEventListener('abort', onAbort, { once: true });
+		try {
+			await this.sendRequestForNewSession(sessionResource, options, cts.token);
+		} finally {
+			signal.removeEventListener('abort', onAbort);
+			cts.dispose();
+		}
 		return null;
 	}
 
-	async sendRequestForNewSession(sessionResource: URI, options?: { openNewSessionView?: boolean }): Promise<void> {
+	async sendRequestForNewSession(sessionResource: URI, options?: { openNewSessionView?: boolean }, cancellation = CancellationToken.None): Promise<void> {
 		const session = this._newSession.value;
 		if (!session) {
 			this.logService.error(`[SessionsManagementService] No new session found for resource: ${sessionResource.toString()}`);
@@ -365,7 +384,10 @@ export class SessionsManagementService extends Disposable implements ISessionsMa
 			attachedContext: session.attachedContext,
 		};
 
-		await this.chatSessionsService.getOrCreateChatSession(session.resource, CancellationToken.None);
+		await this.chatSessionsService.getOrCreateChatSession(session.resource, cancellation);
+		if (cancellation.isCancellationRequested) {
+			return;
+		}
 		await this.doSendRequestForNewSession(session, query, sendOptions, session.selectedOptions, options?.openNewSessionView);
 
 		// Clean up the session after sending (setter disposes the previous value)

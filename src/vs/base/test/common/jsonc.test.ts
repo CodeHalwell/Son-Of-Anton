@@ -60,7 +60,9 @@ suite('JSONC', () => {
 		});
 
 		test('No strings - single quote', () => {
+			// eslint-disable-next-line local/code-no-unexternalized-strings
 			const content = "{ '/* */': 10 }";
+			// eslint-disable-next-line local/code-no-unexternalized-strings
 			const expected = "{ '/* */': 10 }";
 			assert.strictEqual(stripComments(content), expected);
 		});

@@ -69,13 +69,8 @@ const ALLOWED_PATTERNS: { pattern: RegExp; reason: string }[] = [
 	{ pattern: /\bhead\b/, reason: 'Reading file' },
 	{ pattern: /\btail\b/, reason: 'Reading file' },
 	{ pattern: /\bwc\b/, reason: 'Counting' },
-	// Dependency installers used to live here as "allowed" because they're
-	// part of normal dev workflows. They're moved to CONFIRM_PATTERNS below
-	// because they fetch arbitrary code from public registries — a model
-	// that drifts into `npm install left-pad-malicious` should be gated on
-	// a user confirmation. `npm ci` stays "allowed" because it only
-	// installs whatever the lockfile already pins; no new packages.
 	{ pattern: /\bnpm\s+ci\b/, reason: 'Installing dependencies (locked)' },
+	{ pattern: /^npm\s+install\s*$/, reason: 'Installing dependencies (bare)' },
 	{ pattern: /\bcargo\s+build\b/, reason: 'Building project' },
 	{ pattern: /\bnpm\s+run\s+build\b/, reason: 'Building project' },
 	{ pattern: /\bsemgrep\b/, reason: 'Security scanning' },
@@ -92,10 +87,7 @@ const CONFIRM_PATTERNS: { pattern: RegExp; reason: string }[] = [
 	{ pattern: /\bgit\s+checkout\s+--/, reason: 'Discarding changes' },
 	{ pattern: /\bapt-get\s+install\b/, reason: 'Installing system packages' },
 	{ pattern: /\bapk\s+add\b/, reason: 'Installing system packages' },
-	// Fetch-arbitrary-code dependency installers — confirmation required.
-	// `npm ci` stays in ALLOWED_PATTERNS because it strictly installs from
-	// the lockfile (no new packages without an explicit edit).
-	{ pattern: /\bnpm\s+install\b/, reason: 'Installing dependencies' },
+	{ pattern: /\bnpm\s+install\s+\S/, reason: 'Installing dependencies' },
 	{ pattern: /\byarn\s+install\b/, reason: 'Installing dependencies' },
 	{ pattern: /\byarn\s+add\b/, reason: 'Installing dependencies' },
 	{ pattern: /\bpip\s+install\b/, reason: 'Installing dependencies' },
@@ -121,6 +113,11 @@ export const NETWORK_ALLOWLIST: string[] = [
 	'api.github.com',
 ];
 
+// Matches compound shell operators that chain commands. A command containing
+// any of these could hide a dangerous prefix behind a safe-looking suffix, so
+// the allowlist is skipped for such commands and they fall through to confirm.
+const COMPOUND_OPERATOR_PATTERN = /;|&&|\|\||\|/;
+
 /**
  * Classifies a shell command into a permission level.
  * Commands are checked against blocked, allowed, and confirm patterns.
@@ -143,10 +140,14 @@ export function classifyCommand(command: string): ClassificationResult {
 		}
 	}
 
-	// Check allowed patterns
-	for (const { pattern, reason } of ALLOWED_PATTERNS) {
-		if (pattern.test(trimmed)) {
-			return { level: 'allowed', reason, command: trimmed };
+	// Compound shell syntax (;  &&  ||  |) can hide dangerous prefixes behind
+	// an otherwise-allowed suffix. Skip the allowlist for compound commands so
+	// they fall through to confirm rather than being auto-permitted.
+	if (!COMPOUND_OPERATOR_PATTERN.test(trimmed)) {
+		for (const { pattern, reason } of ALLOWED_PATTERNS) {
+			if (pattern.test(trimmed)) {
+				return { level: 'allowed', reason, command: trimmed };
+			}
 		}
 	}
 

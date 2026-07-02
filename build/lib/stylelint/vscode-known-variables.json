@@ -608,6 +608,7 @@
 		"--vscode-profileBadge-foreground",
 		"--vscode-profiles-sashBorder",
 		"--vscode-progressBar-background",
+		"--vscode-progressBar-foreground",
 		"--vscode-quickInput-background",
 		"--vscode-quickInput-foreground",
 		"--vscode-quickInput-list-focusBackground",
@@ -1028,6 +1029,7 @@
 		"--inline-edit-border-radius",
 		"--chat-subagent-last-item-height",
 		"--vscode-inline-chat-affordance-height",
+		"--multi-session-depth",
 		"--collapse-from-width",
 		"--slide-from-x",
 		"--slide-from-y"

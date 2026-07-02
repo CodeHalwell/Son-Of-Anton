@@ -17,7 +17,7 @@ suite('hotReloadHelpers', () => {
 	});
 
 	test('createHotClass returns an observable of the class', () => {
-		class TestClass {}
+		class TestClass { }
 		const obs = createHotClass(TestClass);
 		assert.strictEqual(obs.get(), TestClass);
 	});

@@ -21,4 +21,4 @@ COPY --from=build /app/dist/ dist/
 
 EXPOSE 3202
 
-CMD ["node", "dist/src/index.js"]
+CMD ["node", "dist/src/main.js"]

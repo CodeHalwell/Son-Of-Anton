@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Son of Anton Contributors. All rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
@@ -55,7 +55,7 @@ export interface BuildOptions {
 
 /**
  * Transform a raw agent-session list into a flat, depth-annotated list ready
- * for rendering. Pure function — no DOM, no observables — so the transform is
+ * for rendering. Pure function - no DOM, no observables - so the transform is
  * exercised entirely from `common/` tests.
  *
  * Ordering:

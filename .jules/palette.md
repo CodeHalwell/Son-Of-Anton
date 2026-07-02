@@ -28,3 +28,7 @@
 ## 2024-07-28 - Prevent Space Scroll on Splitview Pane Headers
 **Learning:** When using `Event.filter` on keydown events to handle the `Space` and `Enter` keys on custom components like `Pane` headers (which act as buttons for toggling expansion), failing to call `preventDefault()` causes the browser to execute its default action—scrolling down the page. This leads to a jarring user experience where toggling a pane jumps the view.
 **Action:** Always ensure the event handler triggered by `Space` or `Enter` for expanding/collapsing elements (or triggering buttons) calls `e.preventDefault()` (and usually `e.stopPropagation()`) before executing the action.
+
+## 2026-07-01 - Initializing aria-expanded State on Render
+**Learning:** Collapsable components (like toggles) that update `aria-expanded` dynamically must also initialize this attribute during DOM creation. Screen readers rely on the initial markup, so hardcoding or omitting the initial state causes incorrect announcements on page load before any interaction updates it.
+**Action:** When constructing collapsable components with `role="button"`, always set the initial `aria-expanded` attribute dynamically based on the component's starting state (e.g., `'aria-expanded': String(!!initialState)` or `'false'` if always starting closed).

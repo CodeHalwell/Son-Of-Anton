@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 /**
- * Uniform agent-event shape for the IDE renderer layer (§4.3 of AGENTIC_PLATFORM_PLAN.md).
+ * Uniform agent-event shape for the IDE renderer layer (section 4.3 of AGENTIC_PLATFORM_PLAN.md).
  *
  * These types mirror `services/_shared/agent-events/index.ts` but are declared
  * independently here to avoid a cross-layer import from renderer code into the

@@ -70,32 +70,7 @@ export function activateAuth(deps: AuthActivationDeps): AuthActivationResult {
 
 	disposables.push(deps.registerCommand('sotaAuth.connect', async (...args: unknown[]) => {
 		const providerId = expectProviderId(args);
-		try {
-			await broker.connect(providerId);
-		} catch (err) {
-			// When the user clicks Connect Claude / Connect ChatGPT before configuring
-			// a clientId, the broker has no provider registered and throws
-			// "Unknown provider: <id>". Surface this as an actionable warning that
-			// deep-links into settings, instead of bubbling a raw error to the wizard.
-			const message = err instanceof Error ? err.message : String(err);
-			if (/^Unknown provider:/.test(message)) {
-				const isClaude = providerId === 'anthropic-oauth';
-				const providerName = isClaude ? 'Claude' : 'ChatGPT / Codex';
-				const apiKeySetting = isClaude ? 'sota.apiKey' : 'sota.openaiApiKey';
-				const choice = await vscode.window.showWarningMessage(
-					`${providerName} OAuth sign-in is not available — neither Anthropic nor OpenAI offers public OAuth client registration for third-party tools right now. Use an API key instead.`,
-					'Open API Key Settings',
-					'Configure Client ID Anyway',
-				);
-				if (choice === 'Open API Key Settings') {
-					await vscode.commands.executeCommand('workbench.action.openSettings', apiKeySetting);
-				} else if (choice === 'Configure Client ID Anyway') {
-					await vscode.commands.executeCommand('workbench.action.openSettings', `sotaAuth.${providerId}.clientId`);
-				}
-				return { ok: false, reason: 'missing-client-id' } as const;
-			}
-			throw err;
-		}
+		await broker.connect(providerId);
 		return { ok: true } as const;
 	}));
 
