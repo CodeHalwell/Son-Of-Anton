@@ -1744,6 +1744,7 @@ export class LlmClient {
 				systemPrompt: options.systemPrompt ?? 'You are a helpful coding assistant.',
 				messages,
 				modelId: cliModel,
+				signal: options.signal,
 			})) {
 				if (chunk.type === 'text') {
 					fullText += chunk.text;
@@ -3410,6 +3411,7 @@ export class LlmClient {
 				systemPrompt: options.systemPrompt ?? 'You are a helpful coding assistant.',
 				messages,
 				modelId: cliModel,
+				signal: options.signal,
 			})) {
 				if (chunk.type === 'text') {
 					fullText += chunk.text;

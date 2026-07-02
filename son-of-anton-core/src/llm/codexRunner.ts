@@ -43,6 +43,13 @@ export interface CodexRunOptions {
 	readonly modelId: string;
 	readonly cwd?: string;
 	readonly codexPath?: string;
+	/**
+	 * Optional cancellation signal. When it aborts, the spawned `codex`
+	 * process is killed immediately (SIGTERM) instead of being left to run —
+	 * and keep billing against the user's subscription — until the 10-minute
+	 * stream timeout. Threaded through from `LlmRequestOptions.signal`.
+	 */
+	readonly signal?: AbortSignal;
 }
 
 export type CodexChunk =
@@ -122,6 +129,20 @@ export async function* runCodex(options: CodexRunOptions): AsyncGenerator<CodexC
 
 	const proc = spawn(codexPath, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
 
+	// Forward cancellation into the child. Without this the caller aborting
+	// only destroyed our stdout reader, leaving the `codex` subprocess alive
+	// (and billing) until the STREAM_JSON_TIMEOUT_MS fallback. Kill on abort,
+	// and handle an already-aborted signal by killing right after spawn.
+	const signal = options.signal;
+	const onAbort = () => { try { proc.kill('SIGTERM'); } catch { /* already exited */ } };
+	if (signal) {
+		if (signal.aborted) {
+			onAbort();
+		} else {
+			signal.addEventListener('abort', onAbort, { once: true });
+		}
+	}
+
 	// Send the message history as a JSON array on stdin.
 	proc.stdin.write(JSON.stringify(options.messages));
 	proc.stdin.end();
@@ -153,6 +174,7 @@ export async function* runCodex(options: CodexRunOptions): AsyncGenerator<CodexC
 		yield { type: 'done' };
 	} finally {
 		clearTimeout(timeout);
+		signal?.removeEventListener('abort', onAbort);
 		try { proc.stdout.destroy(); } catch { /* */ }
 	}
 

@@ -8,6 +8,7 @@ import type { ConfigStore, ProjectContextProvider } from '../host';
 import { getVoice } from '../chat/personas';
 import { LlmClient, ModelId, type LlmContentPart, type LlmMessage, type LlmStreamComplete, type SystemPromptPart } from '../llm/LlmClient';
 import { detectUncertainty, UNCERTAINTY_ESCALATION_THRESHOLD } from '../llm/confidence';
+import { MODEL_METADATA } from '../llm/modelMetadata';
 import { ModelRouter } from '../llm/ModelRouter';
 import { McpClient, McpToolResult } from '../mcp/McpClient';
 import { isPersonalityEnabled } from '../personality/personalityConfig';
@@ -18,6 +19,8 @@ import { AgentEvent } from './agentEvents';
 import { AgentManager } from './AgentManager';
 import { MetricsTracker } from './MetricsTracker';
 import { ProjectMemory } from './ProjectMemory';
+import { type IContextSanitiser, isUntrustedToolSource } from './ContextSanitiser';
+import type { ISpendGuard } from './SessionBudget';
 import { COMPACTION_THRESHOLD, SpecialistMemory } from './SpecialistMemory';
 import {
 	AgentConfig,
@@ -159,6 +162,24 @@ export abstract class BaseAgent {
 	 * stateless so the lookup result doesn't change.
 	 */
 	protected readonly modelRouter?: ModelRouter;
+	/**
+	 * Host-supplied session spend kill switch. When set, every LLM call this
+	 * agent makes is gated on `assertWithinBudget()` (throwing
+	 * `SpendCapExceededError` once a cap is reached) and folds its usage back
+	 * in via `recordUsage()`. The guard is typically a single instance shared
+	 * across the whole stack (see `createAgentStack`) so the orchestrator and
+	 * its specialists debit one common budget. Unset — the default — means no
+	 * cap and no behaviour change.
+	 */
+	protected readonly spendGuard?: ISpendGuard;
+	/**
+	 * Host-supplied context sanitiser. When set, tool results are routed
+	 * through it before they re-enter the LLM prompt — MCP (external) tool
+	 * results are tagged untrusted, first-party built-in results trusted. Unset
+	 * — the default — means tool results pass through verbatim (no behaviour
+	 * change). See {@link IContextSanitiser}.
+	 */
+	protected readonly contextSanitiser?: IContextSanitiser;
 
 	/**
 	 * H12 — re-entry guard for `maybeCompactMemory`. Compaction is fired
@@ -180,6 +201,8 @@ export abstract class BaseAgent {
 		projectContext?: ProjectContextProvider,
 		toolExecutionContext?: ToolExecutionContext,
 		modelRouter?: ModelRouter,
+		spendGuard?: ISpendGuard,
+		contextSanitiser?: IContextSanitiser,
 	) {
 		this.config = config;
 		this.llmClient = llmClient;
@@ -192,6 +215,8 @@ export abstract class BaseAgent {
 		this.projectContext = projectContext;
 		this.toolExecutionContext = toolExecutionContext;
 		this.modelRouter = modelRouter;
+		this.spendGuard = spendGuard;
+		this.contextSanitiser = contextSanitiser;
 	}
 
 	get handle(): AgentHandle {
@@ -569,6 +594,11 @@ export abstract class BaseAgent {
 			attributes: isEscalation ? { model, escalation: true } : { model },
 		});
 
+		// Spend kill switch — refuse to open a new provider stream once the
+		// session cap has been reached. Throws `SpendCapExceededError`, which
+		// the caller surfaces as the run's error. No-op when no guard is wired.
+		this.spendGuard?.assertWithinBudget();
+
 		// Consume the stream once, capturing the per-call usage from the
 		// `complete` event. This must NOT read llmClient.getTokenUsage(), which
 		// returns the client's *cumulative* totals — reading those here counted
@@ -610,7 +640,53 @@ export abstract class BaseAgent {
 		span.attributes['inputTokens'] = tokenUsage.inputTokens;
 		span.attributes['outputTokens'] = tokenUsage.outputTokens;
 
+		// Debit the shared session budget with this call's usage (and a
+		// best-effort cost estimate) so the next `assertWithinBudget` / the
+		// orchestrator's pre-dispatch `isExceeded` check sees it.
+		this.recordSpend(model, tokenUsage);
+
 		return { text, tokenUsage };
+	}
+
+	/**
+	 * Fold one call's usage into the injected {@link ISpendGuard}, attaching a
+	 * best-effort dollar estimate derived from {@link MODEL_METADATA}. Cache-read
+	 * tokens are billed at the input rate (a deliberate slight over-estimate —
+	 * a kill switch should err towards stopping early). No-op when no guard is
+	 * wired or the model has no known pricing.
+	 */
+	private recordSpend(model: ModelId, usage: TokenUsage): void {
+		if (!this.spendGuard) {
+			return;
+		}
+		this.spendGuard.recordUsage({
+			inputTokens: usage.inputTokens,
+			outputTokens: usage.outputTokens,
+			cachedTokens: usage.cachedTokens,
+			costUsd: estimateCostUsd(model, usage),
+		});
+	}
+
+	/**
+	 * Route a tool result through the injected {@link IContextSanitiser} before
+	 * it re-enters the LLM prompt. MCP (external) tool results are tagged
+	 * untrusted; first-party built-in results trusted. A sanitiser outage must
+	 * never break the tool loop, so any error falls back to the raw content.
+	 * No-op (returns the input unchanged) when no sanitiser is wired.
+	 */
+	private async sanitiseToolResult(toolName: string, content: string): Promise<string> {
+		if (!this.contextSanitiser) {
+			return content;
+		}
+		try {
+			return await this.contextSanitiser.sanitise({
+				content,
+				trusted: !isUntrustedToolSource(toolName),
+				source: toolName,
+			});
+		} catch {
+			return content;
+		}
 	}
 
 	/**
@@ -888,6 +964,11 @@ export abstract class BaseAgent {
 				attributes: { model: args.model, iteration },
 			});
 
+			// Spend kill switch — checked before every loop iteration's LLM call
+			// so a runaway tool loop halts as soon as the session cap is reached.
+			// Throws `SpendCapExceededError`; no-op when no guard is wired.
+			this.spendGuard?.assertWithinBudget();
+
 			let text = '';
 			let completion: LlmStreamComplete | undefined;
 			const pendingCalls: Array<{ id: string; name: string; input: Record<string, unknown> }> = [];
@@ -938,6 +1019,15 @@ export abstract class BaseAgent {
 			// with the non-tool-loop callers above.
 			aggregateUsage.naiveInputTokens += iterInput + iterCached;
 
+			// Debit the shared session budget per-iteration so a multi-step loop
+			// accrues against the cap in real time rather than only at the end.
+			this.recordSpend(args.model, {
+				inputTokens: iterInput,
+				outputTokens: iterOutput,
+				cachedTokens: iterCached,
+				naiveInputTokens: iterInput + iterCached,
+			});
+
 			if (pendingCalls.length === 0) {
 				// Natural turn-end: model is done with tools. Return.
 				return {
@@ -966,6 +1056,7 @@ export abstract class BaseAgent {
 			const resultParts: LlmContentPart[] = [];
 			for (const call of pendingCalls) {
 				let result: { result: string; isError?: boolean };
+				let isTodo = false;
 				try {
 					// H13 — todo_write / todo_read are bound to the in-loop
 					// state inside `todoBundle` and execute here (not via the
@@ -973,6 +1064,7 @@ export abstract class BaseAgent {
 					// caller-supplied executeTool as before.
 					const todoTool = todoToolMap.get(call.name);
 					if (todoTool) {
+						isTodo = true;
 						const r = await todoTool.execute(call.input, {} as ToolExecutionContext);
 						result = { result: r.content, isError: !!r.isError };
 					} else {
@@ -982,17 +1074,22 @@ export abstract class BaseAgent {
 					const message = err instanceof Error ? err.message : String(err);
 					result = { result: `Tool execution threw: ${message}`, isError: true };
 				}
+				// Route real tool output through the context sanitiser before it
+				// re-enters the prompt (MCP results untrusted, built-in trusted).
+				// Internal todo focus-chain state is first-party, so it's skipped.
+				// No-op when no sanitiser is wired.
+				const llmContent = isTodo ? result.result : await this.sanitiseToolResult(call.name, result.result);
 				executedCalls.push({
 					name: call.name,
 					input: call.input,
 					id: call.id,
-					result: result.result,
+					result: llmContent,
 					isError: !!result.isError,
 				});
 				resultParts.push({
 					type: 'tool_result',
 					tool_use_id: call.id,
-					content: result.result,
+					content: llmContent,
 					...(result.isError ? { is_error: true } : {}),
 				});
 			}
@@ -1376,4 +1473,22 @@ export function truncateForTaskTitle(input: string): string {
 		return flat;
 	}
 	return flat.slice(0, TASK_TITLE_MAX_CHARS - 1) + '…';
+}
+
+/**
+ * Best-effort dollar estimate for a single LLM call, used to debit the session
+ * spend guard's cost cap. Prices come from {@link MODEL_METADATA} (per-1M-token
+ * rates); cache-read tokens are billed at the input rate — a deliberate slight
+ * over-estimate so the kill switch trips early rather than late. Returns 0 for
+ * models with no known pricing (e.g. local Ollama) so the token / request caps
+ * still function.
+ */
+function estimateCostUsd(model: ModelId, usage: TokenUsage): number {
+	const info = MODEL_METADATA[model];
+	if (!info) {
+		return 0;
+	}
+	const inputMillions = (usage.inputTokens + usage.cachedTokens) / 1_000_000;
+	const outputMillions = usage.outputTokens / 1_000_000;
+	return inputMillions * info.inputCostPer1M + outputMillions * info.outputCostPer1M;
 }

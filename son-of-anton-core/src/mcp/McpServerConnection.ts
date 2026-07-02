@@ -14,10 +14,32 @@ const INITIALIZE_TIMEOUT_MS = 10_000;
 const TOOL_CALL_TIMEOUT_MS = 30_000;
 const PROTOCOL_VERSION = '2024-11-05';
 
+/**
+ * Behavioural hints a server may attach to a tool via the MCP `annotations`
+ * field (spec: `ToolAnnotations`). All are advisory and untrusted — a server
+ * can lie — but they're the only signal we have about whether a tool is a
+ * read or a destructive write, so the bridge uses them (conservatively) to
+ * derive an approval `riskLevel`. Absent server support, every field is
+ * `undefined` and the tool is treated as requiring approval.
+ */
+export interface McpToolAnnotations {
+	readonly title?: string;
+	/** `true` if the tool does not modify its environment (read-only). */
+	readonly readOnlyHint?: boolean;
+	/** `true` if the tool may perform destructive updates. Only meaningful when `readOnlyHint` is not `true`. */
+	readonly destructiveHint?: boolean;
+	/** `true` if repeated calls with the same arguments have no additional effect. */
+	readonly idempotentHint?: boolean;
+	/** `true` if the tool interacts with an open, external world (e.g. the web). */
+	readonly openWorldHint?: boolean;
+}
+
 export interface McpToolDescriptor {
 	name: string;
 	description: string;
 	inputSchema?: object;
+	/** Server-declared behavioural hints, when present. See {@link McpToolAnnotations}. */
+	annotations?: McpToolAnnotations;
 }
 
 export interface McpToolCallResult {
@@ -34,7 +56,7 @@ interface PendingRequest {
 }
 
 interface McpToolsListResult {
-	tools?: Array<{ name?: unknown; description?: unknown; inputSchema?: unknown }>;
+	tools?: Array<{ name?: unknown; description?: unknown; inputSchema?: unknown; annotations?: unknown }>;
 }
 
 interface McpToolCallContentPart {
@@ -135,6 +157,7 @@ export class McpServerConnection {
 				inputSchema: typeof t.inputSchema === 'object' && t.inputSchema !== null
 					? t.inputSchema as object
 					: undefined,
+				annotations: parseToolAnnotations(t.annotations),
 			});
 		}
 		this.cachedTools = normalised;
@@ -238,4 +261,32 @@ export class McpServerConnection {
 		}
 		this.pending.clear();
 	}
+}
+
+/**
+ * Coerce a raw MCP `annotations` payload into {@link McpToolAnnotations},
+ * keeping only recognised boolean hints (and the optional title). Returns
+ * `undefined` when the payload is absent or carries no recognised field, so
+ * downstream risk derivation can cleanly distinguish "no hints" from
+ * "explicitly read-only".
+ */
+function parseToolAnnotations(raw: unknown): McpToolAnnotations | undefined {
+	if (!raw || typeof raw !== 'object') {
+		return undefined;
+	}
+	const src = raw as Record<string, unknown>;
+	const bool = (key: string): boolean | undefined => (typeof src[key] === 'boolean' ? src[key] as boolean : undefined);
+	const annotations: McpToolAnnotations = {
+		title: typeof src.title === 'string' ? src.title : undefined,
+		readOnlyHint: bool('readOnlyHint'),
+		destructiveHint: bool('destructiveHint'),
+		idempotentHint: bool('idempotentHint'),
+		openWorldHint: bool('openWorldHint'),
+	};
+	const hasRecognisedField = annotations.title !== undefined
+		|| annotations.readOnlyHint !== undefined
+		|| annotations.destructiveHint !== undefined
+		|| annotations.idempotentHint !== undefined
+		|| annotations.openWorldHint !== undefined;
+	return hasRecognisedField ? annotations : undefined;
 }
