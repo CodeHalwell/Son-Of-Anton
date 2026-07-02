@@ -31,6 +31,13 @@ export class QdrantClient {
 			host,
 			port,
 			apiKey: process.env.QDRANT_API_KEY || undefined,
+			// qdrant-js defaults `https` to `true` as soon as an apiKey string is
+			// present (`this._https = https ?? typeof apiKey === 'string'`). Qdrant
+			// serves plain HTTP on the internal Docker network, so pin the scheme to
+			// HTTP explicitly — otherwise the client speaks TLS to an HTTP port and
+			// fails with ERR_SSL_WRONG_VERSION_NUMBER. The api-key header is still
+			// sent over HTTP, so auth is unaffected.
+			https: false,
 		});
 		this.collectionName = collectionName;
 		this.vectorSize = vectorSize;
