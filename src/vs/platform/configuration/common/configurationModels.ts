@@ -873,9 +873,11 @@ export class Configuration {
 			for (const overrideIdentifier of overrideIdentifiersFromKey(key)) {
 				const fromKeys = this._defaultConfiguration.getKeysForOverrideIdentifier(overrideIdentifier);
 				const toKeys = defaults.getKeysForOverrideIdentifier(overrideIdentifier);
+				const fromKeysSet = new Set(fromKeys);
+				const toKeysSet = new Set(toKeys);
 				const keys = [
-					...toKeys.filter(key => fromKeys.indexOf(key) === -1),
-					...fromKeys.filter(key => toKeys.indexOf(key) === -1),
+					...toKeys.filter(key => !fromKeysSet.has(key)),
+					...fromKeys.filter(key => !toKeysSet.has(key)),
 					...fromKeys.filter(key => !objects.equals(this._defaultConfiguration.override(overrideIdentifier).getValue(key), defaults.override(overrideIdentifier).getValue(key)))
 				];
 				overrides.push([overrideIdentifier, keys]);
@@ -1277,22 +1279,29 @@ function compare(from: ConfigurationModel | undefined, to: ConfigurationModel | 
 }
 
 function compareConfigurationContents(to: { keys: string[]; contents: IStringDictionary<unknown> } | undefined, from: { keys: string[]; contents: IStringDictionary<unknown> } | undefined) {
-	const added = to
-		? from ? to.keys.filter(key => from.keys.indexOf(key) === -1) : [...to.keys]
-		: [];
-	const removed = from
-		? to ? from.keys.filter(key => to.keys.indexOf(key) === -1) : [...from.keys]
-		: [];
+	if (!to && !from) {
+		return { added: [], removed: [], updated: [] };
+	}
+	if (!from) {
+		return { added: [...to!.keys], removed: [], updated: [] };
+	}
+	if (!to) {
+		return { added: [], removed: [...from.keys], updated: [] };
+	}
+
+	const fromKeys = new Set(from.keys);
+	const toKeys = new Set(to.keys);
+
+	const added = to.keys.filter(key => !fromKeys.has(key));
+	const removed = from.keys.filter(key => !toKeys.has(key));
 	const updated: string[] = [];
 
-	if (to && from) {
-		for (const key of from.keys) {
-			if (to.keys.indexOf(key) !== -1) {
-				const value1 = getConfigurationValue(from.contents, key);
-				const value2 = getConfigurationValue(to.contents, key);
-				if (!objects.equals(value1, value2)) {
-					updated.push(key);
-				}
+	for (const key of from.keys) {
+		if (toKeys.has(key)) {
+			const value1 = getConfigurationValue(from.contents, key);
+			const value2 = getConfigurationValue(to.contents, key);
+			if (!objects.equals(value1, value2)) {
+				updated.push(key);
 			}
 		}
 	}
