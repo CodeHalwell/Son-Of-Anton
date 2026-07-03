@@ -620,6 +620,9 @@ export abstract class BaseAgent {
 			model,
 			systemPrompt,
 			messages: [{ role: 'user', content: userMessage }],
+			// Key the rate limiter on this specialist so unrelated agents debit
+			// their own per-agent bucket rather than sharing the 'default' one.
+			agentHandle: this.handle,
 		})) {
 			if (event.type === 'token') {
 				text += event.token;
