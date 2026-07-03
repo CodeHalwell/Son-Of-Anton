@@ -1157,6 +1157,11 @@ export abstract class BaseAgent {
 			// keeping historical Anthropic-by-default behaviour intact for
 			// callers that don't surface the picker (CLI / tests).
 			const turnModel: ModelId = modelOverride ?? this.defaultModel;
+			// Spend kill switch — the same gate callLlmOnce applies on the
+			// agentic path, so single-shot turns (including runAgenticTurn's
+			// non-tool-loop --model fallback) are capped and debited too.
+			this.spendGuard?.assertWithinBudget();
+			let completion: LlmStreamComplete | undefined;
 			for await (const event of this.llmClient.streamRequest({
 				model: turnModel,
 				systemPrompt,
@@ -1167,10 +1172,19 @@ export abstract class BaseAgent {
 				if (event.type === 'token') {
 					emit(event.token);
 					fullText += event.token;
+				} else if (event.type === 'complete') {
+					completion = event;
 				} else if (event.type === 'error') {
 					throw new Error(event.error);
 				}
 			}
+			// Debit the shared session budget with this call's usage.
+			this.recordSpend(turnModel, {
+				inputTokens: completion?.inputTokens ?? 0,
+				outputTokens: completion?.outputTokens ?? 0,
+				cachedTokens: completion?.cachedTokens ?? 0,
+				naiveInputTokens: (completion?.inputTokens ?? 0) + (completion?.cachedTokens ?? 0),
+			});
 			// Sign-off (Phase 78): only after a natural turn-end -- not error,
 			// not cancel, and only when the assistant actually emitted text.
 			const signOff = this.maybeSignOff(fullText, cancellation.isCancellationRequested);
