@@ -21,9 +21,12 @@ export interface IndexerConfig {
 		port: number;
 	};
 	embedding: {
-		provider: 'local' | 'voyage' | 'mock';
+		provider: 'local' | 'voyage' | 'openai' | 'mock';
 		modelName: string;
 		batchSize: number;
+		apiKey?: string;
+		endpoint?: string;
+		maxRetries: number;
 	};
 	indexer: {
 		chunkTargetTokens: number;
@@ -34,6 +37,31 @@ export interface IndexerConfig {
 
 function parseLanguages(raw: string): string[] {
 	return raw.split(',').map(l => l.trim().toLowerCase()).filter(Boolean);
+}
+
+/**
+ * Parse an integer env value, falling back when unset, empty, or not a
+ * number — `parseInt('') === NaN` would otherwise silently break batching
+ * and retry loops downstream.
+ */
+function intFromEnv(raw: string | undefined, fallback: number): number {
+	const parsed = parseInt(raw ?? '', 10);
+	return Number.isNaN(parsed) ? fallback : parsed;
+}
+
+/**
+ * First non-empty value wins. Compose exports unset variables as empty
+ * strings (`${EMBEDDING_API_KEY:-}`), which must not shadow the documented
+ * fallbacks.
+ */
+function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
+	for (const value of values) {
+		const trimmed = value?.trim();
+		if (trimmed) {
+			return trimmed;
+		}
+	}
+	return undefined;
 }
 
 export function loadConfig(): IndexerConfig {
@@ -65,9 +93,15 @@ export function loadConfig(): IndexerConfig {
 			port: parseInt(process.env.PORT ?? '8080', 10),
 		},
 		embedding: {
-			provider: (process.env.EMBEDDING_PROVIDER ?? 'mock') as 'local' | 'voyage' | 'mock',
-			modelName: process.env.EMBEDDING_MODEL ?? 'mock',
-			batchSize: parseInt(process.env.EMBEDDING_BATCH_SIZE ?? '32', 10),
+			// NOTE: keep in sync with `services/mcp-gateway/src/config.ts`. The
+			// gateway embeds search queries with the same provider + model; if
+			// the two drift, every semantic search scores against noise.
+			provider: (firstNonEmpty(process.env.EMBEDDING_PROVIDER) ?? 'mock') as 'local' | 'voyage' | 'openai' | 'mock',
+			modelName: firstNonEmpty(process.env.EMBEDDING_MODEL) ?? '',
+			batchSize: intFromEnv(process.env.EMBEDDING_BATCH_SIZE, 32),
+			apiKey: firstNonEmpty(process.env.EMBEDDING_API_KEY, process.env.VOYAGE_API_KEY, process.env.OPENAI_API_KEY),
+			endpoint: firstNonEmpty(process.env.EMBEDDING_ENDPOINT),
+			maxRetries: intFromEnv(process.env.EMBEDDING_MAX_RETRIES, 3),
 		},
 		indexer: {
 			chunkTargetTokens: parseInt(process.env.CHUNK_TARGET_TOKENS ?? '512', 10),

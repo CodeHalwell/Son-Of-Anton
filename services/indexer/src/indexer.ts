@@ -8,7 +8,8 @@ import { IndexerConfig } from './config';
 import { TreeSitterManager } from './parsers/treeSitterManager';
 import { SymbolExtractor, FileExtractionResult, CallSite } from './extractors/symbolExtractor';
 import { GraphWriter } from './writers/graphWriter';
-import { EmbeddingWriter, MockEmbeddingProvider, EmbeddingProvider } from './writers/embeddingWriter';
+import { EmbeddingWriter } from './writers/embeddingWriter';
+import { createEmbeddingProvider, EmbeddingProvider } from '../_lib/embeddings/dist/index.js';
 import { FalkorDBClient } from './clients/falkordb';
 import { QdrantClient } from './clients/qdrant';
 
@@ -382,12 +383,23 @@ export class Indexer {
 	}
 
 	private createEmbeddingProvider(): EmbeddingProvider {
-		switch (this.config.embedding.provider) {
-			case 'mock':
-				return new MockEmbeddingProvider(this.config.qdrant.vectorSize);
-			default:
-				console.warn(`[indexer] Unknown embedding provider "${this.config.embedding.provider}", using mock`);
-				return new MockEmbeddingProvider(this.config.qdrant.vectorSize);
+		const embedding = this.config.embedding;
+		// Misconfiguration (missing key, endpoint, or model) throws at startup:
+		// a service explicitly configured for real embeddings must not quietly
+		// fall back to indexing mock noise.
+		const provider = createEmbeddingProvider({
+			provider: embedding.provider,
+			model: embedding.modelName || undefined,
+			dimensions: this.config.qdrant.vectorSize,
+			apiKey: embedding.apiKey,
+			endpoint: embedding.endpoint,
+			maxRetries: embedding.maxRetries,
+		});
+		if (provider.name === 'mock') {
+			console.warn('[indexer] Using MOCK embeddings — semantic search results are meaningless. Set EMBEDDING_PROVIDER=voyage|openai|local for real vectors.');
+		} else {
+			console.log(`[indexer] Embedding provider: ${provider.name} (${this.config.qdrant.vectorSize} dims)`);
 		}
+		return provider;
 	}
 }

@@ -56,7 +56,7 @@
 		{
 			"name": "pentest-baseline-on-pr",
 			"trigger": "onPRCreate",
-			"agent": "anton-pentest",
+			"agent": "anton-security",
 			"instruction": "Run a ZAP baseline (passive) scan against the local application. Report any findings as non-blocking advisories.",
 			"blocking": false
 		},
@@ -64,7 +64,7 @@
 			"name": "pentest-security-file-change",
 			"trigger": "onFileSave",
 			"filter": "**/src/{auth,middleware,security}/**/*.{ts,tsx,js,jsx}",
-			"agent": "anton-pentest",
+			"agent": "anton-security",
 			"instruction": "A security-sensitive file was modified. Run a focused penetration test on related endpoints to verify no vulnerabilities were introduced.",
 			"blocking": false
 		}

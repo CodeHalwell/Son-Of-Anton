@@ -10,6 +10,12 @@ import {
 	ExtractedType,
 } from '../extractors/symbolExtractor';
 import { IndexerConfig } from '../config';
+import { EmbeddingProvider, MockEmbeddingProvider } from '../../_lib/embeddings/dist/index.js';
+
+// Re-exported so existing consumers keep working; the implementations now
+// live in the shared `services/_lib/embeddings` module, which the mcp-gateway
+// also vendors — queries and documents must be embedded identically.
+export { EmbeddingProvider, MockEmbeddingProvider };
 
 /** Represents a code chunk ready for embedding. */
 export interface CodeChunk {
@@ -18,49 +24,21 @@ export interface CodeChunk {
 	payload: CodeChunkPayload;
 }
 
-/** Embedding provider interface — allows swapping models. */
-export interface EmbeddingProvider {
-	embed(texts: string[]): Promise<number[][]>;
-	dimensions(): number;
-}
-
-/**
- * Mock embedding provider for development and testing.
- * Generates deterministic pseudo-random vectors based on content hash.
- */
-export class MockEmbeddingProvider implements EmbeddingProvider {
-	private readonly vectorSize: number;
-
-	constructor(vectorSize: number = 768) {
-		this.vectorSize = vectorSize;
-	}
-
-	async embed(texts: string[]): Promise<number[][]> {
-		return texts.map(text => {
-			const hash = crypto.createHash('sha256').update(text).digest();
-			const vector: number[] = [];
-			for (let i = 0; i < this.vectorSize; i++) {
-				// Deterministic pseudo-random value in [-1, 1] based on content
-				const byteIdx = i % hash.length;
-				vector.push((hash[byteIdx] / 128.0) - 1.0);
-			}
-			// Normalize to unit vector
-			const magnitude = Math.sqrt(vector.reduce((sum, v) => sum + v * v, 0));
-			return vector.map(v => v / magnitude);
-		});
-	}
-
-	dimensions(): number {
-		return this.vectorSize;
-	}
-}
-
 export class EmbeddingWriter {
 	private readonly qdrant: QdrantClient;
 	private readonly provider: EmbeddingProvider;
 	private readonly batchSize: number;
-	/** Track content hashes to avoid re-embedding unchanged chunks. */
-	private readonly knownHashes = new Map<string, string>();
+	/** Chunk ID → content hash, for change detection. */
+	private readonly chunkHashes = new Map<string, string>();
+	/** File path → chunk IDs currently stored for that file, for stale-point cleanup. */
+	private readonly fileChunkIds = new Map<string, Set<string>>();
+	/**
+	 * Content hash → embedding vector. Keyed by content (not chunk ID) so a
+	 * renamed or moved symbol whose body is unchanged reuses its vector
+	 * instead of paying for a re-embed (F-2). Insertion-order bounded.
+	 */
+	private readonly vectorCache = new Map<string, number[]>();
+	private static readonly VECTOR_CACHE_MAX = 20_000;
 
 	constructor(qdrant: QdrantClient, provider: EmbeddingProvider, config: IndexerConfig) {
 		this.qdrant = qdrant;
@@ -69,36 +47,49 @@ export class EmbeddingWriter {
 	}
 
 	/**
-	 * Process a file extraction result and write embeddings for all chunks.
-	 * Uses Merkle-tree approach: skips chunks whose content hash hasn't changed.
+	 * Process a file extraction result and write embeddings for its chunks.
+	 *
+	 * Incremental behaviour:
+	 * - Unchanged chunks are left untouched in Qdrant (not deleted, not re-upserted).
+	 * - Chunks whose content hash matches a cached vector (e.g. a renamed or
+	 *   moved symbol) are upserted with the cached vector — no provider call.
+	 * - Only genuinely new content is sent to the embedding provider.
+	 * - Chunk IDs that disappeared from the file are deleted from Qdrant.
+	 *
+	 * Returns the number of points upserted.
 	 */
 	async writeFile(
 		filePath: string,
 		language: string,
 		extraction: FileExtractionResult
 	): Promise<number> {
-		// Delete existing embeddings for this file
-		await this.qdrant.deleteByFilePath(filePath);
-
-		// Build chunks from the extraction
 		const chunks = this.buildChunks(filePath, language, extraction);
+		const currentIds = new Set(chunks.map(c => c.id));
+		const previousIds = this.fileChunkIds.get(filePath);
 
-		// Filter out chunks that haven't changed
-		const changedChunks = chunks.filter(chunk => {
-			const previousHash = this.knownHashes.get(chunk.id);
-			return previousHash !== chunk.payload.contentHash;
-		});
-
-		if (changedChunks.length === 0) {
-			return 0;
+		let changedChunks: CodeChunk[];
+		if (previousIds === undefined) {
+			// First visit to this file in this process: clear whatever an
+			// earlier run left behind, then write every current chunk.
+			await this.qdrant.deleteByFilePath(filePath);
+			changedChunks = chunks;
+		} else {
+			const staleIds = [...previousIds].filter(id => !currentIds.has(id));
+			if (staleIds.length > 0) {
+				await this.qdrant.deletePoints(staleIds);
+				for (const id of staleIds) {
+					this.chunkHashes.delete(id);
+				}
+			}
+			changedChunks = chunks.filter(
+				chunk => this.chunkHashes.get(chunk.id) !== chunk.payload.contentHash
+			);
 		}
 
-		// Embed in batches
-		let embeddedCount = 0;
+		let upsertedCount = 0;
 		for (let i = 0; i < changedChunks.length; i += this.batchSize) {
 			const batch = changedChunks.slice(i, i + this.batchSize);
-			const texts = batch.map(c => c.content);
-			const vectors = await this.provider.embed(texts);
+			const vectors = await this.vectorsFor(batch);
 
 			const points: CodeChunkPoint[] = batch.map((chunk, idx) => ({
 				id: chunk.id,
@@ -107,15 +98,52 @@ export class EmbeddingWriter {
 			}));
 
 			await this.qdrant.upsertPoints(points);
-			embeddedCount += points.length;
+			upsertedCount += points.length;
 
-			// Update known hashes
 			for (const chunk of batch) {
-				this.knownHashes.set(chunk.id, chunk.payload.contentHash);
+				this.chunkHashes.set(chunk.id, chunk.payload.contentHash);
 			}
 		}
 
-		return embeddedCount;
+		this.fileChunkIds.set(filePath, currentIds);
+		return upsertedCount;
+	}
+
+	/**
+	 * Resolve vectors for a batch, reusing content-hash-cached vectors and
+	 * embedding only cache misses (deduplicated by content hash).
+	 */
+	private async vectorsFor(batch: CodeChunk[]): Promise<number[][]> {
+		const missesByHash = new Map<string, string>();
+		for (const chunk of batch) {
+			const hash = chunk.payload.contentHash;
+			if (!this.vectorCache.has(hash) && !missesByHash.has(hash)) {
+				missesByHash.set(hash, chunk.content);
+			}
+		}
+
+		if (missesByHash.size > 0) {
+			const hashes = [...missesByHash.keys()];
+			const embedded = await this.provider.embed(
+				hashes.map(h => missesByHash.get(h)!),
+				'document'
+			);
+			for (let i = 0; i < hashes.length; i++) {
+				this.cacheVector(hashes[i], embedded[i]);
+			}
+		}
+
+		return batch.map(chunk => this.vectorCache.get(chunk.payload.contentHash)!);
+	}
+
+	private cacheVector(contentHash: string, vector: number[]): void {
+		if (this.vectorCache.size >= EmbeddingWriter.VECTOR_CACHE_MAX) {
+			const oldest = this.vectorCache.keys().next().value;
+			if (oldest !== undefined) {
+				this.vectorCache.delete(oldest);
+			}
+		}
+		this.vectorCache.set(contentHash, vector);
 	}
 
 	private buildChunks(

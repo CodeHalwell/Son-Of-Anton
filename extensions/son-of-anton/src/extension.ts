@@ -280,11 +280,10 @@ export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(supplyChainGuard.startExtensionWatcher());
 
 	// --- Hooks ---
+	// Constructed here so downstream wiring (trace exporter, etc.) can
+	// subscribe; loading is deferred until the agent stack exists so hook
+	// agent IDs are validated against the registered participants (F-21).
 	const hookEngine = new HookEngine();
-	hookEngine.loadFromWorkspace().then(() => {
-		hookEngine.registerFileWatchers();
-		hookEngine.registerGitHooks();
-	});
 
 	// --- Spec Sync ---
 	const specSyncWatcher = new SpecSyncWatcher();
@@ -545,6 +544,14 @@ export function activate(context: vscode.ExtensionContext): void {
 	// Register multi-agent chat participants against the shared stack
 	const agentDisposables = registerAgentParticipants(context, agentStack);
 	context.subscriptions.push(...agentDisposables);
+
+	// Load hooks now that the participant registry is known — hooks naming an
+	// unregistered agent are dropped with a visible warning (F-20/F-21).
+	hookEngine.setKnownAgents(agentStack.registrations.map(r => r.config.handle));
+	hookEngine.loadFromWorkspace().then(() => {
+		hookEngine.registerFileWatchers();
+		hookEngine.registerGitHooks();
+	});
 
 	// Conversation history store (Phase 47). Persists past chat sessions in
 	// globalState so users can browse and return to them from the History

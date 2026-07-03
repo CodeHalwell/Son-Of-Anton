@@ -89,6 +89,15 @@ services:
       - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
       - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:-}
       - QDRANT_API_KEY=${QDRANT_API_KEY:-}
+      # Embedding settings — must match mcp-gateway (same variables) so
+      # stored document vectors and query vectors come from the same model.
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-mock}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-}
+      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-}
+      - VOYAGE_API_KEY=${VOYAGE_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - EMBEDDING_ENDPOINT=${EMBEDDING_ENDPOINT:-}
+      - QDRANT_VECTOR_SIZE=${QDRANT_VECTOR_SIZE:-768}
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:ro
     healthcheck:
@@ -149,6 +158,15 @@ services:
       - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
       - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:-}
       - QDRANT_API_KEY=${QDRANT_API_KEY:-}
+      # Embedding settings — must match the indexer (same variables) so
+      # stored document vectors and query vectors come from the same model.
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-mock}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-}
+      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-}
+      - VOYAGE_API_KEY=${VOYAGE_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - EMBEDDING_ENDPOINT=${EMBEDDING_ENDPOINT:-}
+      - QDRANT_VECTOR_SIZE=${QDRANT_VECTOR_SIZE:-768}
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:3100/health"]
       interval: 15s

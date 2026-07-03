@@ -16,6 +16,7 @@ RUN npm ci
 COPY src/ ./src/
 COPY _lib/metrics/dist/ ./_lib/metrics/dist/
 COPY _shared/auth/dist/ ./_shared/auth/dist/
+COPY _shared/sanitiser/dist/ ./_shared/sanitiser/dist/
 RUN npx tsc --noCheck
 
 EXPOSE 3302

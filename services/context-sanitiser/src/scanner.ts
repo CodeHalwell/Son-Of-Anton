@@ -3,8 +3,8 @@
 
 import { readFile, readdir, stat } from 'fs/promises';
 import path from 'path';
-import { ContextSanitiser } from './sanitiser';
-import type { WorkspaceScanResult, WorkspaceFinding } from './types';
+import { ContextSanitiser } from '../_shared/sanitiser/dist/index.js';
+import type { WorkspaceScanResult, WorkspaceFinding } from '../_shared/sanitiser/dist/index.js';
 
 /**
  * Periodic workspace scanner for prompt injection patterns.
