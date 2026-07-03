@@ -84,7 +84,7 @@ services:
       - QDRANT_HOST=${QDRANT_HOST:-qdrant}
       - QDRANT_REST_PORT=${QDRANT_REST_PORT:-6333}
       - QDRANT_GRPC_PORT=${QDRANT_GRPC_PORT:-6334}
-      - PROJECT_PATH=${PROJECT_PATH:-/workspace}
+      - PROJECT_PATH=/workspace
       - LANGUAGES=${LANGUAGES:-typescript,python,rust,csharp,cpp}
       - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
       - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:-}
@@ -110,7 +110,7 @@ services:
     environment:
       - FALKORDB_HOST=${FALKORDB_HOST:-falkordb}
       - FALKORDB_PORT=${FALKORDB_PORT:-6379}
-      - PROJECT_PATH=${PROJECT_PATH:-/workspace}
+      - PROJECT_PATH=/workspace
       - LANGUAGES=${LANGUAGES:-typescript,python,rust,csharp,cpp}
       - PREFER_SCIP=${PREFER_SCIP:-false}
       - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
@@ -457,7 +457,7 @@ services:
       - ACP_PORT=${ACP_PORT:-3300}
       - ACP_CONFIG_PATH=/workspace/.son-of-anton/agents/acp-agents.json
       - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
-      - PROJECT_PATH=${PROJECT_PATH:-/workspace}
+      - PROJECT_PATH=/workspace
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:ro
     healthcheck:
@@ -482,7 +482,7 @@ services:
       - BUILD_DAG_PORT=${BUILD_DAG_PORT:-3301}
       - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
       - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:-}
-      - PROJECT_PATH=${PROJECT_PATH:-/workspace}
+      - PROJECT_PATH=/workspace
       - FALKORDB_HOST=${FALKORDB_HOST:-falkordb}
       - FALKORDB_PORT=${FALKORDB_PORT:-6379}
     volumes:
@@ -505,7 +505,7 @@ services:
     environment:
       - SANITISER_PORT=${SANITISER_PORT:-3302}
       - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
-      - PROJECT_PATH=${PROJECT_PATH:-/workspace}
+      - PROJECT_PATH=/workspace
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:ro
     healthcheck:
