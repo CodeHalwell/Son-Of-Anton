@@ -127,6 +127,14 @@ export interface ChatTurnOptions {
 	 * legacy global view is used.
 	 */
 	readonly conversationId?: string;
+	/**
+	 * Force `runAgenticTurn` to take its single-shot (non-tool) path even when a
+	 * tool-execution context is present. Hosts set this when the turn's model
+	 * can't drive the tool loop (see `supportsAgenticToolLoop`) so the run
+	 * degrades to a plain streamed answer instead of failing after the first
+	 * tool call. No effect on `runChatTurn` (already single-shot).
+	 */
+	readonly forceSingleShot?: boolean;
 }
 
 /**
@@ -1315,10 +1323,12 @@ export abstract class BaseAgent {
 			workspaceContextSnapshot,
 			emitFollowupSuggestions,
 			conversationId,
+			forceSingleShot,
 		} = options ?? {};
 		const toolExecutionContext = this.toolExecutionContext;
-		if (!toolExecutionContext) {
-			// No tool context — fall back to single-shot streaming.
+		if (!toolExecutionContext || forceSingleShot) {
+			// No tool context, or the caller forced it (e.g. the turn's model
+			// can't drive the tool loop) — fall back to single-shot streaming.
 			return this.runChatTurn(
 				userMessage,
 				token => emit({ type: 'token', token }),

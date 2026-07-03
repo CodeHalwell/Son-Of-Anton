@@ -5,6 +5,7 @@
 
 import type { AgentHandle } from 'son-of-anton-core/dist/agents/types';
 import type { ModelId } from 'son-of-anton-core/dist/llm/LlmClient';
+import { supportsAgenticToolLoop } from 'son-of-anton-core/dist/llm/LlmClient';
 import { buildCliAgentStack } from '../agentStackBuilder';
 import { createApprovalGate, resolveApprovalMode } from '../approval';
 import { bootstrapCredentials } from '../auth/bootstrap';
@@ -109,6 +110,13 @@ export async function runSpecialist(handle: string, prompt: string, opts: RunOpt
 	}
 
 	const modelOverride: ModelId | undefined = opts.model ? (opts.model as ModelId) : undefined;
+	// A `--model` override to a provider that can't serialize tool_use /
+	// tool_result parts (OpenAI-compatible, Gemini) would fail after the first
+	// tool call. Degrade to a single-shot (non-tool) turn instead of breaking.
+	const forceSingleShot = modelOverride !== undefined && !supportsAgenticToolLoop(modelOverride);
+	if (forceSingleShot) {
+		process.stderr.write(`note: model "${opts.model}" can't drive the agentic tool loop; running a single-shot turn (no file edits or commands).\n`);
+	}
 
 	const cancellation = new CliCancellation();
 	const onSigint = (): void => cancellation.cancel();
@@ -143,7 +151,7 @@ export async function runSpecialist(handle: string, prompt: string, opts: RunOpt
 				}
 			},
 			cancellation,
-			modelOverride ? { modelOverride } : undefined,
+			modelOverride ? { modelOverride, forceSingleShot } : undefined,
 		);
 		renderer.emit({ type: 'done' });
 

@@ -5,7 +5,7 @@
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert';
-import { isOpenAIReasoningModel } from './LlmClient.js';
+import { isOpenAIReasoningModel, supportsAgenticToolLoop } from './LlmClient.js';
 
 // Reasoning models require `max_completion_tokens` + the `developer` role;
 // classic chat models require `max_tokens` + the `system` role. Misclassifying
@@ -51,5 +51,23 @@ describe('isOpenAIReasoningModel', () => {
 		const others = ['claude-opus-4-7', 'claude-sonnet-4-6', 'gemini-2-5-pro', 'ollama-deepseek-r1'] as const;
 		const misclassified = others.filter(m => isOpenAIReasoningModel(m));
 		assert.deepStrictEqual(misclassified, []);
+	});
+});
+
+describe('supportsAgenticToolLoop', () => {
+	test('Anthropic-shaped providers can drive the tool loop', () => {
+		// Anthropic, Bedrock (Converse) and Claude Code round-trip tool_use /
+		// tool_result parts, so the native tool loop is safe.
+		const capable = ['opus', 'sonnet', 'haiku', 'claude-opus-4-7', 'claude-3-5-sonnet', 'bedrock-claude-sonnet-4'] as const;
+		const rejected = capable.filter(m => !supportsAgenticToolLoop(m));
+		assert.deepStrictEqual(rejected, []);
+	});
+
+	test('OpenAI-compatible and Gemini providers must fall back to single-shot', () => {
+		// Their serializers reject tool_use / tool_result parts, so a tool-driving
+		// run would fail after the first tool call — callers single-shot instead.
+		const incapable = ['gpt-5', 'gpt-4o', 'o3', 'gemini-2-5-pro', 'foundry-gpt-4o'] as const;
+		const wronglyCapable = incapable.filter(m => supportsAgenticToolLoop(m));
+		assert.deepStrictEqual(wronglyCapable, []);
 	});
 });

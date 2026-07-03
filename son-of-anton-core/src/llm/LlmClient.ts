@@ -350,6 +350,26 @@ export function isOpenAIReasoningModel(model: ModelId): boolean {
 	return /^(?:o1|o3|o4|gpt-5)/.test(model);
 }
 
+/**
+ * Whether a model can drive the native agentic tool loop, i.e. its provider
+ * serializer round-trips multi-turn `tool_use` / `tool_result` message parts.
+ * Only the Anthropic-shaped serializers (Anthropic, Bedrock Converse, Claude
+ * Code) accept those parts; the OpenAI-compatible and Gemini serializers reject
+ * them, so a tool-driving run against one of those providers fails after the
+ * first tool call. Callers should fall back to a single-shot turn when this is
+ * `false` rather than entering the loop.
+ */
+export function supportsAgenticToolLoop(model: ModelId): boolean {
+	switch (providerForModel(model)) {
+		case 'anthropic':
+		case 'bedrock':
+		case 'claude-code':
+			return true;
+		default:
+			return false;
+	}
+}
+
 /** Throw a standard `AbortError` if the given signal is already aborted. */
 function throwIfAborted(signal: AbortSignal | undefined): void {
 	if (signal?.aborted) {
