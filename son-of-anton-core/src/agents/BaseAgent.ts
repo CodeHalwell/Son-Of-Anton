@@ -711,19 +711,35 @@ export abstract class BaseAgent {
 	): Promise<string> {
 		let fullText = '';
 
+		// Spend kill switch — native chat-participant turns route here, so this
+		// path must apply the same gate as callLlmOnce / runChatTurn or the
+		// session cap is bypassed for the IDE chat surface.
+		this.spendGuard?.assertWithinBudget();
+		let completion: LlmStreamComplete | undefined;
 		for await (const event of this.llmClient.streamRequest({
 			model,
 			systemPrompt,
 			messages: [{ role: 'user', content: userMessage }],
+			agentHandle: this.handle,
 		})) {
 			if (event.type === 'token') {
 				stream.markdown(event.token);
 				fullText += event.token;
+			} else if (event.type === 'complete') {
+				completion = event;
 			} else if (event.type === 'error') {
 				stream.markdown(`\n\n**Error:** ${event.error}`);
 				throw new Error(event.error);
 			}
 		}
+
+		// Debit the shared session budget with this call's usage.
+		this.recordSpend(model, {
+			inputTokens: completion?.inputTokens ?? 0,
+			outputTokens: completion?.outputTokens ?? 0,
+			cachedTokens: completion?.cachedTokens ?? 0,
+			naiveInputTokens: (completion?.inputTokens ?? 0) + (completion?.cachedTokens ?? 0),
+		});
 
 		return fullText;
 	}
