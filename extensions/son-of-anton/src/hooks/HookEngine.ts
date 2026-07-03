@@ -69,7 +69,15 @@ export class HookEngine {
 	 * a visible warning instead of failing silently at fire time (F-20).
 	 */
 	loadConfig(config: HooksFileConfig): void {
-		this.applyValidation(config.hooks ?? []);
+		// hooks.json is user-controlled: `hooks` may be missing or not an
+		// array at all — never let a malformed file break activation.
+		const hooks = config?.hooks;
+		if (hooks !== undefined && !Array.isArray(hooks)) {
+			console.warn('[son-of-anton] hooks.json: expected "hooks" to be an array — ignoring all hooks');
+			this.applyValidation([]);
+			return;
+		}
+		this.applyValidation(hooks ?? []);
 	}
 
 	private applyValidation(hooks: HookConfig[]): void {
@@ -77,7 +85,8 @@ export class HookEngine {
 		this.hooks = result.valid;
 		this._invalidHooks = result.invalid;
 		for (const { hook, reason } of result.invalid) {
-			console.warn(`[son-of-anton] Ignoring hook '${hook.name}': ${reason}`);
+			const label = hook && typeof hook.name === 'string' && hook.name ? hook.name : '<unnamed>';
+			console.warn(`[son-of-anton] Ignoring hook '${label}': ${reason}`);
 		}
 	}
 

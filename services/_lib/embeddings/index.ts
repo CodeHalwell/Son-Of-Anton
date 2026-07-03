@@ -1,4 +1,4 @@
-// Copyright (c) Son-Of-Anton. All rights reserved.
+// Copyright (c) Son of Anton Contributors. All rights reserved.
 // Licensed under the MIT License.
 
 /**
@@ -58,6 +58,23 @@ export interface EmbeddingProviderOptions {
 	retryBaseDelayMs?: number;
 	/** Injectable fetch for tests. Defaults to global fetch. */
 	fetchImpl?: typeof fetch;
+}
+
+/**
+ * Treat empty/whitespace strings as absent. Compose exports unset variables
+ * as empty strings (`${EMBEDDING_API_KEY:-}`), which must not shadow
+ * documented fallbacks or become bogus endpoint URLs.
+ */
+function nonEmpty(value: string | undefined): string | undefined {
+	const trimmed = value?.trim();
+	return trimmed ? trimmed : undefined;
+}
+
+/** Clamp a possibly-NaN/negative retry count to a sane non-negative integer. */
+function normalisedRetries(value: number | undefined, fallback: number): number {
+	return typeof value === 'number' && Number.isFinite(value) && value >= 0
+		? Math.floor(value)
+		: fallback;
 }
 
 /**
@@ -194,18 +211,19 @@ export class VoyageEmbeddingProvider implements EmbeddingProvider {
 	private readonly vectorSize: number;
 
 	constructor(options: EmbeddingProviderOptions) {
-		if (!options.apiKey) {
+		const apiKey = nonEmpty(options.apiKey);
+		if (!apiKey) {
 			throw new Error(
 				'[voyage] missing API key. Set EMBEDDING_API_KEY (or VOYAGE_API_KEY) or switch EMBEDDING_PROVIDER.'
 			);
 		}
-		this.model = options.model ?? 'voyage-code-3';
+		this.model = nonEmpty(options.model) ?? 'voyage-code-3';
 		this.vectorSize = options.dimensions;
 		this.ctx = {
 			providerName: this.name,
-			url: options.endpoint ?? 'https://api.voyageai.com/v1/embeddings',
-			headers: { Authorization: `Bearer ${options.apiKey}` },
-			maxRetries: options.maxRetries ?? 3,
+			url: nonEmpty(options.endpoint) ?? 'https://api.voyageai.com/v1/embeddings',
+			headers: { Authorization: `Bearer ${apiKey}` },
+			maxRetries: normalisedRetries(options.maxRetries, 3),
 			retryBaseDelayMs: options.retryBaseDelayMs ?? 500,
 			fetchImpl: options.fetchImpl ?? fetch,
 		};
@@ -243,30 +261,33 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
 
 	constructor(options: EmbeddingProviderOptions) {
 		this.name = options.provider;
-		if (options.provider === 'openai' && !options.apiKey) {
+		const apiKey = nonEmpty(options.apiKey);
+		const endpoint = nonEmpty(options.endpoint);
+		const model = nonEmpty(options.model);
+		if (options.provider === 'openai' && !apiKey) {
 			throw new Error(
 				'[openai] missing API key. Set EMBEDDING_API_KEY (or OPENAI_API_KEY) or switch EMBEDDING_PROVIDER.'
 			);
 		}
-		if (options.provider === 'local' && !options.endpoint) {
+		if (options.provider === 'local' && !endpoint) {
 			throw new Error(
 				'[local] missing endpoint. Set EMBEDDING_ENDPOINT to a full OpenAI-compatible embeddings URL ' +
 				'(e.g. http://localhost:11434/v1/embeddings for Ollama).'
 			);
 		}
-		if (options.provider === 'local' && !options.model) {
+		if (options.provider === 'local' && !model) {
 			throw new Error('[local] missing model. Set EMBEDDING_MODEL to the model served at EMBEDDING_ENDPOINT.');
 		}
-		this.model = options.model ?? 'text-embedding-3-small';
+		this.model = model ?? 'text-embedding-3-small';
 		this.vectorSize = options.dimensions;
 		// Hosted OpenAI supports Matryoshka truncation via `dimensions`; many
 		// local servers reject unknown fields, so only send it to OpenAI.
 		this.sendDimensions = options.provider === 'openai';
 		this.ctx = {
 			providerName: this.name,
-			url: options.endpoint ?? 'https://api.openai.com/v1/embeddings',
-			headers: options.apiKey ? { Authorization: `Bearer ${options.apiKey}` } : {},
-			maxRetries: options.maxRetries ?? 3,
+			url: endpoint ?? 'https://api.openai.com/v1/embeddings',
+			headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+			maxRetries: normalisedRetries(options.maxRetries, 3),
 			retryBaseDelayMs: options.retryBaseDelayMs ?? 500,
 			fetchImpl: options.fetchImpl ?? fetch,
 		};

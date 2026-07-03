@@ -65,6 +65,22 @@ suite('hookValidation', () => {
 		);
 	});
 
+	test('non-object entries are rejected instead of crashing validation', () => {
+		const malformed = [null, 'lint-on-save', 42, hook({})] as unknown as HookConfig[];
+		const result = validateHooks(malformed, REGISTERED);
+
+		assert.deepStrictEqual(
+			{
+				valid: result.valid.map(h => h.name),
+				reasons: result.invalid.map(i => i.reason),
+			},
+			{
+				valid: ['test-hook'],
+				reasons: ['hook is not an object', 'hook is not an object', 'hook is not an object'],
+			}
+		);
+	});
+
 	test('skips the agent-registry check when no known agents are provided', () => {
 		const result = validateHooks([hook({ agent: 'anton-pentest' })]);
 		assert.deepStrictEqual(

@@ -90,6 +90,10 @@ export function validateHooks(
 }
 
 function validateHook(hook: HookConfig, knownAgents?: readonly string[]): string | undefined {
+	// hooks.json is user-controlled: entries can be null, strings, etc.
+	if (!hook || typeof hook !== 'object') {
+		return 'hook is not an object';
+	}
 	if (!hook.name || typeof hook.name !== 'string') {
 		return 'hook has no name';
 	}

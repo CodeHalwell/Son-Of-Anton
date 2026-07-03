@@ -1,4 +1,4 @@
-// Copyright (c) Son-Of-Anton. All rights reserved.
+// Copyright (c) Son of Anton Contributors. All rights reserved.
 // Licensed under the MIT License.
 
 import { describe, test } from 'node:test';
@@ -125,11 +125,57 @@ describe('VoyageEmbeddingProvider', () => {
 		await assert.rejects(provider.embed(['x']), /3-dimensional.*expects 2.*QDRANT_VECTOR_SIZE/s);
 	});
 
-	test('requires an API key', () => {
+	test('requires an API key, treating empty/whitespace strings as absent', () => {
 		assert.throws(
 			() => new VoyageEmbeddingProvider({ provider: 'voyage', dimensions: 2 }),
 			/missing API key/
 		);
+		// Compose exports unset variables as empty strings — they must not
+		// count as a configured key.
+		assert.throws(
+			() => new VoyageEmbeddingProvider({ provider: 'voyage', apiKey: '', dimensions: 2 }),
+			/missing API key/
+		);
+		assert.throws(
+			() => new VoyageEmbeddingProvider({ provider: 'voyage', apiKey: '   ', dimensions: 2 }),
+			/missing API key/
+		);
+	});
+
+	test('empty endpoint and model fall back to provider defaults', async () => {
+		const { impl, calls } = fakeFetch([okResponse([[1, 0]])]);
+		const provider = new VoyageEmbeddingProvider({
+			provider: 'voyage',
+			apiKey: 'vk-test',
+			endpoint: '',
+			model: '',
+			dimensions: 2,
+			fetchImpl: impl,
+		});
+
+		await provider.embed(['x']);
+		assert.deepStrictEqual(
+			{ url: calls[0].url, model: calls[0].body.model },
+			{ url: 'https://api.voyageai.com/v1/embeddings', model: 'voyage-code-3' }
+		);
+	});
+
+	test('a NaN maxRetries (e.g. EMBEDDING_MAX_RETRIES="") still retries with the default', async () => {
+		const { impl, calls } = fakeFetch([
+			new Response('boom', { status: 500 }),
+			okResponse([[1, 0]]),
+		]);
+		const provider = new VoyageEmbeddingProvider({
+			provider: 'voyage',
+			apiKey: 'vk-test',
+			dimensions: 2,
+			maxRetries: Number.NaN,
+			retryBaseDelayMs: 1,
+			fetchImpl: impl,
+		});
+
+		const vectors = await provider.embed(['x']);
+		assert.deepStrictEqual({ attempts: calls.length, vectors }, { attempts: 2, vectors: [[1, 0]] });
 	});
 });
 
