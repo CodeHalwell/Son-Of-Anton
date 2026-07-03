@@ -617,7 +617,7 @@ Three sprints to land the subscription-integration foundation, then the existing
 - [x] **Cross-service tracing** (§11.3, F-25).
 - [x] **`buildCachedRequest()` helper** (§8.1, F-12).
 - [x] **Cancellation end-to-end** (§10.2).
-- [ ] **Hooks validator** (F-21) and **`anton-pentest` resolution** (F-20).
+- [x] **Hooks validator** (F-21) and **`anton-pentest` resolution** (F-20). _(hooks.json retargeted to the registered `anton-security` specialist; `HookEngine` now validates hook agent IDs against the participant registry at load time and drops invalid hooks with a visible warning — see `extensions/son-of-anton/src/hooks/hookValidation.ts`.)_
 
 **Demo:** "Pull the plug on Copilot mid-response, watch the IDE seamlessly continue on Claude Pro. Open Grafana, see cache hit rate at 78%."
 
@@ -625,9 +625,9 @@ Three sprints to land the subscription-integration foundation, then the existing
 
 To be tackled after Sprint 3 lands, in roughly this order:
 
-- [ ] **F-1** Real embedding provider (Voyage / local).
-- [ ] **F-4** Context sanitiser on the hot path.
-- [ ] **F-2** Embedding cache by content hash.
+- [x] **F-1** Real embedding provider (Voyage / local). _(shared `services/_lib/embeddings` module with `voyage`, `openai`, and `local` OpenAI-compatible providers, vendored into both the indexer and mcp-gateway so document and query vectors always come from the same model; the gateway's sin-hash query placeholder is gone. Configure via `EMBEDDING_*` env vars — see `.env.example`.)_
+- [x] **F-4** Context sanitiser on the hot path. _(sanitiser core extracted to `services/_shared/sanitiser` and applied in-process to every mcp-gateway tool result — invisible-Unicode stripped, injection patterns surfaced as visible advisories.)_
+- [x] **F-2** Embedding cache by content hash. _(vectors cached by content hash so renames/moves reuse embeddings; also fixed `writeFile` dropping unchanged chunks' points on partial file updates.)_
 - [ ] **F-3** Per-agent retrieval ranking weights.
 - [ ] **F-11** mcp-gateway request coalescing.
 - [ ] **F-17** Per-hunk accept/reject in changes view.

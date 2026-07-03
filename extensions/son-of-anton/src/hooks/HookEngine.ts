@@ -4,36 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
+import { HookConfig, HooksFileConfig, HookTrigger, InvalidHook, validateHooks } from './hookValidation';
 
-/**
- * Trigger events that hooks can respond to.
- */
-export type HookTrigger =
-	| 'onFileSave'
-	| 'preCommit'
-	| 'onTestFailure'
-	| 'onPRCreate'
-	| 'onAgentStart'
-	| 'onAgentComplete';
-
-/**
- * A hook definition as specified in .son-of-anton/hooks.json.
- */
-export interface HookConfig {
-	name: string;
-	trigger: HookTrigger;
-	filter?: string;
-	agent: string;
-	instruction: string;
-	blocking: boolean;
-}
-
-/**
- * The full hooks configuration file structure.
- */
-export interface HooksFileConfig {
-	hooks: HookConfig[];
-}
+export { HookConfig, HooksFileConfig, HookTrigger } from './hookValidation';
 
 /**
  * Result of a hook execution.
@@ -64,6 +37,8 @@ export type HookInvokeCallback = (
  */
 export class HookEngine {
 	private hooks: HookConfig[] = [];
+	private knownAgents: readonly string[] | undefined;
+	private _invalidHooks: InvalidHook[] = [];
 	private readonly disposables: vscode.Disposable[] = [];
 	private invokeCallback: HookInvokeCallback | undefined;
 	private readonly disabledHooks: Set<string> = new Set();
@@ -71,11 +46,39 @@ export class HookEngine {
 	private readonly _onDidExecuteHook = new vscode.EventEmitter<HookExecutionResult>();
 	readonly onDidExecuteHook: vscode.Event<HookExecutionResult> = this._onDidExecuteHook.event;
 
+	/** Hooks rejected by validation, with reasons — for surfacing in UI/logs. */
+	get invalidHooks(): readonly InvalidHook[] {
+		return this._invalidHooks;
+	}
+
 	/**
-	 * Load hooks from a configuration object.
+	 * Provide the set of registered agent handles hooks may target (F-21).
+	 * Already-loaded hooks are re-validated, so this is safe to call before
+	 * or after `loadConfig`/`loadFromWorkspace`.
+	 */
+	setKnownAgents(handles: readonly string[]): void {
+		this.knownAgents = handles;
+		if (this.hooks.length > 0 || this._invalidHooks.length > 0) {
+			this.applyValidation([...this.hooks, ...this._invalidHooks.map(i => i.hook)]);
+		}
+	}
+
+	/**
+	 * Load hooks from a configuration object. Hooks that fail validation
+	 * (unknown trigger, missing fields, unregistered agent) are dropped with
+	 * a visible warning instead of failing silently at fire time (F-20).
 	 */
 	loadConfig(config: HooksFileConfig): void {
-		this.hooks = config.hooks ?? [];
+		this.applyValidation(config.hooks ?? []);
+	}
+
+	private applyValidation(hooks: HookConfig[]): void {
+		const result = validateHooks(hooks, this.knownAgents);
+		this.hooks = result.valid;
+		this._invalidHooks = result.invalid;
+		for (const { hook, reason } of result.invalid) {
+			console.warn(`[son-of-anton] Ignoring hook '${hook.name}': ${reason}`);
+		}
 	}
 
 	/**
@@ -89,12 +92,21 @@ export class HookEngine {
 
 		const configUri = vscode.Uri.joinPath(workspaceFolders[0].uri, '.son-of-anton', 'hooks.json');
 
+		let content: Uint8Array;
 		try {
-			const content = await vscode.workspace.fs.readFile(configUri);
+			content = await vscode.workspace.fs.readFile(configUri);
+		} catch {
+			// No hooks file — that's fine
+			return;
+		}
+
+		try {
 			const config: HooksFileConfig = JSON.parse(Buffer.from(content).toString('utf-8'));
 			this.loadConfig(config);
-		} catch {
-			// No hooks file or invalid JSON — that's fine
+		} catch (err) {
+			// A hooks file that exists but doesn't parse is a user error worth
+			// surfacing — swallowing it silently disables every hook (F-21).
+			console.warn(`[son-of-anton] Failed to parse ${configUri.fsPath}: ${(err as Error).message}`);
 		}
 	}
 

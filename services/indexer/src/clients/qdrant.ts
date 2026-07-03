@@ -128,6 +128,19 @@ export class QdrantClient {
 	}
 
 	/**
+	 * Delete specific points by ID.
+	 */
+	async deletePoints(ids: string[]): Promise<void> {
+		if (ids.length === 0) {
+			return;
+		}
+		await this.client.delete(this.collectionName, {
+			wait: true,
+			points: ids,
+		});
+	}
+
+	/**
 	 * Search for semantically similar code chunks.
 	 */
 	async search(vector: number[], limit: number = 10, filter?: Record<string, unknown>): Promise<unknown[]> {

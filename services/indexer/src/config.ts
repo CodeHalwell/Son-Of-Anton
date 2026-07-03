@@ -21,9 +21,12 @@ export interface IndexerConfig {
 		port: number;
 	};
 	embedding: {
-		provider: 'local' | 'voyage' | 'mock';
+		provider: 'local' | 'voyage' | 'openai' | 'mock';
 		modelName: string;
 		batchSize: number;
+		apiKey?: string;
+		endpoint?: string;
+		maxRetries: number;
 	};
 	indexer: {
 		chunkTargetTokens: number;
@@ -65,9 +68,15 @@ export function loadConfig(): IndexerConfig {
 			port: parseInt(process.env.PORT ?? '8080', 10),
 		},
 		embedding: {
-			provider: (process.env.EMBEDDING_PROVIDER ?? 'mock') as 'local' | 'voyage' | 'mock',
-			modelName: process.env.EMBEDDING_MODEL ?? 'mock',
+			// NOTE: keep in sync with `services/mcp-gateway/src/config.ts`. The
+			// gateway embeds search queries with the same provider + model; if
+			// the two drift, every semantic search scores against noise.
+			provider: (process.env.EMBEDDING_PROVIDER ?? 'mock') as 'local' | 'voyage' | 'openai' | 'mock',
+			modelName: process.env.EMBEDDING_MODEL ?? '',
 			batchSize: parseInt(process.env.EMBEDDING_BATCH_SIZE ?? '32', 10),
+			apiKey: process.env.EMBEDDING_API_KEY ?? process.env.VOYAGE_API_KEY ?? process.env.OPENAI_API_KEY,
+			endpoint: process.env.EMBEDDING_ENDPOINT,
+			maxRetries: parseInt(process.env.EMBEDDING_MAX_RETRIES ?? '3', 10),
 		},
 		indexer: {
 			chunkTargetTokens: parseInt(process.env.CHUNK_TARGET_TOKENS ?? '512', 10),

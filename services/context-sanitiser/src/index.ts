@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 import http from 'http';
-import { ContextSanitiser } from './sanitiser';
+import { ContextSanitiser } from '../_shared/sanitiser/dist/index.js';
 import { WorkspaceScanner } from './scanner';
 import { prometheusHandler } from '../_lib/metrics/dist/index.js';
 import { enforceHttpAuth, requireServiceToken } from '../_shared/auth/dist/index.js';

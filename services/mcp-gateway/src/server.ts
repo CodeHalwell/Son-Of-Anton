@@ -5,7 +5,9 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { FalkorDBClient } from './clients/falkordb';
 import { QdrantClient } from './clients/qdrant';
-import { QDRANT_VECTOR_SIZE } from './config';
+import { QDRANT_VECTOR_SIZE, EMBEDDING_CONFIG } from './config';
+import { createEmbeddingProvider } from '../_lib/embeddings/dist/index.js';
+import { withSanitisedResult } from './sanitise';
 import { symbolLookup } from './tools/symbolLookup';
 import { findReferences } from './tools/findReferences';
 import { dependencyTraversal } from './tools/dependencyTraversal';
@@ -25,6 +27,20 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 		version: '1.0.0',
 	});
 
+	// Query embeddings — same provider/model/dimensions as the indexer's
+	// document embeddings (both read the same EMBEDDING_* env vars).
+	const embeddingProvider = createEmbeddingProvider({
+		provider: EMBEDDING_CONFIG.provider,
+		model: EMBEDDING_CONFIG.model,
+		dimensions: QDRANT_VECTOR_SIZE,
+		apiKey: EMBEDDING_CONFIG.apiKey,
+		endpoint: EMBEDDING_CONFIG.endpoint,
+		maxRetries: EMBEDDING_CONFIG.maxRetries,
+	});
+	if (embeddingProvider.name === 'mock') {
+		console.warn('[mcp-gateway] Using MOCK query embeddings — semantic_search relevance is meaningless. Set EMBEDDING_PROVIDER=voyage|openai|local for real vectors.');
+	}
+
 	// --- symbol_lookup ---
 	// @ts-ignore TS2589: MCP SDK z.enum() schema inference hits TypeScript's instantiation depth limit
 	server.tool(
@@ -35,7 +51,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 			type: z.enum(['function', 'class', 'type', 'module']).optional()
 				.describe('Filter by symbol type'),
 		},
-		async ({ name, type }) => {
+		withSanitisedResult('symbol_lookup', async ({ name, type }) => {
 			try {
 				const results = await symbolLookup(db, { name, type });
 				return {
@@ -48,7 +64,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 				return errorResponse('symbol_lookup', error);
 			}
 		}
-	);
+	));
 
 	// --- find_references ---
 	server.tool(
@@ -58,7 +74,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 			name: z.string().describe('Symbol name to find references for'),
 			file: z.string().optional().describe('Limit to references of the symbol defined in this file'),
 		},
-		async ({ name, file }) => {
+		withSanitisedResult('find_references', async ({ name, file }) => {
 			try {
 				const results = await findReferences(db, { name, file });
 				return {
@@ -71,7 +87,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 				return errorResponse('find_references', error);
 			}
 		}
-	);
+	));
 
 	// --- dependency_traversal ---
 	// @ts-ignore TS2589: MCP SDK z.enum() schema inference hits TypeScript's instantiation depth limit
@@ -83,7 +99,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 			function: z.string().optional().describe('Function name to traverse call dependencies for'),
 			depth: z.number().min(1).max(5).optional().describe('Traversal depth (default 2, max 5)'),
 		},
-		async (params) => {
+		withSanitisedResult('dependency_traversal', async (params) => {
 			try {
 				const results = await dependencyTraversal(db, {
 					file: params.file,
@@ -100,7 +116,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 				return errorResponse('dependency_traversal', error);
 			}
 		}
-	);
+	));
 
 	// --- impact_analysis ---
 	server.tool(
@@ -110,7 +126,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 			symbol: z.string().describe('Symbol name to analyze impact for'),
 			file: z.string().optional().describe('File where the symbol is defined (for disambiguation)'),
 		},
-		async ({ symbol, file }) => {
+		withSanitisedResult('impact_analysis', async ({ symbol, file }) => {
 			try {
 				const results = await impactAnalysis(db, { symbol, file });
 				return {
@@ -123,7 +139,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 				return errorResponse('impact_analysis', error);
 			}
 		}
-	);
+	));
 
 	// --- semantic_search (streaming) ---
 	const semanticSearchStreaming: StreamingToolHandler<{
@@ -133,18 +149,10 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 	}> = async function* ({ query, maxResults, language }) {
 		yield { kind: 'progress', message: `Embedding query: "${query.slice(0, 60)}"` };
 
-		// Placeholder embedding function — in production this calls the embedding model.
-		// The vector size MUST match the indexer's stored vectors (QDRANT_VECTOR_SIZE);
-		// otherwise Qdrant rejects the search outright.
+		// The vector size MUST match the indexer's stored vectors
+		// (QDRANT_VECTOR_SIZE); otherwise Qdrant rejects the search outright.
 		const embedQuery = async (text: string): Promise<number[]> => {
-			let hash = 0;
-			for (let j = 0; j < text.length; j++) {
-				hash = ((hash << 5) - hash + text.charCodeAt(j)) | 0;
-			}
-			const vector = new Array<number>(QDRANT_VECTOR_SIZE);
-			for (let i = 0; i < QDRANT_VECTOR_SIZE; i++) {
-				vector[i] = Math.sin(hash + i) * 0.5;
-			}
+			const [vector] = await embeddingProvider.embed([text], 'query');
 			return vector;
 		};
 
@@ -168,8 +176,8 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 			maxResults: z.number().min(1).max(50).optional().describe('Maximum results to return (default 10)'),
 			language: z.string().optional().describe('Filter results by programming language'),
 		},
-		wrapStreamingTool('semantic_search', semanticSearchStreaming)
-	);
+		withSanitisedResult('semantic_search', wrapStreamingTool('semantic_search', semanticSearchStreaming)
+	));
 
 	// --- file_summary ---
 	server.tool(
@@ -178,7 +186,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 		{
 			path: z.string().describe('Project-relative file path'),
 		},
-		async ({ path }) => {
+		withSanitisedResult('file_summary', async ({ path }) => {
 			try {
 				const results = await fileSummary(db, { path });
 				return {
@@ -191,14 +199,14 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 				return errorResponse('file_summary', error);
 			}
 		}
-	);
+	));
 
 	// --- project_overview ---
 	server.tool(
 		'project_overview',
 		'Get a high-level overview of the project: modules, entry points, key abstractions, file count, and language breakdown.',
 		{},
-		async () => {
+		withSanitisedResult('project_overview', async () => {
 			try {
 				const results = await projectOverview(db);
 				return {
@@ -211,7 +219,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 				return errorResponse('project_overview', error);
 			}
 		}
-	);
+	));
 
 	// --- memory_query ---
 	// @ts-ignore TS2589: MCP SDK z.enum() schema inference hits TypeScript's instantiation depth limit
@@ -227,7 +235,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 			since: z.number().optional().describe('Filter entries created after this timestamp'),
 			limit: z.number().min(1).max(100).optional().describe('Maximum results (default 50)'),
 		},
-		async (params) => {
+		withSanitisedResult('memory_query', async (params) => {
 			try {
 				const results = await memoryQuery(db, {
 					type: params.type,
@@ -247,7 +255,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 				return errorResponse('memory_query', error);
 			}
 		}
-	);
+	));
 
 	// --- memory_record ---
 	// @ts-ignore TS2589: MCP SDK z.enum() schema inference hits TypeScript's instantiation depth limit
@@ -263,7 +271,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 			supersedesId: z.string().optional()
 				.describe('ID of an existing entry this supersedes (marks old entry as outdated)'),
 		},
-		async ({ type, content, source, topics, supersedesId }) => {
+		withSanitisedResult('memory_record', async ({ type, content, source, topics, supersedesId }) => {
 			try {
 				const result = await memoryRecord(db, {
 					type,
@@ -282,7 +290,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 				return errorResponse('memory_record', error);
 			}
 		}
-	);
+	));
 
 	// --- memory_history ---
 	server.tool(
@@ -291,7 +299,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 		{
 			topic: z.string().describe('Topic to view history for'),
 		},
-		async ({ topic }) => {
+		withSanitisedResult('memory_history', async ({ topic }) => {
 			try {
 				const results = await memoryHistory(db, { topic });
 				return {
@@ -304,14 +312,14 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 				return errorResponse('memory_history', error);
 			}
 		}
-	);
+	));
 
 	// --- spec_list ---
 	server.tool(
 		'spec_list',
 		'List all features that have spec definitions in .son-of-anton/specs/. Returns feature names and which phases (requirements, design, tasks, properties) exist.',
 		{},
-		async () => {
+		withSanitisedResult('spec_list', async () => {
 			try {
 				const projectPath = process.env['PROJECT_PATH'] ?? '/workspace';
 				const results = await specList(projectPath);
@@ -325,7 +333,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 				return errorResponse('spec_list', error);
 			}
 		}
-	);
+	));
 
 	// --- spec_read ---
 	// @ts-ignore TS2589: MCP SDK z.enum() schema inference hits TypeScript's instantiation depth limit
@@ -337,7 +345,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 			phase: z.enum(['requirements', 'design', 'tasks', 'properties'])
 				.describe('Which spec phase to read'),
 		},
-		async ({ feature, phase }) => {
+		withSanitisedResult('spec_read', async ({ feature, phase }) => {
 			try {
 				const projectPath = process.env['PROJECT_PATH'] ?? '/workspace';
 				const results = await specRead(projectPath, { feature, phase });
@@ -351,7 +359,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 				return errorResponse('spec_read', error);
 			}
 		}
-	);
+	));
 
 	// --- spec_sync_check ---
 	server.tool(
@@ -361,7 +369,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 			feature: z.string().describe('Feature name to check sync for'),
 			changedFile: z.string().describe('Path of the changed file'),
 		},
-		async ({ feature, changedFile }) => {
+		withSanitisedResult('spec_sync_check', async ({ feature, changedFile }) => {
 			try {
 				const projectPath = process.env['PROJECT_PATH'] ?? '/workspace';
 				const results = await specSyncCheck(projectPath, { feature, changedFile });
@@ -375,7 +383,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 				return errorResponse('spec_sync_check', error);
 			}
 		}
-	);
+	));
 
 	// --- build_targets ---
 	server.tool(
@@ -384,7 +392,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 		{
 			ecosystem: z.string().optional().describe('Filter targets by ecosystem (node, rust, python, docker, make, just, task)'),
 		},
-		async ({ ecosystem }) => {
+		withSanitisedResult('build_targets', async ({ ecosystem }) => {
 			try {
 				const results = await buildTargets({ ecosystem });
 				return {
@@ -397,7 +405,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 				return errorResponse('build_targets', error);
 			}
 		}
-	);
+	));
 
 	// --- build_order ---
 	server.tool(
@@ -406,7 +414,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 		{
 			target: z.string().describe('Target name to get build order for'),
 		},
-		async ({ target }) => {
+		withSanitisedResult('build_order', async ({ target }) => {
 			try {
 				const results = await buildOrder({ target });
 				return {
@@ -419,7 +427,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 				return errorResponse('build_order', error);
 			}
 		}
-	);
+	));
 
 	// --- environment_requirements ---
 	server.tool(
@@ -428,7 +436,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 		{
 			target: z.string().describe('Target name to get requirements for'),
 		},
-		async ({ target }) => {
+		withSanitisedResult('environment_requirements', async ({ target }) => {
 			try {
 				const results = await environmentRequirements({ target });
 				return {
@@ -441,7 +449,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 				return errorResponse('environment_requirements', error);
 			}
 		}
-	);
+	));
 
 	// --- affected_targets ---
 	server.tool(
@@ -450,7 +458,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 		{
 			changedFiles: z.array(z.string()).describe('List of changed file paths'),
 		},
-		async ({ changedFiles }) => {
+		withSanitisedResult('affected_targets', async ({ changedFiles }) => {
 			try {
 				const results = await affectedTargets({ changedFiles });
 				return {
@@ -463,7 +471,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 				return errorResponse('affected_targets', error);
 			}
 		}
-	);
+	));
 
 	return server;
 }
