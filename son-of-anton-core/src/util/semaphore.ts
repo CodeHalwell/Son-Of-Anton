@@ -26,14 +26,34 @@ export class Semaphore {
 	/**
 	 * Acquire a permit, waiting (FIFO) until one is free. Pair every successful
 	 * acquire with exactly one {@link release}, ideally via {@link runExclusive}.
+	 *
+	 * When a `signal` is supplied the wait is interruptible: an abort while
+	 * queued removes this waiter and rejects (with the signal reason / an
+	 * `AbortError`) instead of leaving the caller hung until an unrelated stream
+	 * releases a permit. A rejected waiter never consumes a permit.
 	 */
-	acquire(): Promise<void> {
+	acquire(signal?: AbortSignal): Promise<void> {
+		if (signal?.aborted) {
+			return Promise.reject(signal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
+		}
 		if (this.available > 0) {
 			this.available--;
 			return Promise.resolve();
 		}
-		return new Promise<void>(resolve => {
-			this.waiters.push(resolve);
+		return new Promise<void>((resolve, reject) => {
+			const waiter = (): void => {
+				signal?.removeEventListener('abort', onAbort);
+				resolve();
+			};
+			const onAbort = (): void => {
+				const index = this.waiters.indexOf(waiter);
+				if (index !== -1) {
+					this.waiters.splice(index, 1);
+				}
+				reject(signal!.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
+			};
+			signal?.addEventListener('abort', onAbort, { once: true });
+			this.waiters.push(waiter);
 		});
 	}
 

@@ -1621,7 +1621,10 @@ export class LlmClient {
 		// fails fast instead of waiting out the refill interval.
 		await this.rateLimiter.acquire(options.agentHandle ?? 'default', undefined, options.signal);
 		throwIfAborted(options.signal);
-		await this.requestSemaphore.acquire();
+		// Pass the signal so a cancellation while queued for a concurrency
+		// permit fails fast instead of hanging until an unrelated stream
+		// releases one.
+		await this.requestSemaphore.acquire(options.signal);
 		try {
 			throwIfAborted(options.signal);
 			// Intercept the provider's stream so we can record per-completion

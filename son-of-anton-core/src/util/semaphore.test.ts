@@ -55,4 +55,38 @@ describe('Semaphore', () => {
 		sem.release();
 		assert.equal(sem.availablePermits, 1);
 	});
+
+	test('acquire with an already-aborted signal rejects without taking a permit', async () => {
+		const sem = new Semaphore(1);
+		const ac = new AbortController();
+		ac.abort();
+		await assert.rejects(sem.acquire(ac.signal), (err: Error) => err.name === 'AbortError');
+		assert.equal(sem.availablePermits, 1);
+	});
+
+	test('acquire rejects and dequeues a waiter when its signal aborts', async () => {
+		const sem = new Semaphore(1);
+		await sem.acquire(); // drain the only permit
+		const ac = new AbortController();
+		const queued = sem.acquire(ac.signal);
+		assert.equal(sem.waiterCount, 1);
+		ac.abort();
+		await assert.rejects(queued, (err: Error) => err.name === 'AbortError');
+		assert.equal(sem.waiterCount, 0);
+	});
+
+	test('an aborted waiter does not consume the permit a later release frees', async () => {
+		const sem = new Semaphore(1);
+		await sem.acquire(); // drain
+		const ac = new AbortController();
+		const aborted = sem.acquire(ac.signal); // waiter A (FIFO head)
+		let bAcquired = false;
+		const b = sem.acquire().then(() => { bAcquired = true; }); // waiter B
+		ac.abort(); // A leaves the queue, so the freed permit must go to B
+		await assert.rejects(aborted);
+		sem.release();
+		await b;
+		assert.equal(bAcquired, true);
+		assert.equal(sem.waiterCount, 0);
+	});
 });
