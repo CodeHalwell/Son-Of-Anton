@@ -194,6 +194,17 @@ export const MODEL_METADATA: Record<ModelId, ModelInfo> = {
 };
 
 /**
+ * Whether `value` is a recognized model id. `MODEL_METADATA` is a
+ * `Record<ModelId, …>`, so its own keys are exactly the valid model ids —
+ * hosts use this to reject an unknown `--model` / picker value before casting
+ * it, rather than letting an unrecognized string reach provider routing (which
+ * has no default and would silently produce an empty answer).
+ */
+export function isKnownModelId(value: string): value is ModelId {
+	return Object.prototype.hasOwnProperty.call(MODEL_METADATA, value);
+}
+
+/**
  * Format a token count for picker tooltips. Uses K / M with one decimal
  * place when the value isn't a clean multiple, since users care more
  * about magnitude than precision in this surface.

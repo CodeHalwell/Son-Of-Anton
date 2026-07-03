@@ -6,6 +6,7 @@
 import type { AgentHandle } from 'son-of-anton-core/dist/agents/types';
 import type { ModelId } from 'son-of-anton-core/dist/llm/LlmClient';
 import { supportsAgenticToolLoop } from 'son-of-anton-core/dist/llm/LlmClient';
+import { isKnownModelId } from 'son-of-anton-core/dist/llm/modelMetadata';
 import { buildCliAgentStack } from '../agentStackBuilder';
 import { createApprovalGate, resolveApprovalMode } from '../approval';
 import { bootstrapCredentials } from '../auth/bootstrap';
@@ -104,6 +105,18 @@ export async function runSpecialist(handle: string, prompt: string, opts: RunOpt
 		renderer.emit({
 			type: 'error',
 			message: `unknown specialist "@${handleId}". Available: ${known}`,
+		});
+		built.dispose();
+		process.exit(SOTA_EXIT_CODES.HARD_FAIL);
+	}
+
+	// Reject an unknown --model up front. Without this the unchecked cast lets a
+	// typo (e.g. `--model gpt5`) reach provider routing, which has no default for
+	// unrecognized ids and can "succeed" with an empty answer.
+	if (opts.model !== undefined && !isKnownModelId(opts.model)) {
+		renderer.emit({
+			type: 'error',
+			message: `unknown --model "${opts.model}". Pass a supported model id (e.g. opus, sonnet, haiku) or omit --model to use the default.`,
 		});
 		built.dispose();
 		process.exit(SOTA_EXIT_CODES.HARD_FAIL);
