@@ -276,19 +276,23 @@ export class ExtensionEnablementService extends Disposable implements IWorkbench
 			return [];
 		}
 
-		const toCheck = extensions.filter(e => checked.indexOf(e) === -1);
+		// ⚡ Bolt Optimization: Use a Set for `checked` to change `filter` + `indexOf`/`some` from O(N*M) to O(N+M) when traversing recursive extensions
+		const checkedSet = new Set(checked);
+		const toCheck = extensions.filter(e => !checkedSet.has(e));
 		if (!toCheck.length) {
 			return [];
 		}
 
 		for (const extension of toCheck) {
 			checked.push(extension);
+			checkedSet.add(extension);
 		}
 
 		const extensionsToEnable: IExtension[] = [];
 		for (const extension of allExtensions) {
 			// Extension is already checked
-			if (checked.some(e => areSameExtensions(e.identifier, extension.identifier))) {
+			// Fallback check in case they are different objects but same extension
+			if (checkedSet.has(extension) || checked.some(e => areSameExtensions(e.identifier, extension.identifier))) {
 				continue;
 			}
 

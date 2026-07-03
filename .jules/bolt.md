@@ -39,3 +39,6 @@
 ## 2026-06-22 - Optimize array intersections in configuration models
 **Learning:** When comparing configuration models, checking if a key exists in an array using `Array.prototype.indexOf()` or `Array.prototype.includes()` inside an `Array.prototype.filter()` callback creates a nested iteration bottleneck with time complexity O(N*M).
 **Action:** Convert the target array to a `Set` and use `Set.has()` instead to reduce time complexity to O(N+M), significantly speeding up configuration comparisons for large numbers of settings.
+## 2024-03-24 - Optimize recursive extension traversal with Set.has
+**Learning:** In the extension management and enablement services (`extensionsWorkbenchService.ts` and `extensionEnablementService.ts`), traversing recursive dependencies using `.filter(e => checked.indexOf(e) === -1)` creates an O(N*M) bottleneck, particularly when checking against large arrays of installed extensions.
+**Action:** When filtering objects like extensions during recursive tree traversal against an array of visited/checked items, convert the target array to a `Set` and use `!checkedSet.has(e)`. This reduces the time complexity to O(N+M).
