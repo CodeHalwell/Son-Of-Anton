@@ -23,6 +23,13 @@ export async function symbolLookup(
 	db: FalkorDBClient,
 	input: SymbolLookupInput
 ): Promise<SymbolLookupResult[]> {
+	if (input.type) {
+		const allowedTypes = ['function', 'class', 'type', 'module'];
+		if (!allowedTypes.includes(input.type)) {
+			throw new Error('Invalid symbol type');
+		}
+	}
+
 	const labelFilter = input.type
 		? `:${capitalize(input.type)}`
 		: '';
