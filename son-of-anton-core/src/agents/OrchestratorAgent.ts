@@ -376,6 +376,35 @@ export class OrchestratorAgent extends BaseAgent {
 				break;
 			}
 
+			// Spend kill switch (CLAUDE.md: "configurable spend cap per
+			// session"). Consult the shared budget BEFORE selecting the next
+			// ready batch so an exhausted cap halts the fan-out immediately.
+			// Already-dispatched subtasks are left to settle — their own
+			// tool-loop budget checks abort them at the next LLM call — while
+			// every un-dispatched subtask is flushed as `subtask-blocked` so the
+			// board shows *why* the plan stopped rather than silently hanging.
+			if (this.spendGuard?.isExceeded()) {
+				const reason = this.spendGuard.describeExceeded() ?? 'Session spend cap exceeded.';
+				stream.markdown(`\n**Spend cap reached — halting execution.** ${reason}\n\n`);
+				for (const id of [...remaining]) {
+					const subtask = subtaskById.get(id);
+					if (!subtask) {
+						remaining.delete(id);
+						continue;
+					}
+					subtask.status = 'failed';
+					remaining.delete(id);
+					stream.markdown(`**Blocked** ${subtask.instruction} — ${reason}\n\n`);
+					structuredEmit?.({
+						type: 'subtask-blocked',
+						subtaskId: subtask.id,
+						assignee: subtask.assignee,
+						reason,
+					});
+				}
+				break;
+			}
+
 			const ready = [...remaining].filter(id => {
 				if (inFlight.has(id)) {
 					return false;

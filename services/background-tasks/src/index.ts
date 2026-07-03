@@ -178,6 +178,7 @@ class BackgroundTaskManager {
 					`TASK_DESCRIPTION=${task.description}`,
 					`ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY ?? ''}`,
 					`MCP_GATEWAY_URL=${process.env.MCP_GATEWAY_URL ?? 'http://mcp-gateway:3100'}`,
+					`SOTA_SERVICE_TOKEN=${process.env.SOTA_SERVICE_TOKEN ?? ''}`,
 					`MAX_TOKEN_BUDGET_USD=${task.resourceLimits.maxTokenBudgetUsd}`,
 					`TIMEOUT_MS=${task.resourceLimits.timeoutMs}`,
 					...(config.env ?? []),

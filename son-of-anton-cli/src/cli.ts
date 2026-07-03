@@ -18,12 +18,26 @@ import { runSpecialist } from './commands/run';
 import { toolsCommand } from './commands/tools';
 import { runTraces } from './commands/traces';
 import { runUpdate } from './commands/update';
+import { SOTA_VERSION } from './version';
 
 const program = new Command();
 program
 	.name('sota')
 	.description('Son of Anton CLI — same brain as the IDE, different body.')
-	.version('0.1.0');
+	.version(SOTA_VERSION)
+	// Workspace trust is OFF by default so that running `sota` inside a cloned
+	// or otherwise untrusted repository never executes that repository's
+	// `.son-of-anton/hooks.json` scripts. Pass `--trust` (or set
+	// SOTA_TRUST_WORKSPACE=1) only for repositories you control.
+	.option('--trust', 'Trust the current workspace, allowing its .son-of-anton/hooks.json scripts to run. Off by default.');
+
+// Translate the global `--trust` flag into the environment signal that
+// buildCliHost() reads, before any command action constructs the host.
+program.hook('preAction', (thisCommand: Command) => {
+	if (thisCommand.opts().trust) {
+		process.env.SOTA_TRUST_WORKSPACE = '1';
+	}
+});
 
 const outputOption = (): Option =>
 	new Option('--output <mode>', 'Output mode: text or json')
@@ -45,9 +59,11 @@ program
 
 program
 	.command('run <handle> <prompt>')
-	.description('Invoke a specialist for one prompt.')
+	.description('Invoke a specialist for one prompt. Runs the agentic tool loop (edits files, runs commands) with per-call approval.')
 	.option('--model <id>', 'Override the default model')
 	.option('--quiet', 'Suppress everything except the final assistant text on stdout')
+	.option('-y, --yes', 'Auto-approve every file write and command the agent proposes (headless / non-interactive use).')
+	.option('--auto-approve', 'Alias for --yes.')
 	.option('--max-turns <n>', 'Bound the agent loop (advisory until orchestrator runs are exposed via run)')
 	.addOption(outputOption())
 	.action(runSpecialist);

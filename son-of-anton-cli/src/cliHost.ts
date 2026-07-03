@@ -47,8 +47,33 @@ function writeJson(file: string, value: unknown, mode = 0o600): void {
 	fs.writeFileSync(file, JSON.stringify(value, null, 2), { mode });
 }
 
-class FileSecretStore implements SecretStore {
+/**
+ * CLI secret store with an in-process, non-persisted overlay on top of the
+ * file-backed `~/.son-of-anton/data/secrets.json`.
+ *
+ * `mirrorEphemeral` exposes a value (e.g. an API key read from an environment
+ * variable) to the rest of the core stack for the lifetime of this process
+ * WITHOUT writing it to disk. Only an explicit `store` call — driven by
+ * `sota auth save` — persists a secret. This keeps env-provided keys out of a
+ * plaintext file the user never asked us to write.
+ *
+ * `get` consults the ephemeral overlay first so a per-invocation env override
+ * always wins over a previously-persisted value.
+ */
+export interface CliSecretStore extends SecretStore {
+	/** Mirror a value into the in-process overlay only — never persisted. */
+	mirrorEphemeral(key: string, value: string): void;
+}
+
+class FileSecretStore implements CliSecretStore {
+	/** In-process overlay; never written to disk. */
+	private readonly ephemeral = new Map<string, string>();
+
 	async get(key: string): Promise<string | undefined> {
+		const overlaid = this.ephemeral.get(key);
+		if (overlaid !== undefined) {
+			return overlaid;
+		}
 		const data = readJson<Record<string, string>>(SECRETS_PATH, {});
 		return data[key];
 	}
@@ -56,12 +81,30 @@ class FileSecretStore implements SecretStore {
 		const data = readJson<Record<string, string>>(SECRETS_PATH, {});
 		data[key] = value;
 		writeJson(SECRETS_PATH, data);
+		// Drop any ephemeral shadow so the persisted value is now authoritative.
+		this.ephemeral.delete(key);
 	}
 	async delete(key: string): Promise<void> {
+		this.ephemeral.delete(key);
 		const data = readJson<Record<string, string>>(SECRETS_PATH, {});
 		delete data[key];
 		writeJson(SECRETS_PATH, data);
 	}
+	mirrorEphemeral(key: string, value: string): void {
+		this.ephemeral.set(key, value);
+	}
+}
+
+/**
+ * Narrow a core {@link SecretStore} to the CLI's {@link CliSecretStore} when
+ * it supports the in-process overlay. `buildCliHost` always installs a store
+ * that does, but callers only see the `SecretStore` type through `CoreHost`,
+ * so this guard recovers the extra capability without an unchecked cast.
+ */
+export function asCliSecretStore(store: SecretStore): CliSecretStore | undefined {
+	return typeof (store as Partial<CliSecretStore>).mirrorEphemeral === 'function'
+		? (store as CliSecretStore)
+		: undefined;
 }
 
 class FileConfigStore implements ConfigStore {
@@ -231,8 +274,32 @@ class FsFileStore implements FileStore {
 	}
 }
 
-export function buildCliHost(): CoreHost {
+/**
+ * Decide whether the current working directory should be treated as a trusted
+ * workspace. Trust gates execution of workspace-supplied
+ * `.son-of-anton/hooks.json` scripts (see {@link buildCliHost} consumers), so
+ * the CLI defaults to UNtrusted: `cd`-ing into a cloned/untrusted repository
+ * and running `sota` must never run that repository's hook scripts without an
+ * explicit decision from the user. Opt in by setting `SOTA_TRUST_WORKSPACE`
+ * to `1`/`true`/`yes` (a `--trust` flag can also pass an explicit value to
+ * {@link buildCliHost}).
+ */
+function isWorkspaceTrustedFromEnv(): boolean {
+	const value = (process.env.SOTA_TRUST_WORKSPACE ?? '').trim().toLowerCase();
+	return value === '1' || value === 'true' || value === 'yes';
+}
+
+export interface CliHostOptions {
+	/**
+	 * Explicit workspace-trust decision. When omitted, trust is resolved from
+	 * the `SOTA_TRUST_WORKSPACE` environment variable and defaults to `false`.
+	 */
+	readonly trustWorkspace?: boolean;
+}
+
+export function buildCliHost(options?: CliHostOptions): CoreHost {
 	const cwd = process.cwd();
+	const isTrusted = options?.trustWorkspace ?? isWorkspaceTrustedFromEnv();
 	return {
 		secrets: new FileSecretStore(),
 		config: new FileConfigStore(),
@@ -240,7 +307,7 @@ export function buildCliHost(): CoreHost {
 		notifier: new CliNotifier(),
 		workspace: {
 			folders: [{ fsPath: cwd, name: path.basename(cwd) }],
-			isTrusted: true,
+			isTrusted,
 		},
 		globalState: new FileMementoStore(),
 		projectContext: new CwdProjectContextProvider(cwd),

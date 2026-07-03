@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import { readFileSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
@@ -12,6 +13,7 @@ import { toAnthropicFormat, toOpenAIFormat, fromAnthropicResponse, fromOpenAIRes
 import type { FailoverConfig } from './failover/types.js';
 import { counter, gauge, histogram, expressMetricsMiddleware, prometheusHandler } from '../_lib/metrics/dist/index.js';
 import { expressTracingMiddleware, extractOrCreateTraceContext, addTraceHeaders } from '../_lib/tracing/dist/index.js';
+import { createAuthMiddleware } from '../_shared/auth/dist/index.js';
 import type { UsageObserver } from './providers/types.js';
 
 function loadConfig(): ModelRoutesConfig {
@@ -149,6 +151,16 @@ export function createServer() {
 	app.use(express.json({ limit: '10mb' }));
 	app.use(expressTracingMiddleware('model-router'));
 	app.use(expressMetricsMiddleware('model-router'));
+	// Throttle inter-service traffic; health and metrics probes are exempt.
+	app.use(rateLimit({
+		windowMs: 60_000,
+		max: 1000,
+		standardHeaders: true,
+		legacyHeaders: false,
+		skip: (req) => req.path === '/health' || req.path === '/metrics',
+	}));
+	// Enforce inter-service auth (exempts /health and /metrics).
+	app.use(createAuthMiddleware());
 
 	// Health endpoint
 	app.get('/health', (_req, res) => {

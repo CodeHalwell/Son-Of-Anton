@@ -12,19 +12,20 @@ import * as crypto from 'node:crypto';
 import { CheckpointManager } from '../src/checkpointManager.js';
 import { CheckpointStorage } from '../src/storage.js';
 
-function tmpDir(): string {
-	return path.join(os.tmpdir(), `checkpoints-test-${crypto.randomUUID()}`);
-}
-
 describe('CheckpointManager', () => {
+	let baseDir: string;
 	let workspaceRoot: string;
 	let storagePath: string;
 	let storage: CheckpointStorage;
 	let manager: CheckpointManager;
 
 	beforeEach(async () => {
-		workspaceRoot = tmpDir();
-		storagePath = tmpDir();
+		// Create a single unpredictable base directory under the system temp dir; the
+		// workspace and storage roots (and their sibling fixtures) all live inside it,
+		// so nothing is written to a predictable path directly under os.tmpdir().
+		baseDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sota-checkpoints-'));
+		workspaceRoot = path.join(baseDir, 'workspace');
+		storagePath = path.join(baseDir, 'storage');
 		await fs.mkdir(workspaceRoot, { recursive: true });
 		await fs.mkdir(storagePath, { recursive: true });
 
@@ -33,8 +34,7 @@ describe('CheckpointManager', () => {
 	});
 
 	afterEach(async () => {
-		await fs.rm(workspaceRoot, { recursive: true, force: true });
-		await fs.rm(storagePath, { recursive: true, force: true });
+		await fs.rm(baseDir, { recursive: true, force: true });
 	});
 
 	test('creating a checkpoint captures file content correctly', async () => {
@@ -194,5 +194,46 @@ describe('CheckpointManager', () => {
 		const snapFiles = await fs.readdir(filesDir);
 		assert.strictEqual(snapFiles.length, 1);
 		assert.strictEqual(snapFiles[0], `${checkpoint.files[0].contentHash}.snap`);
+	});
+
+	test('rejects path traversal in session id so deleteSession cannot escape the storage root', async () => {
+		// A directory outside the storage root that a traversal id would target.
+		const victim = path.join(storagePath, '..', `victim-${crypto.randomUUID()}`);
+		await fs.mkdir(victim, { recursive: true });
+		await fs.writeFile(path.join(victim, 'keep.txt'), 'important', 'utf-8');
+		try {
+			const traversalId = `..${path.sep}${path.basename(victim)}`;
+			await assert.rejects(manager.deleteSession(traversalId), /Invalid sessionId/);
+			// The victim directory must be untouched.
+			await assert.doesNotReject(fs.access(path.join(victim, 'keep.txt')));
+		} finally {
+			await fs.rm(victim, { recursive: true, force: true });
+		}
+	});
+
+	test('restore does not write or delete files outside the workspace root', async () => {
+		// A file outside the workspace that a crafted checkpoint tries to remove.
+		const outside = path.join(workspaceRoot, '..', `outside-${crypto.randomUUID()}.txt`);
+		await fs.writeFile(outside, 'do not delete', 'utf-8');
+		try {
+			const escaping = `..${path.sep}${path.basename(outside)}`;
+			const checkpoint = {
+				id: `cp-${crypto.randomUUID()}`,
+				timestamp: Date.now(),
+				agentId: 'a',
+				taskId: 't',
+				action: 'x',
+				toolCall: 'y',
+				files: [{ path: escaping, contentHash: '', content: null, exists: false }],
+				metadata: {},
+			};
+			await storage.ensureSessionDir('session-x');
+			await storage.saveCheckpoint('session-x', checkpoint as unknown as Parameters<typeof storage.saveCheckpoint>[1]);
+			await manager.restoreCheckpoint('session-x', checkpoint.id);
+			// The out-of-workspace file must still exist.
+			await assert.doesNotReject(fs.access(outside), 'restore must not delete files outside the workspace');
+		} finally {
+			await fs.rm(outside, { force: true });
+		}
 	});
 });

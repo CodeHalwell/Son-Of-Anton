@@ -17,11 +17,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install dependencies
 COPY package*.json ./
 COPY tsconfig.json ./
-RUN npm install --legacy-peer-deps
+RUN npm ci
 
 # Copy source and build
 COPY src/ ./src/
 COPY _lib/metrics/dist/ ./_lib/metrics/dist/
+COPY _shared/auth/dist/ ./_shared/auth/dist/
 RUN npx tsc --noCheck
 
 EXPOSE 8080

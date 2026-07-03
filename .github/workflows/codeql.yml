@@ -1,0 +1,55 @@
+# ----------------------------------------------------------------------------
+# CodeQL static analysis for the Son of Anton monorepo.
+#
+# Scans the JavaScript/TypeScript sources (IDE fork, agent runtime, CLI,
+# extensions, services) and reports findings to the repository's Security tab.
+# JS/TS is an interpreted language for CodeQL, so no build step is required —
+# the extractor reads the source tree directly.
+#
+# Runs on pushes and pull requests targeting `main`, plus a weekly scheduled
+# scan to catch newly published queries against unchanged code.
+# ----------------------------------------------------------------------------
+
+name: "CodeQL"
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: "24 4 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language:
+          - javascript-typescript
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-and-quality
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"

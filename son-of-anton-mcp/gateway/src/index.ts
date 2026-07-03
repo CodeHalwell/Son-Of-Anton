@@ -4,6 +4,7 @@
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
+import { enforceHttpAuth, requireServiceToken } from '../_shared/auth/dist/index.js';
 
 const PORT = parseInt(process.env.GATEWAY_PORT ?? '3200', 10);
 
@@ -246,6 +247,11 @@ const gateway = new McpGateway(configPath);
 const httpServer = http.createServer(async (req, res) => {
 	const url = new URL(req.url ?? '/', `http://localhost:${PORT}`);
 
+	// Enforce inter-service auth (exempts /health and /metrics).
+	if (!enforceHttpAuth(req, res)) {
+		return;
+	}
+
 	if (url.pathname === '/health') {
 		const serverHealth = await gateway.checkHealth();
 		const allHealthy = Object.values(serverHealth).every(
@@ -277,6 +283,8 @@ const httpServer = http.createServer(async (req, res) => {
 	res.writeHead(404);
 	res.end('Not found');
 });
+
+requireServiceToken('mcp-gateway-proxy');
 
 httpServer.listen(PORT, () => {
 	console.log(`[mcp-gateway-proxy] Monitoring gateway on port ${PORT}`);

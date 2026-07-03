@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Son of Anton Contributors. All rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import * as assert from 'assert';
@@ -35,8 +35,8 @@ suite('CommandClassifier', () => {
 			assert.strictEqual(result.level, 'allowed');
 		});
 
-		test('npm install is allowed', () => {
-			const result = classifyCommand('npm install');
+		test('npm ci is allowed', () => {
+			const result = classifyCommand('npm ci');
 			assert.strictEqual(result.level, 'allowed');
 		});
 
@@ -109,6 +109,11 @@ suite('CommandClassifier', () => {
 			assert.strictEqual(result.level, 'confirm');
 		});
 
+		test('npm install requires confirmation (supply-chain gate)', () => {
+			const result = classifyCommand('npm install');
+			assert.strictEqual(result.level, 'confirm');
+		});
+
 		test('unknown commands default to confirm', () => {
 			const result = classifyCommand('some-unknown-binary --flag');
 			assert.strictEqual(result.level, 'confirm');
@@ -132,13 +137,17 @@ suite('CommandClassifier', () => {
 			assert.notStrictEqual(result.level, 'allowed');
 		});
 
-		test('bare npm install without compound operators is still allowed', () => {
-			const result = classifyCommand('npm install');
+		test('a non-compound allowlisted command still resolves via the allowlist', () => {
+			// Control for the compound-operator guard: with no ; && || | present the
+			// allowlist path runs. `npm ci` is lockfile-faithful so it stays allowed,
+			// whereas bare `npm install` is gated to confirm (see the supply-chain
+			// gate test above).
+			const result = classifyCommand('npm ci');
 			assert.strictEqual(result.level, 'allowed');
 		});
 
 		test('npm install with a package name requires confirmation', () => {
-			// npm install <pkg> is a CONFIRM_PATTERNS entry, not ALLOWED.
+			// Every `npm install …` form is a CONFIRM_PATTERNS entry, not ALLOWED.
 			const result = classifyCommand('npm install lodash');
 			assert.strictEqual(result.level, 'confirm');
 		});

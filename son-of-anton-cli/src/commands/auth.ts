@@ -12,7 +12,8 @@ import { Command, Option } from 'commander';
 import { SECRET_KEYS } from 'son-of-anton-core/dist/credentials/credentialDetection';
 import { isClaudeCodeAvailable } from 'son-of-anton-core/dist/llm/claudeCodeRunner';
 import { isCodexAvailable } from 'son-of-anton-core/dist/llm/codexRunner';
-import { buildCliHost } from '../cliHost';
+import { saveEnvCredentials } from '../auth/bootstrap';
+import { buildCliHost, SOTA_PATHS } from '../cliHost';
 import { SOTA_EXIT_CODES } from '../headless';
 
 /**
@@ -297,6 +298,39 @@ async function runAuthStatus(opts: AuthStatusOptions): Promise<void> {
 	}
 }
 
+interface AuthSaveOptions {
+	output?: 'text' | 'json';
+}
+
+/**
+ * `sota auth save` — the explicit opt-in that persists provider API keys found
+ * in the environment to `~/.son-of-anton/data/secrets.json`. A bare `sota` run
+ * only holds env-provided keys in-process (see `bootstrapCredentials`); this
+ * command is how a user chooses to keep them across runs. Values are never
+ * echoed — only the environment variable names that were saved.
+ */
+async function runAuthSave(opts: AuthSaveOptions): Promise<void> {
+	const host = buildCliHost();
+	const { savedEnvVars } = await saveEnvCredentials(host);
+	if (savedEnvVars.length === 0) {
+		const message = 'no provider API keys found in the environment to save. '
+			+ 'Set e.g. ANTHROPIC_API_KEY and re-run `sota auth save`.';
+		if (opts.output === 'json') {
+			process.stdout.write(JSON.stringify({ ok: false, saved: [], error: message }) + '\n');
+		} else {
+			process.stderr.write(`error: ${message}\n`);
+		}
+		process.exit(SOTA_EXIT_CODES.HARD_FAIL);
+	}
+	if (opts.output === 'json') {
+		process.stdout.write(JSON.stringify({ ok: true, saved: savedEnvVars, path: SOTA_PATHS.secrets }) + '\n');
+		return;
+	}
+	const plural = savedEnvVars.length === 1 ? '' : 's';
+	process.stdout.write(`Saved ${savedEnvVars.length} credential${plural} (${savedEnvVars.join(', ')}) to ${SOTA_PATHS.secrets}.\n`);
+	process.stdout.write('Future `sota` runs will use these without the environment variables set.\n');
+}
+
 export function authCommand(): Command {
 	const cmd = new Command('auth');
 	cmd.description('Manage provider sign-in (Claude / Codex subscriptions, API keys).');
@@ -312,6 +346,13 @@ export function authCommand(): Command {
 		.addOption(new Option('--output <mode>', 'Output mode: text or json').choices(['text', 'json']).default('text'))
 		.action(async (opts: AuthStatusOptions) => {
 			await runAuthStatus(opts);
+		});
+
+	cmd.command('save')
+		.description('Persist provider API keys from the environment to the secret store (explicit opt-in; a bare run keeps them in-process only).')
+		.addOption(new Option('--output <mode>', 'Output mode: text or json').choices(['text', 'json']).default('text'))
+		.action(async (opts: AuthSaveOptions) => {
+			await runAuthSave(opts);
 		});
 
 	return cmd;

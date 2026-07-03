@@ -11,6 +11,7 @@ COPY package*.json tsconfig.json ./
 RUN npm install
 
 COPY src/ ./src/
+COPY _shared/auth/dist/ ./_shared/auth/dist/
 RUN npx tsc --noCheck
 
 EXPOSE 3104

@@ -9,13 +9,18 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends curl && \
     rm -rf /var/lib/apt/lists/*
 
-COPY package*.json tsconfig.json tsconfig.build.json ./
+COPY package*.json tsconfig.json build.mjs ./
 RUN npm install
 
 COPY src/ ./src/
 COPY _lib/metrics/dist/ ./_lib/metrics/dist/
 COPY _lib/tracing/dist/ ./_lib/tracing/dist/
-RUN node_modules/.bin/tsc -p tsconfig.build.json --noCheck
+COPY _shared/auth/dist/ ./_shared/auth/dist/
+# esbuild transpile (see build.mjs). Unlike the sibling services, tsc — even with
+# --noCheck — must resolve the MCP SDK's deeply-nested Zod tool-schema types and
+# balloons past a 4 GB heap (exit 134) in the CI Docker builder. esbuild strips
+# types without touching the declaration graph, so the build stays fast.
+RUN npm run build
 
 EXPOSE 3100
 

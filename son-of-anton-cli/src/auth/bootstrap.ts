@@ -5,6 +5,7 @@
 
 import { SECRET_KEYS } from 'son-of-anton-core/dist/credentials/credentialDetection';
 import type { CoreHost } from 'son-of-anton-core/dist/host';
+import { asCliSecretStore } from '../cliHost';
 
 /**
  * Mapping of supported environment variables to the secret-store keys the
@@ -34,23 +35,37 @@ const NO_PROVIDER_MESSAGE =
 	+ 'AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY, GOOGLE_API_KEY) and re-run.';
 
 /**
- * Mirror supported environment variables into the file-backed SecretStore so
- * the rest of the core stack picks them up via its standard secret-resolution
- * pathway. Returns `{ ok: false, message }` when no provider credential is
- * present, which the caller surfaces as a friendly CLI error.
+ * Expose supported environment variables to the core stack for the lifetime of
+ * this CLI invocation so the LlmClient picks them up via its standard
+ * secret-resolution pathway. Returns `{ ok: false, message }` when no provider
+ * credential is present, which the caller surfaces as a friendly CLI error.
+ *
+ * Crucially, env-provided keys are mirrored into an in-process overlay and are
+ * NOT written to disk — a bare `sota` run must not silently persist the user's
+ * API keys to a plaintext `~/.son-of-anton/data/secrets.json`. Users who want
+ * persistence opt in explicitly via `sota auth save` (see
+ * {@link saveEnvCredentials}).
  *
  * Env-var-only by design: full `detectCredentials` requires a `CredentialBroker`
  * (OAuth status), which is intentionally out of scope for the CLI v1.
  */
 export async function bootstrapCredentials(host: CoreHost): Promise<{ ok: boolean; message?: string }> {
-	// Pass 1: mirror env vars into the file-backed secret store. Highest
-	// precedence — process env always wins over previously-saved values so
-	// users can override on a per-invocation basis.
+	// Pass 1: mirror env vars into the in-process overlay (never persisted).
+	// Highest precedence — process env always wins over previously-saved values
+	// so users can override on a per-invocation basis.
+	const cliSecrets = asCliSecretStore(host.secrets);
 	let mirrored = 0;
 	for (const { env, key } of ENV_TO_SECRET) {
 		const value = process.env[env];
 		if (value && value.trim()) {
-			await host.secrets.store(key, value.trim());
+			if (cliSecrets) {
+				cliSecrets.mirrorEphemeral(key, value.trim());
+			} else {
+				// Non-CLI host without an overlay (only reachable via a custom
+				// host in tests) — fall back to the persisting store so the run
+				// still authenticates.
+				await host.secrets.store(key, value.trim());
+			}
 			mirrored++;
 		}
 	}
@@ -76,4 +91,25 @@ export async function bootstrapCredentials(host: CoreHost): Promise<{ ok: boolea
 		}
 	}
 	return { ok: false, message: NO_PROVIDER_MESSAGE };
+}
+
+/**
+ * Explicit opt-in persistence, driven by `sota auth save`. Writes every
+ * provider credential currently present in the environment to the file-backed
+ * secret store (`~/.son-of-anton/data/secrets.json`). This is the ONLY path
+ * that persists API keys — `bootstrapCredentials` deliberately keeps them
+ * in-process only. Returns the set of environment variable names that were
+ * saved (the values themselves are never returned or logged) plus the total
+ * distinct provider count so the caller can print a friendly summary.
+ */
+export async function saveEnvCredentials(host: CoreHost): Promise<{ savedEnvVars: string[] }> {
+	const savedEnvVars: string[] = [];
+	for (const { env, key } of ENV_TO_SECRET) {
+		const value = process.env[env];
+		if (value && value.trim()) {
+			await host.secrets.store(key, value.trim());
+			savedEnvVars.push(env);
+		}
+	}
+	return { savedEnvVars };
 }

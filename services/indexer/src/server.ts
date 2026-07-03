@@ -5,6 +5,7 @@ import http from 'http';
 import { Indexer } from './indexer';
 import { IndexerConfig } from './config';
 import { prometheusHandler } from '../_lib/metrics/dist/index.js';
+import { enforceHttpAuth } from '../_shared/auth/dist/index.js';
 
 export class IndexerServer {
 	private server: http.Server | null = null;
@@ -51,6 +52,11 @@ export class IndexerServer {
 	private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
 		const url = new URL(req.url ?? '/', `http://localhost:${this.config.server.port}`);
 		const method = req.method ?? 'GET';
+
+		// Enforce inter-service auth (exempts /health and /metrics).
+		if (!enforceHttpAuth(req, res)) {
+			return;
+		}
 
 		// GET /health — service status
 		if (method === 'GET' && url.pathname === '/health') {

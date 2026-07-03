@@ -5,7 +5,7 @@
 	"main": "dist/index.js",
 	"scripts": {
 		"build": "tsc",
-		"postbuild": "node -e \"const{cpSync}=require('fs');cpSync('_lib','dist/_lib',{recursive:true,force:true})\"",
+		"postbuild": "node -e \"const{cpSync}=require('fs');cpSync('_lib','dist/_lib',{recursive:true,force:true});cpSync('_shared','dist/_shared',{recursive:true,force:true})\"",
 		"start": "node dist/index.js",
 		"dev": "tsc --watch & node --watch dist/index.js",
 		"pretest": "npm run build",
@@ -13,6 +13,7 @@
 	},
 	"dependencies": {
 		"express": "^4.21.0",
+		"express-rate-limit": "^7.4.0",
 		"undici": "^6.21.0"
 	},
 	"devDependencies": {

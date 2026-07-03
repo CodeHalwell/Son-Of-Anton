@@ -86,7 +86,7 @@ export function toSarif(reports: VulnerabilityReport[]): SarifReport {
 	};
 }
 
-function severityToLevel(severity: Severity): SarifResult['level'] {
+export function severityToLevel(severity: Severity): SarifResult['level'] {
 	switch (severity) {
 		case 'critical':
 		case 'high':

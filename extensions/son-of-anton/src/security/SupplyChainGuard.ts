@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Son of Anton Contributors. All rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
@@ -137,6 +137,16 @@ export class SupplyChainGuard {
 	}
 
 	/**
+	 * Add (or update) an MCP server in the trust list at runtime — e.g. after
+	 * the user approves a connection prompt or when seeding from user/global
+	 * configuration. Additive: does not disturb other entries the way
+	 * `loadConfig` does.
+	 */
+	trustMcpServer(name: string, reason: string): void {
+		this.mcpServerTrustList.set(name, { name, url: '', trusted: true, reason });
+	}
+
+	/**
 	 * Validate an MCP server connection.
 	 * Logs the connection and warns if the server is not trusted.
 	 */
@@ -157,6 +167,23 @@ export class SupplyChainGuard {
 		}
 
 		return trusted;
+	}
+
+	/**
+	 * Record an MCP connection attempt in the audit log. Unlike
+	 * {@link validateMcpConnection}, this neither reads nor mutates the trust
+	 * list and shows no UI. The trust decision for `sota.mcp.servers` entries is
+	 * made by {@link McpTrustGate} from the full launch descriptor; the guard
+	 * must never double as a name-based approval source, because an interactive
+	 * "trust always" for one descriptor would otherwise leave the *name* trusted
+	 * and silently bless a different command that later reuses that name.
+	 */
+	recordMcpConnectionAttempt(serverName: string, trusted: boolean): void {
+		this.mcpConnectionLog.push({
+			server: serverName,
+			timestamp: Date.now(),
+			trusted,
+		});
 	}
 
 	/**

@@ -190,13 +190,33 @@ export class DagStore {
 
 /** Simple glob matching for watch patterns. */
 function matchesGlob(filePath: string, pattern: string): boolean {
-	// Convert glob pattern to regex
-	const regexStr = pattern
-		.replace(/\*\*/g, '{{DOUBLESTAR}}')
-		.replace(/\*/g, '[^/]*')
-		.replace(/\{\{DOUBLESTAR\}\}/g, '.*')
-		.replace(/\./g, '\\.')
-		.replace(/\?/g, '.');
+	// Translate the glob to a regex in a single pass so that regex-special
+	// characters in the literal parts are escaped *before* the wildcards are
+	// expanded (escaping afterwards corrupts the introduced metacharacters).
+	// Semantics: `**/` matches zero or more path segments, `**` matches across
+	// separators, `*` matches within a single segment, `?` a single non-slash
+	// character.
+	let regexStr = '';
+	for (let i = 0; i < pattern.length; i++) {
+		const char = pattern[i];
+		if (char === '*') {
+			if (pattern[i + 1] === '*') {
+				i++;
+				if (pattern[i + 1] === '/') {
+					i++;
+					regexStr += '(?:.*/)?';
+				} else {
+					regexStr += '.*';
+				}
+			} else {
+				regexStr += '[^/]*';
+			}
+		} else if (char === '?') {
+			regexStr += '[^/]';
+		} else {
+			regexStr += char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		}
+	}
 
 	try {
 		const regex = new RegExp(`^${regexStr}$`);

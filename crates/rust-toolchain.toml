@@ -1,0 +1,8 @@
+# Pin the Rust toolchain so CI is reproducible and a new `clippy` lint on a
+# floating `stable` cannot redden the build with no code change. Bump this
+# deliberately (and re-run `cargo clippy --all-targets -- -D warnings`) rather
+# than tracking whatever `stable` happens to be on the CI runner.
+[toolchain]
+channel = "1.94.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

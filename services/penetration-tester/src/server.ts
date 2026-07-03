@@ -13,6 +13,7 @@ import { FalkorDbClient } from './clients/falkordbClient';
 import { toSarif } from './sarif';
 import { validateTargetUrl } from './config';
 import { OwaspCategory, PenTestConfig, ScanSession, TestResult } from './types';
+import { enforceHttpAuth } from '../_shared/auth/dist/index.js';
 
 /**
  * HTTP server for the penetration testing service.
@@ -91,6 +92,11 @@ export class PenTestServer {
 		if (method === 'OPTIONS') {
 			res.writeHead(204);
 			res.end();
+			return;
+		}
+
+		// Enforce inter-service auth (exempts /health and /metrics).
+		if (!enforceHttpAuth(req, res)) {
 			return;
 		}
 

@@ -1,15 +1,15 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Son of Anton Contributors. All rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
 import { ScopeLockManager } from './ScopeLockManager';
 
-describe('ScopeLockManager', () => {
+suite('ScopeLockManager', () => {
 	let manager: ScopeLockManager;
 
-	beforeEach(() => {
+	setup(() => {
 		manager = new ScopeLockManager({
 			host: 'localhost',
 			port: 6379,
@@ -18,7 +18,7 @@ describe('ScopeLockManager', () => {
 		});
 	});
 
-	afterEach(() => {
+	teardown(() => {
 		manager.dispose();
 	});
 

@@ -301,10 +301,6 @@
 				"title": "Anton: Show Harness Stats"
 			},
 			{
-				"command": "sota.showSandbox",
-				"title": "Anton: Show Sandbox Terminal"
-			},
-			{
 				"command": "sota.triggerPreCommitHook",
 				"title": "Anton: Trigger Pre-Commit Hook"
 			},
@@ -1044,6 +1040,15 @@
 							}
 						}
 					}
+				},
+				"sota.mcp.trustedServers": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"default": [],
+					"scope": "application",
+					"markdownDescription": "Names of MCP servers (from `#sota.mcp.servers#`) that Son of Anton may connect to **without** prompting. MCP servers spawn a local process and can expose tools that read files and run commands, so any server not listed here — or previously approved via the in-product **Trust Always** prompt — is blocked until you explicitly confirm the connection. This is an **application-scoped** (user/global) list on purpose: a workspace cannot pre-trust a server on your behalf. Edit this list to pre-bless or audit trusted servers; removing a name takes effect on the next window reload."
 				},
 				"sotaAuth.anthropic-oauth.clientId": {
 					"type": "string",

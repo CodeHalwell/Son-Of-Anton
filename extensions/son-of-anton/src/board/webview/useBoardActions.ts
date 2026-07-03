@@ -32,7 +32,6 @@ import { buildBoardActions } from './boardActionDefs';
 export function useBoardActions(availableAssignees: ReadonlyArray<string>): void {
 	const actions = buildBoardActions(availableAssignees);
 	for (const action of actions) {
-		// eslint-disable-next-line react-hooks/rules-of-hooks
 		useCopilotAction({
 			name: action.name,
 			description: action.description,

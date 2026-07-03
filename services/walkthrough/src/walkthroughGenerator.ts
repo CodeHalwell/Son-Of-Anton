@@ -4,6 +4,7 @@ import {
 	WalkthroughRenderOptions,
 	FileChangeSummary,
 } from './types.js';
+import { serviceAuthHeaders } from '../_shared/auth/dist/index.js';
 
 export interface WalkthroughGeneratorOptions {
 	modelRouterUrl: string;
@@ -23,6 +24,7 @@ export class WalkthroughGenerator {
 		const response = await fetch(`${this.modelRouterUrl}/v1/messages`, {
 			method: 'POST',
 			headers: {
+				...serviceAuthHeaders(),
 				'Content-Type': 'application/json',
 				'X-Agent-Role': 'review-agent',
 				'X-Task-Type': 'walkthrough-generation',

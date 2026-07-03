@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 import type { Disposable } from '../host';
 import { McpClient, McpToolListing } from './McpClient';
+import type { McpToolAnnotations } from './McpServerConnection';
 import { Tool, ToolDefinition, ToolExecutionContext, ToolExecutionResult } from '../tools/types';
 import { ToolRegistry } from '../tools/registry';
 
@@ -127,6 +128,13 @@ function createBridgedTool(
 			type: 'object',
 			properties: {},
 		},
+		// Derive the approval gate from the server-declared annotations: a tool
+		// that advertises `readOnlyHint: true` is safe to run unattended, while
+		// a destructive tool — or one that declares nothing at all — requires
+		// explicit approval. Built-in tools set this themselves (see
+		// tools/builtin.ts); before this, every MCP tool defaulted to no
+		// riskLevel, so a host couldn't tell a read from a destructive write.
+		riskLevel: deriveMcpToolRiskLevel(entry.annotations),
 		// MCP tools land in the `'mcp'` auto-approval category so users can opt
 		// every external server in/out wholesale via `sota.autoApprove.mcp`.
 		// Per-server toggles live in the MCP sub-tab separately.
@@ -153,4 +161,25 @@ function createBridgedTool(
 
 function sanitiseNameSegment(s: string): string {
 	return s.replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+/**
+ * Map an MCP tool's server-declared annotations onto an approval `riskLevel`.
+ *
+ * The mapping is deliberately conservative because annotations are advisory
+ * and untrusted (a server can under-report its own destructiveness):
+ *
+ *   - `readOnlyHint === true`            → `'safe'` (runs without an approval card)
+ *   - destructive / unknown / no hints   → `'requiresApproval'`
+ *
+ * i.e. a tool is only exempt from the approval gate when it *explicitly*
+ * declares itself read-only. Everything else — including tools that declare
+ * nothing, which is the common case for servers predating the annotations
+ * spec — is gated. Exported for unit testing.
+ */
+export function deriveMcpToolRiskLevel(annotations: McpToolAnnotations | undefined): 'safe' | 'requiresApproval' {
+	if (annotations?.readOnlyHint === true) {
+		return 'safe';
+	}
+	return 'requiresApproval';
 }

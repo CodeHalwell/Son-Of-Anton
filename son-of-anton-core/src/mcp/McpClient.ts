@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 import { TypedEventEmitter, type Event } from '../eventEmitter';
 import type { Disposable } from '../host';
-import { McpServerConnection } from './McpServerConnection';
+import { McpServerConnection, type McpToolAnnotations } from './McpServerConnection';
 import { McpStdioTransport } from './McpStdioTransport';
 
 /**
@@ -45,6 +45,12 @@ export interface McpToolListing {
 	server: string;
 	tool: string;
 	description: string;
+	/**
+	 * Server-declared behavioural hints for this tool, when present. The tool
+	 * bridge uses these to derive an approval `riskLevel` (read-only → safe;
+	 * destructive or unknown → requires approval). See {@link McpToolAnnotations}.
+	 */
+	annotations?: McpToolAnnotations;
 }
 
 /**
@@ -288,6 +294,7 @@ export class McpClient {
 						server: active.connection.name,
 						tool: tool.name,
 						description: tool.description,
+						annotations: tool.annotations,
 					});
 				}
 			} catch (err) {

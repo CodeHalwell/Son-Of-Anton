@@ -81,7 +81,7 @@ export const INJECTION_PATTERNS: DetectionPattern[] = [
 	{
 		id: 'hidden-instruction',
 		description: 'Instructions hidden in HTML or markdown comments',
-		regex: /<!--\s*(?:system|instruction|prompt|ignore|override|you must|always)\s/i,
+		regex: /<!--\s*(?:system|instruction|prompt|ignore|override|you must|always)\b/i,
 		severity: 'warning',
 		minTrustLevel: 'medium',
 	},

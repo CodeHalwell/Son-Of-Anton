@@ -4,16 +4,28 @@
  *--------------------------------------------------------------------------------------------*/
 
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import type { Request, Response } from 'express';
 import { CheckpointManager } from './checkpointManager.js';
 import { CheckpointStorage } from './storage.js';
 import type { CheckpointCreateRequest } from './types.js';
 import { expressMetricsMiddleware, prometheusHandler } from '../_lib/metrics/dist/index.js';
+import { createAuthMiddleware, requireServiceToken } from '../_shared/auth/dist/index.js';
 
 export function createServer(manager: CheckpointManager): express.Express {
 	const app = express();
 	app.use(express.json());
 	app.use(expressMetricsMiddleware('checkpoints'));
+	// Throttle inter-service traffic; health and metrics probes are exempt.
+	app.use(rateLimit({
+		windowMs: 60_000,
+		max: 1000,
+		standardHeaders: true,
+		legacyHeaders: false,
+		skip: (req) => req.path === '/health' || req.path === '/metrics',
+	}));
+	// Enforce inter-service auth (exempts /health and /metrics).
+	app.use(createAuthMiddleware());
 
 	app.get('/health', (_req: Request, res: Response) => {
 		res.json({ status: 'ok', service: 'checkpoints' });
@@ -85,6 +97,7 @@ export function createServer(manager: CheckpointManager): express.Express {
 }
 
 export function startServer(manager: CheckpointManager): void {
+	requireServiceToken('checkpoints');
 	const port = parseInt(process.env.CHECKPOINT_PORT ?? '3201', 10);
 	const app = createServer(manager);
 

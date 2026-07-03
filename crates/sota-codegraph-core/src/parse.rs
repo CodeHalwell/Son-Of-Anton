@@ -319,7 +319,7 @@ mod tests {
         assert_eq!(detect_language(&PathBuf::from("noext")), None);
     }
 
-    fn names_of_kind<'a>(parsed: &'a ParsedFile, kind: SymbolKind) -> Vec<&'a str> {
+    fn names_of_kind(parsed: &ParsedFile, kind: SymbolKind) -> Vec<&str> {
         parsed
             .symbols
             .iter()

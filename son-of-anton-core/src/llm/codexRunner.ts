@@ -43,6 +43,13 @@ export interface CodexRunOptions {
 	readonly modelId: string;
 	readonly cwd?: string;
 	readonly codexPath?: string;
+	/**
+	 * Optional cancellation signal. When it aborts, the spawned `codex`
+	 * process is killed immediately (SIGTERM) instead of being left to run —
+	 * and keep billing against the user's subscription — until the 10-minute
+	 * stream timeout. Threaded through from `LlmRequestOptions.signal`.
+	 */
+	readonly signal?: AbortSignal;
 }
 
 export type CodexChunk =
@@ -122,9 +129,29 @@ export async function* runCodex(options: CodexRunOptions): AsyncGenerator<CodexC
 
 	const proc = spawn(codexPath, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
 
-	// Send the message history as a JSON array on stdin.
-	proc.stdin.write(JSON.stringify(options.messages));
-	proc.stdin.end();
+	// Forward cancellation into the child. Without this the caller aborting
+	// only destroyed our stdout reader, leaving the `codex` subprocess alive
+	// (and billing) until the STREAM_JSON_TIMEOUT_MS fallback. Kill on abort,
+	// and handle an already-aborted signal by killing right after spawn.
+	const signal = options.signal;
+	const onAbort = () => { try { proc.kill('SIGTERM'); } catch { /* already exited */ } };
+	if (signal) {
+		if (signal.aborted) {
+			onAbort();
+		} else {
+			signal.addEventListener('abort', onAbort, { once: true });
+		}
+	}
+
+	// Send the message history as a JSON array on stdin. If the signal was
+	// already aborted above we killed the child, so its stdin is closed and a
+	// write would emit an 'error' (EPIPE); with no listener that crashes the
+	// process. Swallow stdin errors and skip the write when the pipe is gone.
+	proc.stdin.on('error', () => { /* stdin closed (child already exited/killed) */ });
+	if (!proc.killed && proc.stdin.writable) {
+		proc.stdin.write(JSON.stringify(options.messages));
+		proc.stdin.end();
+	}
 
 	let stderrBuf = '';
 	proc.stderr.on('data', (data: Buffer) => { stderrBuf += data.toString(); });
@@ -153,6 +180,7 @@ export async function* runCodex(options: CodexRunOptions): AsyncGenerator<CodexC
 		yield { type: 'done' };
 	} finally {
 		clearTimeout(timeout);
+		signal?.removeEventListener('abort', onAbort);
 		try { proc.stdout.destroy(); } catch { /* */ }
 	}
 

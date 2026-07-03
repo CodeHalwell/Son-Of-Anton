@@ -6,12 +6,51 @@
 import * as fs from 'fs';
 import { AgentManager } from 'son-of-anton-core/dist/agents/AgentManager';
 import { createAgentStack, type AgentStack } from 'son-of-anton-core/dist/agents/AgentStackFactory';
+import { SessionBudget } from 'son-of-anton-core/dist/agents/SessionBudget';
 import type { CoreHost, Disposable } from 'son-of-anton-core/dist/host';
 import { LlmClient } from 'son-of-anton-core/dist/llm/LlmClient';
 import { McpClient, type McpClientDeps } from 'son-of-anton-core/dist/mcp/McpClient';
+import type { ApprovalGate } from './approval';
 import { HookRunner, hooksFilePath } from './persistence/HookRunner';
 import { instrumentToolExecutionContext } from './persistence/instrumentToolExecutionContext';
 import { buildCliToolExecutionContext } from './toolExecutionContext';
+
+/**
+ * Optional wiring for {@link buildCliAgentStack}. Callers that drive
+ * side-effecting agentic runs (`sota run`) pass an {@link ApprovalGate} so
+ * the tool-execution context prompts before writes / commands; read-only
+ * surfaces (`plan`, `acp`) omit it and inherit the prior no-gate behaviour.
+ */
+export interface CliAgentStackOptions {
+	readonly approvalGate?: ApprovalGate;
+}
+
+/**
+ * Build the session spend kill switch from opt-in environment variables so
+ * headless `sota run` loops honour a cost / token / request cap. Off by
+ * default: with none of the vars set the run stays uncapped (the historical
+ * behaviour). Only positive, finite values are applied.
+ */
+function buildCliSpendGuard(): SessionBudget | undefined {
+	const num = (raw: string | undefined): number | undefined => {
+		if (raw === undefined || raw.trim() === '') {
+			return undefined;
+		}
+		const value = Number(raw);
+		return Number.isFinite(value) && value > 0 ? value : undefined;
+	};
+	const maxCostUsd = num(process.env.SOTA_SESSION_MAX_COST_USD);
+	const maxTotalTokens = num(process.env.SOTA_SESSION_MAX_TOKENS);
+	const maxRequests = num(process.env.SOTA_SESSION_MAX_REQUESTS);
+	if (maxCostUsd === undefined && maxTotalTokens === undefined && maxRequests === undefined) {
+		return undefined;
+	}
+	return new SessionBudget({
+		...(maxCostUsd !== undefined ? { maxCostUsd } : {}),
+		...(maxTotalTokens !== undefined ? { maxTotalTokens } : {}),
+		...(maxRequests !== undefined ? { maxRequests } : {}),
+	});
+}
 
 /**
  * Construct the canonical agent stack for the CLI. Mirrors the extension's
@@ -23,7 +62,7 @@ import { buildCliToolExecutionContext } from './toolExecutionContext';
  * in try/catch and surfaces "(Code graph not available)") so the stack still
  * produces a usable response.
  */
-export function buildCliAgentStack(host: CoreHost): { stack: AgentStack; llm: LlmClient; agentManager: AgentManager; mcpClient: McpClient; hookRunner?: HookRunner; dispose: () => void } {
+export function buildCliAgentStack(host: CoreHost, options?: CliAgentStackOptions): { stack: AgentStack; llm: LlmClient; agentManager: AgentManager; mcpClient: McpClient; hookRunner?: HookRunner; dispose: () => void } {
 	const llm = new LlmClient(host.secrets, host.config);
 
 	// MCP deps wired to "no servers, no live updates". The CLI doesn't
@@ -42,7 +81,7 @@ export function buildCliAgentStack(host: CoreHost): { stack: AgentStack; llm: Ll
 	// without a workspace (rare — mostly happens in tests) skip the context
 	// and fall back to the legacy diff-parse path.
 	const workspaceRoot = host.workspace.folders[0]?.fsPath;
-	const baseToolExecutionContext = workspaceRoot ? buildCliToolExecutionContext(workspaceRoot, host) : undefined;
+	const baseToolExecutionContext = workspaceRoot ? buildCliToolExecutionContext(workspaceRoot, host, options?.approvalGate) : undefined;
 	// Wrap the tool execution context with the hooks runtime when the workspace
 	// is trusted AND `.son-of-anton/hooks.json` exists. We skip instantiation
 	// (rather than relying solely on the runner's no-op behaviour for empty
@@ -67,6 +106,7 @@ export function buildCliAgentStack(host: CoreHost): { stack: AgentStack; llm: Ll
 		projectContext: host.projectContext,
 		toolExecutionContext,
 		configStore: host.config,
+		spendGuard: buildCliSpendGuard(),
 	});
 
 	const dispose = (): void => {

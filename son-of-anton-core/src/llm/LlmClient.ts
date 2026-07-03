@@ -8,6 +8,8 @@ import type { AwsCredentialIdentity, AwsCredentialIdentityProvider } from '@smit
 import type { ConfigStore, SecretStore } from '../host';
 import type { PromptCacheOptimizer } from './PromptCacheOptimizer';
 import type { ClaudeCodeMessage } from './claudeCodeRunner';
+import { Semaphore } from '../util/semaphore';
+import { RateLimiter } from '../util/rateLimiter';
 
 /**
  * Minimal sink for per-request cost telemetry. The extension implements this
@@ -331,6 +333,50 @@ const IMAGE_STRIPPED_NOTE = '[image attachment was not sent: model does not supp
  */
 function modelSupportsImages(model: ModelId): boolean {
 	return MULTIMODAL_MODELS.has(model);
+}
+
+/**
+ * OpenAI's reasoning models (the o1/o3/o4 and gpt-5 families) diverge from the
+ * classic chat-completion contract in two request-breaking ways: they reject
+ * the `max_tokens` field (requiring `max_completion_tokens` instead) and they
+ * reject the legacy `system` role (expecting `developer`). Detection matches
+ * the model *key* rather than the resolved id so it stays stable across id
+ * remaps, mirroring the Azure Foundry path's reasoning-family check. Classic
+ * chat models (gpt-4o, gpt-4.1, gpt-3.5, …) do not match and keep `max_tokens`.
+ *
+ * @internal exported for unit tests.
+ */
+export function isOpenAIReasoningModel(model: ModelId): boolean {
+	return /^(?:o1|o3|o4|gpt-5)/.test(model);
+}
+
+/**
+ * Whether a model can drive the native agentic tool loop, i.e. its provider
+ * serializer round-trips multi-turn `tool_use` / `tool_result` message parts.
+ * Only the Anthropic (`streamAnthropic`) and Bedrock Converse (`streamBedrock`)
+ * serializers forward the tool definitions and parse `tool_use` back; the
+ * OpenAI-compatible and Gemini serializers reject those parts, so a tool-driving
+ * run against them fails after the first tool call. Claude Code is deliberately
+ * excluded too: its adapter launches the CLI with `--tools '' --max-turns 1`, so
+ * it never emits the `tool-call` events `runToolLoop` waits for and would end a
+ * code-editing request with prose only. Callers should fall back to a single-shot
+ * turn when this is `false` rather than entering the loop.
+ */
+export function supportsAgenticToolLoop(model: ModelId): boolean {
+	switch (providerForModel(model)) {
+		case 'anthropic':
+		case 'bedrock':
+			return true;
+		default:
+			return false;
+	}
+}
+
+/** Throw a standard `AbortError` if the given signal is already aborted. */
+function throwIfAborted(signal: AbortSignal | undefined): void {
+	if (signal?.aborted) {
+		throw new DOMException('The LLM request was aborted.', 'AbortError');
+	}
 }
 
 /**
@@ -872,6 +918,38 @@ export class LlmClient {
 	 */
 	setCacheOptimizer(optimizer: PromptCacheOptimizer | undefined): void {
 		this.cacheOptimizer = optimizer;
+	}
+
+	/**
+	 * Global in-flight cap on provider requests. Enforces the documented
+	 * "max concurrent API requests" limit across every caller (orchestrator
+	 * fan-out, chat, specialists, CLI) since they all funnel through
+	 * `streamRequest`. Lazily built from `sota.limits.maxConcurrentRequests`
+	 * (default 5); invalid values fall back to the default.
+	 */
+	private _requestSemaphore?: Semaphore;
+	private get requestSemaphore(): Semaphore {
+		if (!this._requestSemaphore) {
+			const raw = this.config.get<number>('limits.maxConcurrentRequests', 5);
+			const max = typeof raw === 'number' && Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 5;
+			this._requestSemaphore = new Semaphore(max);
+		}
+		return this._requestSemaphore;
+	}
+
+	/**
+	 * Per-agent request-rate cap. Enforces the documented "max requests per
+	 * minute per agent" limit, keyed on the agent handle. Lazily built from
+	 * `sota.limits.requestsPerMinute` (default 30); invalid values fall back.
+	 */
+	private _rateLimiter?: RateLimiter;
+	private get rateLimiter(): RateLimiter {
+		if (!this._rateLimiter) {
+			const raw = this.config.get<number>('limits.requestsPerMinute', 30);
+			const perMinute = typeof raw === 'number' && Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 30;
+			this._rateLimiter = new RateLimiter(perMinute, 60_000);
+		}
+		return this._rateLimiter;
 	}
 
 	/**
@@ -1529,11 +1607,36 @@ export class LlmClient {
 	 * Returns an async iterable of normalized stream events.
 	 */
 	async *streamRequest(options: LlmRequestOptions): AsyncGenerator<LlmStreamEvent> {
-		// Intercept the provider's stream so we can record per-completion
-		// cache metrics in one place. The optimizer is set lazily via
-		// `setCacheOptimizer`; when undefined the interceptor degrades to
-		// a pure passthrough.
-		yield* this.recordOnComplete(this.dispatchProviderStream(options), options);
+		// Enforce the runtime rate limits before touching a provider:
+		// (1) per-agent requests-per-minute (waits for a token), then
+		// (2) a global in-flight concurrency permit held for the whole stream.
+		// Ordering matters — we wait out the rate limit BEFORE occupying a
+		// concurrency slot. The permit is released in `finally`, which also
+		// runs if the consumer abandons the generator early (for-await break
+		// triggers the generator's return()).
+		//
+		// Check the abort signal around each wait so a request cancelled while
+		// queued fails fast instead of waiting out the rate limit / occupying a
+		// concurrency permit it will never use.
+		throwIfAborted(options.signal);
+		// Pass the signal so a cancellation while queued for a rate-limit token
+		// fails fast instead of waiting out the refill interval.
+		await this.rateLimiter.acquire(options.agentHandle ?? 'default', undefined, options.signal);
+		throwIfAborted(options.signal);
+		// Pass the signal so a cancellation while queued for a concurrency
+		// permit fails fast instead of hanging until an unrelated stream
+		// releases one.
+		await this.requestSemaphore.acquire(options.signal);
+		try {
+			throwIfAborted(options.signal);
+			// Intercept the provider's stream so we can record per-completion
+			// cache metrics in one place. The optimizer is set lazily via
+			// `setCacheOptimizer`; when undefined the interceptor degrades to
+			// a pure passthrough.
+			yield* this.recordOnComplete(this.dispatchProviderStream(options), options);
+		} finally {
+			this.requestSemaphore.release();
+		}
 	}
 
 	private async *dispatchProviderStream(options: LlmRequestOptions): AsyncGenerator<LlmStreamEvent> {
@@ -1682,6 +1785,7 @@ export class LlmClient {
 				systemPrompt: options.systemPrompt ?? 'You are a helpful coding assistant.',
 				messages,
 				modelId: cliModel,
+				signal: options.signal,
 			})) {
 				if (chunk.type === 'text') {
 					fullText += chunk.text;
@@ -1980,15 +2084,21 @@ export class LlmClient {
 
 		// OpenAI takes the system prompt as a leading system message rather
 		// than a top-level field. Build it once so we can prepend cleanly.
+		// Reasoning models (o1/o3/o4/gpt-5) reject the `system` role and expect
+		// `developer` instead.
+		const isReasoning = isOpenAIReasoningModel(options.model);
 		const systemMessage = {
-			role: 'system' as const,
+			role: isReasoning ? ('developer' as const) : ('system' as const),
 			content: options.systemPrompt ?? 'You are a helpful coding assistant.',
 		};
 
 		const supportsImages = modelSupportsImages(options.model);
+		const tokenLimit = options.maxTokens ?? 4096;
 		const body: Record<string, unknown> = {
 			model: modelId,
-			max_tokens: options.maxTokens ?? 4096,
+			// Reasoning models reject `max_tokens` and require
+			// `max_completion_tokens`; classic chat models require `max_tokens`.
+			...(isReasoning ? { max_completion_tokens: tokenLimit } : { max_tokens: tokenLimit }),
 			messages: [
 				systemMessage,
 				...options.messages.map(m => ({ role: m.role, content: serialiseOpenAIContent(m.content, supportsImages) })),
@@ -3342,6 +3452,7 @@ export class LlmClient {
 				systemPrompt: options.systemPrompt ?? 'You are a helpful coding assistant.',
 				messages,
 				modelId: cliModel,
+				signal: options.signal,
 			})) {
 				if (chunk.type === 'text') {
 					fullText += chunk.text;

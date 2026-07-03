@@ -30,6 +30,7 @@ export class FalkorDBClient {
 		}
 		this.client = createClient({
 			socket: { host: this.host, port: this.port },
+			password: process.env.FALKORDB_PASSWORD || undefined,
 		}) as RedisClientType;
 		await this.client.connect();
 	}

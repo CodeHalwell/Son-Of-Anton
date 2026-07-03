@@ -100,9 +100,15 @@ export interface ProviderSaveDeps {
 }
 
 /**
- * Persist credentials for the given provider into the canonical secret store
- * AND mirror them into the matching `sota.*` settings so `LlmClient`'s
- * existing readers see the value without per-call storage probes.
+ * Persist credentials for the given provider into the canonical secret store.
+ *
+ * Secrets (API keys, AWS access/secret keys, session tokens) are written ONLY
+ * to the {@link SecretStore}, never mirrored into `sota.*` settings:
+ * `LlmClient.resolveCredential` already reads the secret store first, so the
+ * old settings mirror was redundant and leaked plaintext keys into
+ * `settings.json` (and, via Settings Sync, the cloud). Non-secret fields
+ * (base URLs, org ids, endpoints, regions, deployment/profile maps) are still
+ * persisted as plain settings.
  *
  * Throws an Error with a user-readable message when required fields are
  * missing — callers should surface it inline rather than swallowing it.
@@ -127,10 +133,6 @@ export async function persistProviderCredentials(
 			const key = trimmed('apiKey');
 			if (!key) { throw new Error('API key is required.'); }
 			await secrets.store(SECRET_KEYS.anthropic, key);
-			// Mirror to settings so LlmClient's existing readers see the value
-			// without needing changes — the secret store is the canonical
-			// location and the setting is the read-through cache.
-			await config.update('apiKey', key);
 			await config.update('anthropicBaseUrl', optAdvanced('baseUrl'));
 			await config.update('anthropicCustomHeaders', optAdvanced('customHeaders'));
 			return;
@@ -139,7 +141,6 @@ export async function persistProviderCredentials(
 			const key = trimmed('apiKey');
 			if (!key) { throw new Error('API key is required.'); }
 			await secrets.store(SECRET_KEYS.openai, key);
-			await config.update('openaiApiKey', key);
 			await config.update('openaiBaseUrl', optAdvanced('baseUrl'));
 			await config.update('openaiOrgId', optAdvanced('orgId'));
 			await config.update('openaiCustomHeaders', optAdvanced('customHeaders'));
@@ -159,7 +160,6 @@ export async function persistProviderCredentials(
 			if (!key) { throw new Error('API key is required.'); }
 			if (!deployment) { throw new Error('Deployment name is required.'); }
 			await secrets.store(SECRET_KEYS.foundry, key);
-			await config.update('foundryApiKey', key);
 			await config.update('foundryEndpoint', endpoint);
 			if (apiVersion) {
 				await config.update('foundryApiVersion', apiVersion);
@@ -221,11 +221,8 @@ export async function persistProviderCredentials(
 			}
 			await secrets.store(SECRET_KEYS.bedrockAccessKeyId, accessKeyId);
 			await secrets.store(SECRET_KEYS.bedrockSecretAccessKey, secretAccessKey);
-			await config.update('bedrockAccessKeyId', accessKeyId);
-			await config.update('bedrockSecretAccessKey', secretAccessKey);
 			if (sessionToken) {
 				await secrets.store(SECRET_KEYS.bedrockSessionToken, sessionToken);
-				await config.update('bedrockSessionToken', sessionToken);
 			}
 			await config.update('bedrockProfile', '');
 			// Persist the named profile entry. Static keys are stored ONLY in
@@ -240,9 +237,9 @@ export async function persistProviderCredentials(
 			const profileName = trimmed('profileName') || 'default';
 			if (!key) { throw new Error('API key is required.'); }
 			await secrets.store(SECRET_KEYS.google, key);
-			await config.update('googleApiKey', key);
+			// The google profile map is a non-secret descriptor; the API key
+			// itself lives only in the secret store, never in the profile entry.
 			await mergeProfileEntry(config, 'googleProfiles', profileName, {
-				apiKey: key,
 				...(project ? { project } : {}),
 			});
 			await config.update('geminiProjectId', optAdvanced('projectId'));
@@ -253,7 +250,6 @@ export async function persistProviderCredentials(
 			const key = trimmed('apiKey');
 			if (!key) { throw new Error('API key is required.'); }
 			await secrets.store(SECRET_KEYS.openRouter, key);
-			await config.update('openRouterApiKey', key);
 			await config.update('openRouterCustomHeaders', optAdvanced('customHeaders'));
 			return;
 		}
@@ -273,7 +269,6 @@ export async function persistProviderCredentials(
 			const baseUrl = trimmed('baseUrl') || 'http://localhost:1234';
 			if (key) {
 				await secrets.store(SECRET_KEYS.lmstudio, key);
-				await config.update('lmstudioApiKey', key);
 			} else {
 				await config.update('lmstudioApiKey', '');
 			}
@@ -285,7 +280,6 @@ export async function persistProviderCredentials(
 			const key = trimmed('apiKey');
 			if (!key) { throw new Error('API key is required.'); }
 			await secrets.store(SECRET_KEYS.deepSeek, key);
-			await config.update('deepSeekApiKey', key);
 			await config.update('deepSeekCustomHeaders', optAdvanced('customHeaders'));
 			return;
 		}
@@ -293,7 +287,6 @@ export async function persistProviderCredentials(
 			const key = trimmed('apiKey');
 			if (!key) { throw new Error('API key is required.'); }
 			await secrets.store(SECRET_KEYS.mistral, key);
-			await config.update('mistralApiKey', key);
 			await config.update('mistralCustomHeaders', optAdvanced('customHeaders'));
 			return;
 		}
@@ -301,7 +294,6 @@ export async function persistProviderCredentials(
 			const key = trimmed('apiKey');
 			if (!key) { throw new Error('API key is required.'); }
 			await secrets.store(SECRET_KEYS.groq, key);
-			await config.update('groqApiKey', key);
 			await config.update('groqCustomHeaders', optAdvanced('customHeaders'));
 			return;
 		}
@@ -309,7 +301,6 @@ export async function persistProviderCredentials(
 			const key = trimmed('apiKey');
 			if (!key) { throw new Error('API key is required.'); }
 			await secrets.store(SECRET_KEYS.cerebras, key);
-			await config.update('cerebrasApiKey', key);
 			await config.update('cerebrasCustomHeaders', optAdvanced('customHeaders'));
 			return;
 		}
@@ -317,7 +308,6 @@ export async function persistProviderCredentials(
 			const key = trimmed('apiKey');
 			if (!key) { throw new Error('API key is required.'); }
 			await secrets.store(SECRET_KEYS.together, key);
-			await config.update('togetherApiKey', key);
 			const customModel = trimmed('customModel');
 			if (customModel) {
 				await config.update('togetherCustomModel', customModel);
@@ -329,7 +319,6 @@ export async function persistProviderCredentials(
 			const key = trimmed('apiKey');
 			if (!key) { throw new Error('API key is required.'); }
 			await secrets.store(SECRET_KEYS.fireworks, key);
-			await config.update('fireworksApiKey', key);
 			const customModel = trimmed('customModel');
 			if (customModel) {
 				await config.update('fireworksCustomModel', customModel);

@@ -5,8 +5,10 @@ import { loadConfig } from './config';
 import { Indexer } from './indexer';
 import { FileWatcher } from './watcher';
 import { IndexerServer } from './server';
+import { requireServiceToken } from '../_shared/auth/dist/index.js';
 
 async function main(): Promise<void> {
+	requireServiceToken('indexer');
 	const config = loadConfig();
 
 	console.log('[main] Son of Anton — Tree-sitter Indexer');

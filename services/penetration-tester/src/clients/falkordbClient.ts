@@ -26,6 +26,7 @@ export class FalkorDbClient {
 	async connect(): Promise<void> {
 		this.client = createClient({
 			socket: { host: this.host, port: this.port },
+			password: process.env.FALKORDB_PASSWORD || undefined,
 		});
 		await this.client.connect();
 	}

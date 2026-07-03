@@ -7,6 +7,7 @@ import path from 'path';
 import { PNG } from 'pngjs';
 import pixelmatch from 'pixelmatch';
 import { ComparisonResult, ComparisonReport, BaselineInfo } from './types';
+import { enforceHttpAuth, requireServiceToken } from '../_shared/auth/dist/index.js';
 
 const PORT = parseInt(process.env.VISUAL_REGRESSION_PORT ?? '8094', 10);
 const BASELINES_DIR = process.env.BASELINES_DIR ?? '/workspace/.son-of-anton/visual-baselines';
@@ -237,6 +238,11 @@ const service = new VisualRegressionService(BASELINES_DIR);
 async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
 	const url = new URL(req.url ?? '/', `http://localhost:${PORT}`);
 
+	// Enforce inter-service auth (exempts /health and /metrics).
+	if (!enforceHttpAuth(req, res)) {
+		return;
+	}
+
 	if (url.pathname === '/health') {
 		res.writeHead(200, { 'Content-Type': 'application/json' });
 		res.end(JSON.stringify({ status: 'ok', service: 'visual-regression' }));
@@ -310,6 +316,8 @@ const httpServer = http.createServer(async (req, res) => {
 		res.end(JSON.stringify({ error: message }));
 	}
 });
+
+requireServiceToken('visual-regression');
 
 service.initialize().then(() => {
 	httpServer.listen(PORT, () => {

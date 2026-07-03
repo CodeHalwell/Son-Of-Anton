@@ -13,6 +13,7 @@ import { AgentManager } from './AgentManager';
 import { BaseAgent } from './BaseAgent';
 import { CiRetryAgent } from './CiRetryAgent';
 import { CodeGeneratorAgent } from './CodeGeneratorAgent';
+import type { IContextSanitiser } from './ContextSanitiser';
 import { DocumentationAgent } from './DocumentationAgent';
 import { E2eTestAgent } from './E2eTestAgent';
 import { MetricsTracker } from './MetricsTracker';
@@ -22,6 +23,7 @@ import { PrGenerationAgent } from './PrGenerationAgent';
 import { ProjectMemory } from './ProjectMemory';
 import { ReviewAgent } from './ReviewAgent';
 import { SecurityScannerAgent } from './SecurityScannerAgent';
+import type { ISpendGuard } from './SessionBudget';
 import { SpecialistMemory } from './SpecialistMemory';
 import { TestWriterAgent } from './TestWriterAgent';
 import { AgentConfig, AgentHandle } from './types';
@@ -182,6 +184,13 @@ export interface AgentStack {
 	 * is tracked for a follow-up phase.
 	 */
 	readonly modelRouter: ModelRouter;
+	/**
+	 * Optional. The session spend kill switch injected via
+	 * `createAgentStack({ spendGuard })`, if any. Surfaced here so hosts (CLI
+	 * `sota` status line, IDE spend panel) can read `snapshot()` without
+	 * holding their own reference. `undefined` when no cap was configured.
+	 */
+	readonly spendGuard?: ISpendGuard;
 	dispose(): void;
 }
 
@@ -225,8 +234,27 @@ export function createAgentStack(deps: {
 	 * lifecycle).
 	 */
 	configStore?: ConfigStore;
+	/**
+	 * Optional. Session spend kill switch (CLAUDE.md: "configurable spend cap
+	 * per session"). When supplied, the single instance is threaded into every
+	 * agent's `BaseAgent` constructor so the orchestrator and its specialists
+	 * debit one shared budget: each LLM call records its usage, each call is
+	 * gated on `assertWithinBudget()`, and the orchestrator refuses to dispatch
+	 * further subtasks once `isExceeded()`. Omit for uncapped sessions (the
+	 * historical default — no behaviour change).
+	 */
+	spendGuard?: ISpendGuard;
+	/**
+	 * Optional. Context sanitiser client (CLAUDE.md / `services/context
+	 * -sanitiser`). When supplied, the single instance is threaded into every
+	 * agent so tool results are scrubbed before they re-enter the LLM prompt —
+	 * MCP (external) results are tagged untrusted, built-in results trusted.
+	 * Omit to leave tool results untouched (the historical default — no
+	 * behaviour change).
+	 */
+	contextSanitiser?: IContextSanitiser;
 }): AgentStack {
-	const { llmClient, mcpClient, agentManager, globalState, workspaceRoot, projectContext, toolExecutionContext, configStore } = deps;
+	const { llmClient, mcpClient, agentManager, globalState, workspaceRoot, projectContext, toolExecutionContext, configStore, spendGuard, contextSanitiser } = deps;
 	const metricsTracker = new MetricsTracker();
 	// H16 — surface a single PromptCacheOptimizer + ModelRouter on the stack
 	// so the CLI (`sota traces`) and IDE ("Show Harness Stats" palette command)
@@ -275,42 +303,42 @@ export function createAgentStack(deps: {
 
 	const codeAgent = new CodeGeneratorAgent(
 		requireConfig('anton-code'),
-		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter,
+		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter, spendGuard, contextSanitiser,
 	);
 
 	const testAgent = new TestWriterAgent(
 		requireConfig('anton-test'),
-		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter,
+		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter, spendGuard, contextSanitiser,
 	);
 
 	const securityAgent = new SecurityScannerAgent(
 		requireConfig('anton-security'),
-		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter,
+		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter, spendGuard, contextSanitiser,
 	);
 
 	const docsAgent = new DocumentationAgent(
 		requireConfig('anton-docs'),
-		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter,
+		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter, spendGuard, contextSanitiser,
 	);
 
 	const e2eTestAgent = new E2eTestAgent(
 		requireConfig('anton-e2e'),
-		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter,
+		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter, spendGuard, contextSanitiser,
 	);
 
 	const ciRetryAgent = new CiRetryAgent(
 		requireConfig('anton-ci'),
-		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter,
+		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter, spendGuard, contextSanitiser,
 	);
 
 	const prGenerationAgent = new PrGenerationAgent(
 		requireConfig('anton-pr'),
-		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter,
+		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter, spendGuard, contextSanitiser,
 	);
 
 	const moderniserAgent = new ModerniserAgent(
 		requireConfig('anton-moderniser'),
-		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter,
+		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter, spendGuard, contextSanitiser,
 	);
 
 	// The review agent has its own identity for metrics/clarity, defined inline
@@ -324,12 +352,12 @@ export function createAgentStack(deps: {
 			maxRetries: 3,
 			slashCommands: [],
 		},
-		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter,
+		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter, spendGuard, contextSanitiser,
 	);
 
 	const orchestrator = new OrchestratorAgent(
 		requireConfig('anton'),
-		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter,
+		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter, spendGuard, contextSanitiser,
 	);
 
 	orchestrator.registerSpecialist(codeAgent);
@@ -374,6 +402,7 @@ export function createAgentStack(deps: {
 		specialistMemory,
 		cacheOptimizer,
 		modelRouter,
+		spendGuard,
 		dispose(): void {
 			specialistMemory.dispose();
 			metricsTracker.persistMetrics(workspaceRoot).catch(err => {

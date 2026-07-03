@@ -9,6 +9,7 @@
 	"scripts": {
 		"build": "tsc -p tsconfig.json",
 		"watch": "tsc -p tsconfig.json --watch",
+		"test": "npm run build && node --test dist/test/*.test.js",
 		"package:macos-arm64": "npm --prefix ../son-of-anton-core run build && npm run build && node scripts/package-macos-arm64.mjs",
 		"package:linux-x64": "npm --prefix ../son-of-anton-core run build && npm run build && node scripts/package-linux-x64.mjs",
 		"package:windows-x64": "npm --prefix ../son-of-anton-core run build && npm run build && node scripts/package-windows-x64.mjs",

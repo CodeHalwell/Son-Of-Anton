@@ -1,15 +1,15 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Son of Anton Contributors. All rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
 import { TemporalMemory } from './TemporalMemory';
 
-describe('TemporalMemory', () => {
+suite('TemporalMemory', () => {
 	let memory: TemporalMemory;
 
-	beforeEach(() => {
+	setup(() => {
 		memory = new TemporalMemory({
 			host: 'localhost',
 			port: 6379,

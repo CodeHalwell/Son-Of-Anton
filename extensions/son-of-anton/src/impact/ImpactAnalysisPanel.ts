@@ -15,6 +15,7 @@
  */
 
 import * as vscode from 'vscode';
+import { randomBytes } from 'crypto';
 
 export interface ImpactNode {
 	id: string;
@@ -125,7 +126,12 @@ export class ImpactAnalysisPanel {
 			documentation: '#95a5a6', // Grey
 		};
 
-		const nodesJson = JSON.stringify(data.nodes.map(n => ({
+		// Escape `<` so a value such as `</script>` in a symbol signature/label
+		// cannot break out of the inline <script> element that embeds this JSON.
+		// `<` round-trips back to `<` when the webview parses the literal.
+		const embed = (value: unknown): string => JSON.stringify(value).replace(/</g, '\\u003c');
+
+		const nodesJson = embed(data.nodes.map(n => ({
 			id: n.id,
 			label: n.label,
 			color: nodeColors[n.type] ?? '#95a5a6',
@@ -136,16 +142,19 @@ export class ImpactAnalysisPanel {
 			depth: n.depth,
 		})));
 
-		const edgesJson = JSON.stringify(data.edges.map(e => ({
+		const edgesJson = embed(data.edges.map(e => ({
 			from: e.source,
 			to: e.target,
 			label: e.relationship,
 		})));
 
+		const nonce = getNonce();
+
 		return `<!DOCTYPE html>
 <html lang="en">
 <head>
 	<meta charset="UTF-8">
+	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
 	<title>Impact Analysis</title>
 	<style>
@@ -270,16 +279,16 @@ export class ImpactAnalysisPanel {
 		</div>
 	</div>
 	<div class="filters">
-		<button class="filter-btn active" onclick="filterNodes('all')">All</button>
-		<button class="filter-btn" onclick="filterNodes('direct')">Direct</button>
-		<button class="filter-btn" onclick="filterNodes('transitive')">Transitive</button>
-		<button class="filter-btn" onclick="filterNodes('test')">Tests</button>
-		<button class="filter-btn" onclick="filterNodes('documentation')">Docs</button>
+		<button class="filter-btn active" data-filter="all">All</button>
+		<button class="filter-btn" data-filter="direct">Direct</button>
+		<button class="filter-btn" data-filter="transitive">Transitive</button>
+		<button class="filter-btn" data-filter="test">Tests</button>
+		<button class="filter-btn" data-filter="documentation">Docs</button>
 	</div>
 	<div class="graph-container">
 		<div class="node-list" id="nodeList"></div>
 	</div>
-	<script>
+	<script nonce="${nonce}">
 		const vscode = acquireVsCodeApi();
 		const nodes = ${nodesJson};
 		const edges = ${edgesJson};
@@ -291,11 +300,12 @@ export class ImpactAnalysisPanel {
 
 			container.innerHTML = filtered.map(node => {
 				const indent = node.depth * 16;
-				return '<div class="node-item" onclick="navigateToFile(\\'' +
-					node.filePath.replace(/'/g, "\\\\'") + '\\')" ' +
+				// filePath is carried on a data-* attribute and read back via the
+				// delegated click handler below, so no code is built into markup.
+				return '<div class="node-item" data-filepath="' + escapeAttr(node.filePath) + '" ' +
 					'title="' + escapeAttr(node.signature || node.label) + '\\n' + escapeAttr(node.filePath) + '">' +
 					'<div class="depth-indent" style="width: ' + indent + 'px"></div>' +
-					'<div class="node-dot" style="background: ' + node.color + '"></div>' +
+					'<div class="node-dot" style="background: ' + escapeAttr(node.color) + '"></div>' +
 					'<div class="node-label">' + escapeHtmlJs(node.label) + '</div>' +
 					'<div class="node-path">' + escapeHtmlJs(node.filePath) + '</div>' +
 					'</div>';
@@ -305,26 +315,29 @@ export class ImpactAnalysisPanel {
 		function filterNodes(filter) {
 			activeFilter = filter;
 			document.querySelectorAll('.filter-btn').forEach(btn => {
-				const btnText = (btn.textContent || '').trim().toLowerCase();
-				const mappedFilter = btn.getAttribute('data-filter') || (btnText === 'docs' ? 'documentation' : btnText);
-				const isActiveByFilter = filter === 'all' ? mappedFilter === 'all' : mappedFilter === filter;
-				const isActiveFallback = btnText.includes(filter) || (filter === 'all' && btnText === 'all');
-				btn.classList.toggle('active', isActiveByFilter || isActiveFallback);
+				btn.classList.toggle('active', btn.dataset.filter === filter);
 			});
 			renderNodes(filter);
 		}
 
-		function navigateToFile(filePath) {
-			vscode.postMessage({ command: 'navigateToFile', filePath: filePath });
-		}
-
 		function escapeHtmlJs(text) {
-			return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+			return String(text == null ? '' : text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 		}
 
 		function escapeAttr(text) {
-			return text.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+			return String(text == null ? '' : text).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 		}
+
+		// Strict CSP blocks inline event handlers, so wire behaviour via listeners.
+		document.querySelectorAll('.filter-btn').forEach(btn => {
+			btn.addEventListener('click', () => filterNodes(btn.dataset.filter || 'all'));
+		});
+		document.getElementById('nodeList').addEventListener('click', (e) => {
+			const item = e.target.closest('.node-item');
+			if (item && item.dataset.filepath) {
+				vscode.postMessage({ command: 'navigateToFile', filePath: item.dataset.filepath });
+			}
+		});
 
 		renderNodes('all');
 	</script>
@@ -348,4 +361,9 @@ function escapeHtml(text: string): string {
 		.replace(/</g, '&lt;')
 		.replace(/>/g, '&gt;')
 		.replace(/"/g, '&quot;');
+}
+
+/** Cryptographically-random nonce for the webview's Content-Security-Policy. */
+function getNonce(): string {
+	return randomBytes(16).toString('hex');
 }
