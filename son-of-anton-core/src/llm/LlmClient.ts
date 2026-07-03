@@ -353,17 +353,19 @@ export function isOpenAIReasoningModel(model: ModelId): boolean {
 /**
  * Whether a model can drive the native agentic tool loop, i.e. its provider
  * serializer round-trips multi-turn `tool_use` / `tool_result` message parts.
- * Only the Anthropic-shaped serializers (Anthropic, Bedrock Converse, Claude
- * Code) accept those parts; the OpenAI-compatible and Gemini serializers reject
- * them, so a tool-driving run against one of those providers fails after the
- * first tool call. Callers should fall back to a single-shot turn when this is
- * `false` rather than entering the loop.
+ * Only the Anthropic (`streamAnthropic`) and Bedrock Converse (`streamBedrock`)
+ * serializers forward the tool definitions and parse `tool_use` back; the
+ * OpenAI-compatible and Gemini serializers reject those parts, so a tool-driving
+ * run against them fails after the first tool call. Claude Code is deliberately
+ * excluded too: its adapter launches the CLI with `--tools '' --max-turns 1`, so
+ * it never emits the `tool-call` events `runToolLoop` waits for and would end a
+ * code-editing request with prose only. Callers should fall back to a single-shot
+ * turn when this is `false` rather than entering the loop.
  */
 export function supportsAgenticToolLoop(model: ModelId): boolean {
 	switch (providerForModel(model)) {
 		case 'anthropic':
 		case 'bedrock':
-		case 'claude-code':
 			return true;
 		default:
 			return false;

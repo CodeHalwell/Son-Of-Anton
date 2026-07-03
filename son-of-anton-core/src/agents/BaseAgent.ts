@@ -6,7 +6,7 @@
 import type { ChatRequestLike, ChatContextLike, ChatStreamLike, CancellationLike } from '../chatStream';
 import type { ConfigStore, ProjectContextProvider } from '../host';
 import { getVoice } from '../chat/personas';
-import { LlmClient, ModelId, type LlmContentPart, type LlmMessage, type LlmStreamComplete, type SystemPromptPart } from '../llm/LlmClient';
+import { LlmClient, ModelId, supportsAgenticToolLoop, type LlmContentPart, type LlmMessage, type LlmStreamComplete, type SystemPromptPart } from '../llm/LlmClient';
 import { detectUncertainty, UNCERTAINTY_ESCALATION_THRESHOLD } from '../llm/confidence';
 import { MODEL_METADATA } from '../llm/modelMetadata';
 import { ModelRouter } from '../llm/ModelRouter';
@@ -1359,9 +1359,15 @@ export abstract class BaseAgent {
 			forceSingleShot,
 		} = options ?? {};
 		const toolExecutionContext = this.toolExecutionContext;
-		if (!toolExecutionContext || forceSingleShot) {
-			// No tool context, or the caller forced it (e.g. the turn's model
-			// can't drive the tool loop) — fall back to single-shot streaming.
+		// The model that will actually serve this turn — an explicit override or
+		// this specialist's (possibly config-pinned) default. Checking it here,
+		// not just the CLI's `--model`, means a pinned default such as
+		// `sota.agents.<handle>.model = "gpt-5"` also degrades to single-shot
+		// instead of crashing the tool loop on the first tool call.
+		const effectiveModel: ModelId = modelOverride ?? this.defaultModel;
+		if (!toolExecutionContext || forceSingleShot || !supportsAgenticToolLoop(effectiveModel)) {
+			// No tool context, the caller forced it, or the model can't drive the
+			// tool loop — fall back to single-shot streaming.
 			return this.runChatTurn(
 				userMessage,
 				token => emit({ type: 'token', token }),

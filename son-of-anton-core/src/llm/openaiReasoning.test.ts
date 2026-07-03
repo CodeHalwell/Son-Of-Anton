@@ -63,10 +63,11 @@ describe('supportsAgenticToolLoop', () => {
 		assert.deepStrictEqual(rejected, []);
 	});
 
-	test('OpenAI-compatible and Gemini providers must fall back to single-shot', () => {
-		// Their serializers reject tool_use / tool_result parts, so a tool-driving
-		// run would fail after the first tool call — callers single-shot instead.
-		const incapable = ['gpt-5', 'gpt-4o', 'o3', 'gemini-2-5-pro', 'foundry-gpt-4o'] as const;
+	test('OpenAI-compatible, Gemini and Claude Code providers must fall back to single-shot', () => {
+		// OpenAI/Gemini serializers reject tool_use / tool_result parts, and the
+		// Claude Code adapter runs with `--tools '' --max-turns 1` so it never
+		// emits tool-call events — all of these single-shot instead of looping.
+		const incapable = ['gpt-5', 'gpt-4o', 'o3', 'gemini-2-5-pro', 'foundry-gpt-4o', 'claude-code-sonnet'] as const;
 		const wronglyCapable = incapable.filter(m => supportsAgenticToolLoop(m));
 		assert.deepStrictEqual(wronglyCapable, []);
 	});
