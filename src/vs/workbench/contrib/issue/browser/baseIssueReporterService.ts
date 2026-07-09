@@ -597,6 +597,24 @@ export class BaseIssueReporterService extends Disposable {
 					}
 				}
 			});
+			(showInfo as HTMLAnchorElement).addEventListener('keydown', (e: KeyboardEvent) => {
+				if (e.key === 'Enter' || e.key === ' ') {
+					e.preventDefault();
+					e.stopPropagation();
+					const label = (<HTMLDivElement>e.target);
+					if (label) {
+						const containingElement = label.parentElement && label.parentElement.parentElement;
+						const info = containingElement && containingElement.lastElementChild;
+						if (info && info.classList.contains('hidden')) {
+							show(info);
+							label.textContent = localize('hide', "hide");
+						} else {
+							hide(info);
+							label.textContent = localize('show', "show");
+						}
+					}
+				}
+			});
 		}
 
 		this.addEventListener('issue-source', 'change', (e: Event) => {
@@ -1103,9 +1121,20 @@ export class BaseIssueReporterService extends Disposable {
 			};
 
 			downloadExtensionDataLink.addEventListener('click', handleLinkClick);
+			const handleLinkKeydown = (e: KeyboardEvent) => {
+				if (e.key === 'Enter' || e.key === ' ') {
+					e.preventDefault();
+					e.stopPropagation();
+					handleLinkClick();
+				}
+			};
+			downloadExtensionDataLink.addEventListener('keydown', handleLinkKeydown);
 
 			this._register({
-				dispose: () => downloadExtensionDataLink.removeEventListener('click', handleLinkClick)
+				dispose: () => {
+					downloadExtensionDataLink.removeEventListener('click', handleLinkClick);
+					downloadExtensionDataLink.removeEventListener('keydown', handleLinkKeydown);
+				}
 			});
 		}
 

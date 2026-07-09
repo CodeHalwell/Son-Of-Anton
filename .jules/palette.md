@@ -32,3 +32,6 @@
 ## 2026-07-01 - Initializing aria-expanded State on Render
 **Learning:** Collapsable components (like toggles) that update `aria-expanded` dynamically must also initialize this attribute during DOM creation. Screen readers rely on the initial markup, so hardcoding or omitting the initial state causes incorrect announcements on page load before any interaction updates it.
 **Action:** When constructing collapsable components with `role="button"`, always set the initial `aria-expanded` attribute dynamically based on the component's starting state (e.g., `'aria-expanded': String(!!initialState)` or `'false'` if always starting closed).
+## 2024-07-28 - Prevent Space Scroll on Custom Links Serving as Buttons
+**Learning:** When using custom `<a>` elements to serve as toggle buttons (like "show/hide" info) or action buttons (like "Download Data") in dynamically generated views (like the issue reporter), these elements will only be accessible by mouse by default.
+**Action:** Always include `role="button"` and `tabIndex="0"` for these `<a>` elements in the HTML structure, and explicitly add `keydown` event listeners for 'Enter' and 'Space' that trigger the desired action. Be sure to call `e.preventDefault()` on keydown to prevent the default page scroll that 'Space' normally triggers.
