@@ -39,3 +39,6 @@
 ## 2026-06-22 - Optimize array intersections in configuration models
 **Learning:** When comparing configuration models, checking if a key exists in an array using `Array.prototype.indexOf()` or `Array.prototype.includes()` inside an `Array.prototype.filter()` callback creates a nested iteration bottleneck with time complexity O(N*M).
 **Action:** Convert the target array to a `Set` and use `Set.has()` instead to reduce time complexity to O(N+M), significantly speeding up configuration comparisons for large numbers of settings.
+## 2024-07-12 - O(N*M) lookups in Extension recursion
+**Learning:** Checking for elements in an array within recursive calls (like in `extensionWorkbenchService.ts` and `extensionEnablementService.ts`) using `Array.prototype.indexOf()` inside `Array.prototype.filter()` closures causes nested iterations and blocks the main thread with O(N*M) complexity when computing dependencies.
+**Action:** When filtering tracking arrays (e.g. `checked` items) in recursive functions, convert the array to a `Set` immediately inside the function scope and use `Set.has()` to drop complexity to O(N+M), making sure to `add()` to the Set when `push()`ing to the original array.
