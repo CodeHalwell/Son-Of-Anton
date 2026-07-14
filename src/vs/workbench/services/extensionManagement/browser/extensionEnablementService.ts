@@ -276,13 +276,16 @@ export class ExtensionEnablementService extends Disposable implements IWorkbench
 			return [];
 		}
 
-		const toCheck = extensions.filter(e => checked.indexOf(e) === -1);
+		// ⚡ Bolt: Use Set for O(N+M) lookups instead of O(N*M) with Array.indexOf
+		const checkedSet = new Set(checked);
+		const toCheck = extensions.filter(e => !checkedSet.has(e));
 		if (!toCheck.length) {
 			return [];
 		}
 
 		for (const extension of toCheck) {
 			checked.push(extension);
+			checkedSet.add(extension);
 		}
 
 		const extensionsToEnable: IExtension[] = [];
