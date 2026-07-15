@@ -70,9 +70,9 @@ export class HoverAction extends Disposable {
 
 		this.actionContainer = dom.append(parent, $('div.action-container'));
 		this.actionContainer.setAttribute('tabindex', '0');
+		this.actionContainer.setAttribute('role', 'button');
 
 		this.action = dom.append(this.actionContainer, $('a.action'));
-		this.action.setAttribute('role', 'button');
 		if (actionOptions.iconClass) {
 			const iconElement = dom.append(this.action, $(`span.icon`));
 			iconElement.classList.add(...actionOptions.iconClass.split(' '));
