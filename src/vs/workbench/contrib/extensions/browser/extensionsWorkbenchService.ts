@@ -3047,13 +3047,15 @@ export class ExtensionsWorkbenchService extends Disposable implements IExtension
 	}
 
 	private getExtensionsRecursively(extensions: IExtension[], installed: IExtension[], enablementState: EnablementState, options: { dependencies: boolean; pack: boolean }, checked: IExtension[] = []): IExtension[] {
-		const toCheck = extensions.filter(e => checked.indexOf(e) === -1);
+		const checkedSet = new Set(checked);
+		const toCheck = extensions.filter(e => !checkedSet.has(e));
 		if (toCheck.length) {
 			for (const extension of toCheck) {
 				checked.push(extension);
+				checkedSet.add(extension);
 			}
 			const extensionsToEanbleOrDisable = installed.filter(i => {
-				if (checked.indexOf(i) !== -1) {
+				if (checkedSet.has(i)) {
 					return false;
 				}
 				const enable = enablementState === EnablementState.EnabledGlobally || enablementState === EnablementState.EnabledWorkspace;

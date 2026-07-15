@@ -39,3 +39,6 @@
 ## 2026-06-22 - Optimize array intersections in configuration models
 **Learning:** When comparing configuration models, checking if a key exists in an array using `Array.prototype.indexOf()` or `Array.prototype.includes()` inside an `Array.prototype.filter()` callback creates a nested iteration bottleneck with time complexity O(N*M).
 **Action:** Convert the target array to a `Set` and use `Set.has()` instead to reduce time complexity to O(N+M), significantly speeding up configuration comparisons for large numbers of settings.
+## 2024-05-31 - O(N*M) lookups in extension enablement recursive loops
+**Learning:** Checking for element presence with `Array.prototype.indexOf(e) === -1` inside an `Array.prototype.filter()` callback over the extensions array inside `getExtensionsRecursively` creates an O(N*M) time complexity bottleneck. This occurs in extension enable/disable logic because it searches an ever-growing array linearly.
+**Action:** When filtering a large array against another large array that's passed around for recursive checks, always create a `Set` (e.g. `const checkedSet = new Set(checked)`) and use `checkedSet.has(e)` inside the `.filter()` loop, also keeping the Set synchronized when pushing to the array, instead of `indexOf`. This reduces time complexity to O(N+M).
