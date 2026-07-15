@@ -41,3 +41,8 @@
 **Vulnerability:** Found `db.query` calls in `services/mcp-gateway/src/tools/memoryQuery.ts` where values like `params.type`, `id`, and `now` were being interpolated directly into Cypher query strings instead of parameterized. Wait, what about labels? Cypher graph labels like `(:Decision)` cannot be parameterized normally in Neo4j/FalkorDB.
 **Learning:** In FalkorDB/Neo4j, while values should always be parameterized (e.g. `$content`), node labels (like `:${params.type}`) cannot be parameterized via query parameters. If a label is user-controlled and directly interpolated, it allows Cypher injection.
 **Prevention:** For node labels or property keys that cannot be parameterized in Cypher, always validate them against a strict predefined allowlist before interpolation to prevent Cypher injection vulnerabilities. Always use query parameters for standard values like `$id` and `$createdAt`.
+
+## 2026-06-03 - Untrusted Search Path Vulnerability in WSL profiles detection
+**Vulnerability:** Found `child_process.exec` being used to execute `wsl.exe` in `src/vs/platform/terminal/node/terminalProfiles.ts` without providing a full path, even though a validated `wslPath` parameter (e.g., `C:\Windows\System32\wsl.exe`) was passed into the function. This could allow an attacker to place a malicious `wsl.exe` in a directory earlier in the system PATH and have it executed instead.
+**Learning:** Using `child_process.exec` with a hardcoded binary name like `wsl.exe` ignores path resolution safety and relies entirely on the system's PATH variable, which can be manipulated.
+**Prevention:** Always use `child_process.execFile` and pass the absolute path (e.g., `wslPath`) to the binary instead of relying on the shell's PATH resolution.
