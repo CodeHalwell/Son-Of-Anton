@@ -32,3 +32,6 @@
 ## 2026-07-01 - Initializing aria-expanded State on Render
 **Learning:** Collapsable components (like toggles) that update `aria-expanded` dynamically must also initialize this attribute during DOM creation. Screen readers rely on the initial markup, so hardcoding or omitting the initial state causes incorrect announcements on page load before any interaction updates it.
 **Action:** When constructing collapsable components with `role="button"`, always set the initial `aria-expanded` attribute dynamically based on the component's starting state (e.g., `'aria-expanded': String(!!initialState)` or `'false'` if always starting closed).
+## 2024-07-16 - ARIA attributes on nested interactive elements
+**Learning:** When creating custom interactive elements with a focusable container (`tabindex="0"`) and an inner clickable element (e.g., `<a>`), screen readers announce the container that receives focus. If the `role` or `aria-label` is on the inner element, it will not be announced.
+**Action:** Always place the ARIA role (e.g., `role="button"`) and accessibility labels (`aria-label`) on the container element that receives keyboard focus, not the inner element.
