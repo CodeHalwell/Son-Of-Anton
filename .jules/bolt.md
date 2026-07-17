@@ -39,3 +39,6 @@
 ## 2026-06-22 - Optimize array intersections in configuration models
 **Learning:** When comparing configuration models, checking if a key exists in an array using `Array.prototype.indexOf()` or `Array.prototype.includes()` inside an `Array.prototype.filter()` callback creates a nested iteration bottleneck with time complexity O(N*M).
 **Action:** Convert the target array to a `Set` and use `Set.has()` instead to reduce time complexity to O(N+M), significantly speeding up configuration comparisons for large numbers of settings.
+## 2024-06-25 - O(N*M) lookups during recursive extension enablement checks
+**Learning:** Found O(N*M) bottleneck in `getExtensionsRecursively` and `getExtensionsToEnableRecursively` where recursive arrays of `checked` extensions were continually scanned via `checked.indexOf(e)` inside `.filter()` operations. When a user has a highly nested extension pack or dependencies tree, this synchronously blocks the main thread.
+**Action:** When performing recursive inclusion validation against an accumulating tracking array, initialize a local `Set` from the tracker array to allow O(1) `Set.has()` checks within the `.filter()`. Ensure both the source array and the `Set` are synchronously updated when adding new elements to maintain state accurately.
