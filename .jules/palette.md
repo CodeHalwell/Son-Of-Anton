@@ -35,3 +35,9 @@
 ## 2024-07-28 - Prevent Space Scroll on Custom Links Serving as Buttons
 **Learning:** When using custom `<a>` elements to serve as toggle buttons (like "show/hide" info) or action buttons (like "Download Data") in dynamically generated views (like the issue reporter), these elements will only be accessible by mouse by default.
 **Action:** Always include `role="button"` and `tabIndex="0"` for these `<a>` elements in the HTML structure, and explicitly add `keydown` event listeners for 'Enter' and 'Space' that trigger the desired action. Be sure to call `e.preventDefault()` on keydown to prevent the default page scroll that 'Space' normally triggers.
+## 2024-07-28 - Missing ARIA role for custom interactive links
+**Learning:** Found a custom interactive link element (`SearchLinkButton` in search view using `a.pointer` with `tabindex: 0`) that acts entirely as a button (handling `click`, `Enter`, and `Space` events) but was missing the `role="button"` attribute. Without this, screen readers identify the element as a generic link or interactive element, causing confusion about its behavior.
+**Action:** When creating custom interactive elements (like `a` tags) that behave as buttons and handle keyboard interactivity, ensure they have `role="button"` applied during element creation so screen readers accurately announce their function.
+## 2024-07-18 - ARIA roles on focusable containers
+**Learning:** Screen readers announce interactive elements based on their focusable node. When creating custom interactive elements with a focusable container (`tabindex="0"`) and an inner clickable element (like `<a>`), placing the ARIA role (`role="button"`) and label on the inner element causes screen readers to miss them.
+**Action:** Always place the ARIA role and `aria-label` attributes on the element that receives keyboard focus (`tabindex="0"`).
