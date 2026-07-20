@@ -54,9 +54,9 @@ export class TerminalProfileService extends Disposable implements ITerminalProfi
 		return this._availableProfiles || [];
 	}
 	get contributedProfiles(): IExtensionTerminalProfile[] {
-		const userConfiguredProfileNames = this._availableProfiles?.map(p => p.profileName) || [];
+		const userConfiguredProfileNames = new Set(this._availableProfiles?.map(p => p.profileName) || []);
 		// Allow a user defined profile to override an extension contributed profile with the same name
-		return this._contributedProfiles?.filter(p => !userConfiguredProfileNames.includes(p.title)) || [];
+		return this._contributedProfiles?.filter(p => !userConfiguredProfileNames.has(p.title)) || [];
 	}
 
 	constructor(
@@ -168,14 +168,14 @@ export class TerminalProfileService extends Disposable implements ITerminalProfi
 
 	private async _updateContributedProfiles(): Promise<boolean> {
 		const platformKey = await this.getPlatformKey();
-		const excludedContributedProfiles: string[] = [];
+		const excludedContributedProfiles = new Set<string>();
 		const configProfiles: { [key: string]: ITerminalExecutable | null | undefined } = this._configurationService.getValue(TerminalSettingPrefix.Profiles + platformKey);
 		for (const [profileName, value] of Object.entries(configProfiles)) {
 			if (value === null) {
-				excludedContributedProfiles.push(profileName);
+				excludedContributedProfiles.add(profileName);
 			}
 		}
-		const filteredContributedProfiles = Array.from(this._terminalContributionService.terminalProfiles.filter(p => !excludedContributedProfiles.includes(p.title)));
+		const filteredContributedProfiles = Array.from(this._terminalContributionService.terminalProfiles.filter(p => !excludedContributedProfiles.has(p.title)));
 		const contributedProfilesChanged = !arrays.equals(filteredContributedProfiles, this._contributedProfiles, contributedProfilesEqual);
 		this._contributedProfiles = filteredContributedProfiles;
 		return contributedProfilesChanged;
