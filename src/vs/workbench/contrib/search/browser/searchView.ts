@@ -2451,7 +2451,7 @@ class SearchLinkButton extends Disposable {
 
 	constructor(label: string, handler: (e: dom.EventLike) => unknown, hoverService: IHoverService, tooltip?: string) {
 		super();
-		this.element = $('a.pointer', { tabindex: 0 }, label);
+		this.element = $('a.pointer', { tabindex: 0, role: 'button' }, label);
 		this._register(hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), this.element, tooltip));
 		this.addEventHandlers(handler);
 	}
