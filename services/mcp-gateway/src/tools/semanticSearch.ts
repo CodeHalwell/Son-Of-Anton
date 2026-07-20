@@ -3,6 +3,7 @@
 
 import { FalkorDBClient } from '../clients/falkordb';
 import { QdrantClient, SemanticSearchResult } from '../clients/qdrant';
+import { DEFAULT_RETRIEVAL_WEIGHTS, RetrievalWeights } from '../retrievalWeights';
 
 export interface SemanticSearchInput {
 	query: string;
@@ -19,7 +20,8 @@ export async function semanticSearch(
 	qdrant: QdrantClient,
 	db: FalkorDBClient,
 	input: SemanticSearchInput,
-	embedQuery: (text: string) => Promise<number[]>
+	embedQuery: (text: string) => Promise<number[]>,
+	weights: RetrievalWeights = DEFAULT_RETRIEVAL_WEIGHTS
 ): Promise<RankedSearchResult[]> {
 	const maxResults = Math.min(input.maxResults ?? 10, 50);
 
@@ -34,7 +36,7 @@ export async function semanticSearch(
 	const results = await qdrant.search(queryVector, maxResults * 2, filter);
 
 	// Fetch structural importance scores from FalkorDB
-	const rankedResults = await addStructuralScores(db, results);
+	const rankedResults = await addStructuralScores(db, results, weights);
 
 	// Sort by combined score (semantic similarity + structural importance)
 	rankedResults.sort((a, b) => b.relevanceScore - a.relevanceScore);
@@ -44,7 +46,8 @@ export async function semanticSearch(
 
 async function addStructuralScores(
 	db: FalkorDBClient,
-	results: SemanticSearchResult[]
+	results: SemanticSearchResult[],
+	weights: RetrievalWeights
 ): Promise<RankedSearchResult[]> {
 	const ranked: RankedSearchResult[] = [];
 
@@ -118,8 +121,8 @@ async function addStructuralScores(
 			// Normalize: log scale to prevent highly-referenced symbols from dominating
 			structuralImportance = Math.log2(1 + inDegree) / 10;
 		}
-		// Combined score: 80% semantic + 20% structural
-		const relevanceScore = result.score * 0.8 + structuralImportance * 0.2;
+		// Combined score: per-agent-configurable split between semantic and structural signals.
+		const relevanceScore = result.score * weights.semantic + structuralImportance * weights.structural;
 
 		ranked.push({
 			...result,

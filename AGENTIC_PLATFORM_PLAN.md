@@ -628,7 +628,7 @@ To be tackled after Sprint 3 lands, in roughly this order:
 - [x] **F-1** Real embedding provider (Voyage / local). _(shared `services/_lib/embeddings` module with `voyage`, `openai`, and `local` OpenAI-compatible providers, vendored into both the indexer and mcp-gateway so document and query vectors always come from the same model; the gateway's sin-hash query placeholder is gone. Configure via `EMBEDDING_*` env vars — see `.env.example`.)_
 - [x] **F-4** Context sanitiser on the hot path. _(sanitiser core extracted to `services/_shared/sanitiser` and applied in-process to every mcp-gateway tool result — invisible-Unicode stripped, injection patterns surfaced as visible advisories.)_
 - [x] **F-2** Embedding cache by content hash. _(vectors cached by content hash so renames/moves reuse embeddings; also fixed `writeFile` dropping unchanged chunks' points on partial file updates.)_
-- [ ] **F-3** Per-agent retrieval ranking weights.
+- [x] **F-3** Per-agent retrieval ranking weights.
 - [ ] **F-11** mcp-gateway request coalescing.
 - [ ] **F-17** Per-hunk accept/reject in changes view.
 - [ ] **F-18** Command-palette entries.
