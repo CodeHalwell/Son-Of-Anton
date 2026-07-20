@@ -13,6 +13,7 @@ import { findReferences } from './tools/findReferences';
 import { dependencyTraversal } from './tools/dependencyTraversal';
 import { impactAnalysis } from './tools/impactAnalysis';
 import { semanticSearch } from './tools/semanticSearch';
+import { loadRetrievalWeightsConfig, resolveRetrievalWeights } from './retrievalWeights';
 import { fileSummary } from './tools/fileSummary';
 import { projectOverview } from './tools/projectOverview';
 import { memoryQuery, memoryRecord, memoryHistory } from './tools/memoryQuery';
@@ -40,6 +41,10 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 	if (embeddingProvider.name === 'mock') {
 		console.warn('[mcp-gateway] Using MOCK query embeddings — semantic_search relevance is meaningless. Set EMBEDDING_PROVIDER=voyage|openai|local for real vectors.');
 	}
+
+	// Per-agent hybrid retrieval scoring weights (F-3) — loaded once and
+	// resolved per call from the calling agent's handle.
+	const retrievalWeightsConfig = loadRetrievalWeightsConfig();
 
 	// --- symbol_lookup ---
 	// @ts-ignore TS2589: MCP SDK z.enum() schema inference hits TypeScript's instantiation depth limit
@@ -146,7 +151,8 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 		query: string;
 		maxResults?: number;
 		language?: string;
-	}> = async function* ({ query, maxResults, language }) {
+		agentRole?: string;
+	}> = async function* ({ query, maxResults, language, agentRole }) {
 		yield { kind: 'progress', message: `Embedding query: "${query.slice(0, 60)}"` };
 
 		// The vector size MUST match the indexer's stored vectors
@@ -156,8 +162,10 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 			return vector;
 		};
 
+		const weights = resolveRetrievalWeights(retrievalWeightsConfig, agentRole);
+
 		yield { kind: 'progress', message: 'Searching repository' };
-		const results = await semanticSearch(qdrant, db, { query, maxResults, language }, embedQuery);
+		const results = await semanticSearch(qdrant, db, { query, maxResults, language }, embedQuery, weights);
 
 		// Stream results in batches of 10 so callers see progress on large result sets.
 		const batchSize = 10;
@@ -175,6 +183,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 			query: z.string().describe('Natural language search query'),
 			maxResults: z.number().min(1).max(50).optional().describe('Maximum results to return (default 10)'),
 			language: z.string().optional().describe('Filter results by programming language'),
+			agentRole: z.string().optional().describe('Calling agent handle (e.g. "anton-code"). Selects per-agent semantic/structural ranking weights from .son-of-anton/retrieval-weights.json; falls back to the "*" entry when unset or unmatched.'),
 		},
 		withSanitisedResult('semantic_search', wrapStreamingTool('semantic_search', semanticSearchStreaming)
 	));

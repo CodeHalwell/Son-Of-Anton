@@ -928,11 +928,18 @@ export class OrchestratorAgent extends BaseAgent {
 		// Without the guard the diagnostic string ends up as "Relevant
 		// Files" context in the planning prompt.
 		try {
+			// `limit` and `maxResults` are both sent because the 'code-graph'
+			// server name resolves to one of two backends depending on
+			// sota.codeGraph.backend: the embedded services/code-graph/mcp-server
+			// (Rust engine, reads `limit`) or services/mcp-gateway's hybrid
+			// FalkorDB/Qdrant scorer (reads `maxResults`, and is the only one
+			// that honours `agentRole` — see F-3 follow-up note in
+			// AGENTIC_PLATFORM_PLAN.md).
 			const searchResult = await this.callMcpTool(
 				taskId,
 				'code-graph',
 				'semantic_search',
-				{ query: request, limit: 5 },
+				{ query: request, limit: 5, maxResults: 5, agentRole: this.config.handle },
 			);
 			const text = this.mcpContentOrEmpty(searchResult);
 			sections.push(text.length > 0 ? '## Relevant Files\n' + text : fallback);
