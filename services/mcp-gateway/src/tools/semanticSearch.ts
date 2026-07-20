@@ -33,6 +33,11 @@ export async function semanticSearch(
 		}
 		: undefined;
 
+	// Candidate pool is sized off semantic similarity alone, so a
+	// structural-heavy `weights` (F-3) can only re-rank within this window —
+	// a highly-referenced symbol Qdrant didn't surface here is never a
+	// candidate, regardless of configured structural weight. Broadening the
+	// pool with graph-selected candidates is tracked as F-29.
 	const results = await qdrant.search(queryVector, maxResults * 2, filter);
 
 	// Fetch structural importance scores from FalkorDB
