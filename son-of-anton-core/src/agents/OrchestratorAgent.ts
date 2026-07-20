@@ -932,7 +932,7 @@ export class OrchestratorAgent extends BaseAgent {
 				taskId,
 				'code-graph',
 				'semantic_search',
-				{ query: request, limit: 5, agentRole: this.config.handle },
+				{ query: request, maxResults: 5, agentRole: this.config.handle },
 			);
 			const text = this.mcpContentOrEmpty(searchResult);
 			sections.push(text.length > 0 ? '## Relevant Files\n' + text : fallback);

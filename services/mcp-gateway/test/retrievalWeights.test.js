@@ -34,4 +34,27 @@ describe('resolveRetrievalWeights', () => {
 		assert.deepStrictEqual(resolveRetrievalWeights(config, 'anton-review'), { semantic: 0.6, structural: 0.4 });
 		assert.deepStrictEqual(resolveRetrievalWeights(config, 'anton-code'), { semantic: 0.8, structural: 0.2 });
 	});
+
+	test('fills in a partial config entry from the default instead of leaving a field undefined', () => {
+		const config = { 'anton-code': { semantic: 0.5 } };
+		assert.deepStrictEqual(
+			resolveRetrievalWeights(config, 'anton-code'),
+			{ semantic: 0.5, structural: DEFAULT_RETRIEVAL_WEIGHTS.structural }
+		);
+	});
+
+	test('falls back to the default for a non-numeric field instead of propagating a value that would NaN the score', () => {
+		const config = { 'anton-code': { semantic: 'high', structural: 0.4 } };
+		assert.deepStrictEqual(
+			resolveRetrievalWeights(config, 'anton-code'),
+			{ semantic: DEFAULT_RETRIEVAL_WEIGHTS.semantic, structural: 0.4 }
+		);
+	});
+
+	test('falls back to the default entirely when the role entry is not an object', () => {
+		assert.deepStrictEqual(
+			resolveRetrievalWeights({ 'anton-code': null }, 'anton-code'),
+			DEFAULT_RETRIEVAL_WEIGHTS
+		);
+	});
 });

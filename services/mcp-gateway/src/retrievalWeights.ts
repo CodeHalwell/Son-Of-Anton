@@ -64,13 +64,26 @@ export function loadRetrievalWeightsConfig(): RetrievalWeightsConfig {
 	return {};
 }
 
+/** True for finite numbers only — excludes `undefined`, `NaN`, strings, `null`, etc. */
+function isFiniteNumber(value: unknown): value is number {
+	return typeof value === 'number' && Number.isFinite(value);
+}
+
 /**
  * Resolve the weights for a calling agent: exact handle match, then the
- * `"*"` catch-all, then the hard-coded default.
+ * `"*"` catch-all, then the hard-coded default. Validates field-by-field
+ * against `DEFAULT_RETRIEVAL_WEIGHTS` — config files are untyped JSON on
+ * disk, so a missing, non-numeric, or malformed entry (e.g. only `semantic`
+ * set, or `"structural": "high"`) must not silently turn the hybrid score
+ * into `NaN`.
  */
 export function resolveRetrievalWeights(
 	config: RetrievalWeightsConfig,
 	agentRole: string | undefined,
 ): RetrievalWeights {
-	return (agentRole ? config[agentRole] : undefined) ?? config['*'] ?? DEFAULT_RETRIEVAL_WEIGHTS;
+	const resolved = (agentRole ? config[agentRole] : undefined) ?? config['*'];
+	return {
+		semantic: isFiniteNumber(resolved?.semantic) ? resolved.semantic : DEFAULT_RETRIEVAL_WEIGHTS.semantic,
+		structural: isFiniteNumber(resolved?.structural) ? resolved.structural : DEFAULT_RETRIEVAL_WEIGHTS.structural,
+	};
 }
