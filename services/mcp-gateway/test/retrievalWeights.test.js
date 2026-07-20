@@ -4,12 +4,16 @@
 // Tests for per-agent hybrid retrieval scoring weights (F-3).
 // Runs against the esbuild output in dist/ — `npm test` builds first.
 
-const { describe, test } = require('node:test');
+const { describe, test, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
 const {
 	DEFAULT_RETRIEVAL_WEIGHTS,
 	resolveRetrievalWeights,
+	loadRetrievalWeightsConfig,
 } = require('../dist/retrievalWeights.js');
 
 describe('resolveRetrievalWeights', () => {
@@ -56,5 +60,56 @@ describe('resolveRetrievalWeights', () => {
 			resolveRetrievalWeights({ 'anton-code': null }, 'anton-code'),
 			DEFAULT_RETRIEVAL_WEIGHTS
 		);
+	});
+});
+
+describe('loadRetrievalWeightsConfig', () => {
+	let tmpDir;
+	let originalEnv;
+	let originalCwd;
+
+	beforeEach(() => {
+		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'soa-retrieval-weights-test-'));
+		originalEnv = process.env.RETRIEVAL_WEIGHTS_CONFIG;
+		originalCwd = process.cwd();
+		// Isolate from the real repo-root `.son-of-anton/retrieval-weights.json` —
+		// otherwise the loader's cwd-relative candidates would fall through to it
+		// once the explicit (malformed) path is rejected, making these tests
+		// depend on that file's actual committed contents.
+		process.chdir(tmpDir);
+	});
+
+	afterEach(() => {
+		process.chdir(originalCwd);
+		process.env.RETRIEVAL_WEIGHTS_CONFIG = originalEnv;
+		fs.rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	test('rejects a non-object JSON root (e.g. `null`) instead of returning it as the config', () => {
+		const configPath = path.join(tmpDir, 'retrieval-weights.json');
+		fs.writeFileSync(configPath, 'null');
+		process.env.RETRIEVAL_WEIGHTS_CONFIG = configPath;
+
+		const config = loadRetrievalWeightsConfig();
+
+		assert.deepStrictEqual(config, {});
+		// And the empty fallback must not throw when resolved, unlike indexing `null`.
+		assert.deepStrictEqual(resolveRetrievalWeights(config, 'anton-code'), DEFAULT_RETRIEVAL_WEIGHTS);
+	});
+
+	test('rejects a JSON array root', () => {
+		const configPath = path.join(tmpDir, 'retrieval-weights.json');
+		fs.writeFileSync(configPath, '[]');
+		process.env.RETRIEVAL_WEIGHTS_CONFIG = configPath;
+
+		assert.deepStrictEqual(loadRetrievalWeightsConfig(), {});
+	});
+
+	test('loads a well-formed config from the explicit path', () => {
+		const configPath = path.join(tmpDir, 'retrieval-weights.json');
+		fs.writeFileSync(configPath, JSON.stringify({ '*': { semantic: 0.7, structural: 0.3 } }));
+		process.env.RETRIEVAL_WEIGHTS_CONFIG = configPath;
+
+		assert.deepStrictEqual(loadRetrievalWeightsConfig(), { '*': { semantic: 0.7, structural: 0.3 } });
 	});
 });

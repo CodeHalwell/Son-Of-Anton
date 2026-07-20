@@ -39,6 +39,11 @@ export type RetrievalWeightsConfig = Record<string, RetrievalWeights>;
 /** Weights matching the hybrid score's historical, unconfigured behaviour. */
 export const DEFAULT_RETRIEVAL_WEIGHTS: RetrievalWeights = { semantic: 0.8, structural: 0.2 };
 
+/** True for plain JSON objects — excludes `null`, arrays, and primitives. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 export function loadRetrievalWeightsConfig(): RetrievalWeightsConfig {
 	const explicitPath = process.env.RETRIEVAL_WEIGHTS_CONFIG;
 	const candidates = [
@@ -50,7 +55,11 @@ export function loadRetrievalWeightsConfig(): RetrievalWeightsConfig {
 	for (const path of candidates) {
 		if (existsSync(path)) {
 			try {
-				return JSON.parse(readFileSync(path, 'utf-8')) as RetrievalWeightsConfig;
+				const parsed: unknown = JSON.parse(readFileSync(path, 'utf-8'));
+				if (!isPlainObject(parsed)) {
+					throw new Error(`expected a JSON object at the root, got ${Array.isArray(parsed) ? 'an array' : typeof parsed}`);
+				}
+				return parsed as RetrievalWeightsConfig;
 			} catch (err) {
 				if (path === explicitPath) {
 					// Explicit path must be readable — surface this loudly.
