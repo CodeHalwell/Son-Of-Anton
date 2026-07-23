@@ -276,7 +276,9 @@ export class ExtensionEnablementService extends Disposable implements IWorkbench
 			return [];
 		}
 
-		const toCheck = extensions.filter(e => checked.indexOf(e) === -1);
+		// ⚡ Bolt: Convert `checked` array to Set for O(1) lookups to avoid O(N*M) nested iterations during recursive enablement checks.
+		const checkedSet = new Set(checked);
+		const toCheck = extensions.filter(e => !checkedSet.has(e));
 		if (!toCheck.length) {
 			return [];
 		}
