@@ -35,6 +35,7 @@ export namespace NotebookEditorExtensionsRegistry {
 	}
 
 	export function getSomeEditorContributions(ids: string[]): INotebookEditorContributionDescription[] {
-		return EditorContributionRegistry.INSTANCE.getEditorContributions().filter(c => ids.indexOf(c.id) >= 0);
+		const idsSet = new Set(ids);
+		return EditorContributionRegistry.INSTANCE.getEditorContributions().filter(c => idsSet.has(c.id));
 	}
 }
