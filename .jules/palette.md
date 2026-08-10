@@ -41,3 +41,6 @@
 ## 2024-07-18 - ARIA roles on focusable containers
 **Learning:** Screen readers announce interactive elements based on their focusable node. When creating custom interactive elements with a focusable container (`tabindex="0"`) and an inner clickable element (like `<a>`), placing the ARIA role (`role="button"`) and label on the inner element causes screen readers to miss them.
 **Action:** Always place the ARIA role and `aria-label` attributes on the element that receives keyboard focus (`tabindex="0"`).
+## 2024-08-10 - Dynamic aria-expanded initialization
+**Learning:** Collapsable UI components with `role="button"` shouldn't blindly hardcode `aria-expanded="false"`. They must evaluate the initial state to ensure screen readers announce the accurate state on load.
+**Action:** Use `String(!!initialState)` or a dynamically evaluated method instead of hardcoding `'false'` when initializing `aria-expanded`.
