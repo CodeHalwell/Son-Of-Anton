@@ -6,7 +6,7 @@
 /**
  * This code is also used by standalone cli's. Avoid adding dependencies to keep the size of the cli small.
  */
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { isWindows } from '../common/platform.js';
 
 const windowsTerminalEncodings = {
@@ -59,7 +59,8 @@ export async function resolveTerminalEncoding(verbose?: boolean): Promise<string
 				console.log('Running "chcp" to detect terminal encoding...');
 			}
 
-			exec('chcp', (err, stdout, stderr) => {
+			// Security: use execFile instead of exec to avoid spawning a shell
+			execFile('chcp.com', (err, stdout, stderr) => {
 				if (stdout) {
 					if (verbose) {
 						console.log(`Output from "chcp" command is: ${stdout}`);
@@ -84,7 +85,8 @@ export async function resolveTerminalEncoding(verbose?: boolean): Promise<string
 				console.log('Running "locale charmap" to detect terminal encoding...');
 			}
 
-			exec('locale charmap', (err, stdout, stderr) => resolve(stdout));
+			// Security: use execFile instead of exec to avoid spawning a shell
+			execFile('locale', ['charmap'], (err, stdout, stderr) => resolve(stdout));
 		});
 	}
 
