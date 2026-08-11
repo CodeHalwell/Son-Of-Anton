@@ -93,7 +93,7 @@ function findSpecificGit(path: string, onValidate: (path: string) => boolean): P
 
 function findGitDarwin(onValidate: (path: string) => boolean): Promise<IGit> {
 	return new Promise<IGit>((c, e) => {
-		cp.exec('which git', (err, gitPathBuffer) => {
+		cp.execFile('which', ['git'], (err, gitPathBuffer) => {
 			if (err) {
 				return e(new Error(`Executing "which git" failed: ${err.message}`));
 			}
@@ -106,7 +106,7 @@ function findGitDarwin(onValidate: (path: string) => boolean): Promise<IGit> {
 				}
 
 				// make sure git executes
-				cp.exec('git --version', (err, stdout) => {
+				cp.execFile(path, ['--version'], (err, stdout) => {
 
 					if (err) {
 						return e(new Error(`Executing "git --version" failed: ${err.message}`));
@@ -121,8 +121,8 @@ function findGitDarwin(onValidate: (path: string) => boolean): Promise<IGit> {
 			}
 
 			// must check if XCode is installed
-			cp.exec('xcode-select -p', (err) => {
-				if (err && err.code === 2) {
+			cp.execFile('xcode-select', ['-p'], (err) => {
+				if (err && (err as any).code === 2) {
 					// git is not installed, and launching /usr/bin/git
 					// will prompt the user to install it
 
