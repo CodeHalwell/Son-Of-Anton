@@ -276,7 +276,8 @@ export class ExtensionEnablementService extends Disposable implements IWorkbench
 			return [];
 		}
 
-		const toCheck = extensions.filter(e => checked.indexOf(e) === -1);
+		const checkedSet = new Set(checked);
+		const toCheck = extensions.filter(e => !checkedSet.has(e));
 		if (!toCheck.length) {
 			return [];
 		}
