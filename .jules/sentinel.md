@@ -51,3 +51,8 @@
 **Vulnerability:** Found `db.query` calls in `services/mcp-gateway/src/tools/symbolLookup.ts` where values like `input.type` were being interpolated directly into Cypher query strings as labels instead of parameterized. Cypher graph labels like `(:Function)` cannot be parameterized normally in Neo4j/FalkorDB.
 **Learning:** In FalkorDB/Neo4j, while values should always be parameterized (e.g. `$content`), node labels (like `:${input.type}`) cannot be parameterized via query parameters. If a label is user-controlled and directly interpolated, it allows Cypher injection.
 **Prevention:** For node labels or property keys that cannot be parameterized in Cypher, always validate them against a strict predefined allowlist before interpolation to prevent Cypher injection vulnerabilities. Always use query parameters for standard values like `$id` and `$createdAt`.
+
+## 2026-08-18 - Command Injection in terminalEncoding.ts
+**Vulnerability:** Found `child_process.exec` being used to run `chcp` and `locale charmap` for terminal encoding detection.
+**Learning:** Using `exec` introduces potential command injection risks if the environment is manipulated, and is inherently slower and less secure than bypassing the shell entirely. For Windows built-ins like `chcp`, calling them with `execFile` requires appending the correct file extension (e.g., `chcp.com`).
+**Prevention:** Always refactor to use `child_process.execFile` instead of `exec`, passing variables as an array of discrete arguments, which bypasses the shell parser natively. Remember to append extensions for Windows shell commands.
