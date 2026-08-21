@@ -1059,7 +1059,7 @@ class SourceColumnRenderer implements ITableRenderer<IKeybindingItemEntry, ISour
 		const sourceColumnHover = this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), sourceColumn, '');
 		const sourceLabel = new HighlightedLabel(DOM.append(sourceColumn, $('.source-label')));
 		const extensionContainer = DOM.append(sourceColumn, $('.extension-container'));
-		const extensionLabel = DOM.append<HTMLAnchorElement>(extensionContainer, $('a.extension-label', { tabindex: 0 }));
+		const extensionLabel = DOM.append<HTMLAnchorElement>(extensionContainer, $('a.extension-label', { tabindex: 0, role: 'button' }));
 		const extensionId = new HighlightedLabel(DOM.append(extensionContainer, $('.extension-id-container.code')));
 		return { sourceColumn, sourceColumnHover, sourceLabel, extensionLabel, extensionContainer, extensionId, disposables: new DisposableStore() };
 	}
@@ -1076,8 +1076,10 @@ class SourceColumnRenderer implements ITableRenderer<IKeybindingItemEntry, ISour
 			templateData.sourceLabel.element.classList.add('hide');
 			const extension = keybindingItemEntry.keybindingItem.source;
 			const extensionLabel = extension.displayName ?? extension.identifier.value;
-			templateData.sourceColumnHover.update(localize('extension label', "Extension ({0})", extensionLabel));
+			const ariaLabel = localize('extension label', "Extension ({0})", extensionLabel);
+			templateData.sourceColumnHover.update(ariaLabel);
 			templateData.extensionLabel.textContent = extensionLabel;
+			templateData.extensionLabel.setAttribute('aria-label', ariaLabel);
 			templateData.disposables.add(onClick(templateData.extensionLabel, () => {
 				this.extensionsWorkbenchService.open(extension.identifier.value);
 			}));
