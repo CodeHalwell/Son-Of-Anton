@@ -44,3 +44,6 @@
 ## 2024-08-10 - Dynamic aria-expanded initialization
 **Learning:** Collapsable UI components with `role="button"` shouldn't blindly hardcode `aria-expanded="false"`. They must evaluate the initial state to ensure screen readers announce the accurate state on load.
 **Action:** Use `String(!!initialState)` or a dynamically evaluated method instead of hardcoding `'false'` when initializing `aria-expanded`.
+## 2024-08-12 - Accessible Button Roles for Interactive Links in Tables
+**Learning:** Custom interactive links (like `<a>` tags with `tabindex: 0`) dynamically rendered inside list/table rows (e.g. extension sources in Keyboard Shortcuts) that act as clickable buttons (handling `CLICK`, `Enter` and `Space`) must have `role="button"` for screen reader users to identify them properly as actionable items. Furthermore, if their text content alone might not provide enough context (or just for completeness matching a tooltip), an explicit `aria-label` provides a better accessible name.
+**Action:** When appending custom `<a>` elements serving as action buttons within dynamic list/table cells, always set `role: 'button'` and assign a localized `aria-label` to ensure users relying on screen readers understand they can interact with the element like a button.

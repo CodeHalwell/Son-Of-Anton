@@ -934,7 +934,7 @@ class AdditionalDetailsWidget extends Disposable {
 			for (const [label, icon, uri] of resources) {
 				const resourceElement = append(resourcesElement, $('.resource'));
 				append(resourceElement, $(ThemeIcon.asCSSSelector(icon)));
-				append(resourceElement, $('a', { tabindex: '0' }, label));
+				append(resourceElement, $('a', { tabindex: '0', role: 'button' }, label));
 				this.disposables.add(onClick(resourceElement, () => this.openerService.open(uri)));
 				this.disposables.add(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), resourceElement, uri.toString()));
 			}
