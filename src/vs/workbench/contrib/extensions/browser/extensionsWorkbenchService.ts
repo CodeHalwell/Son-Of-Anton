@@ -3046,8 +3046,7 @@ export class ExtensionsWorkbenchService extends Disposable implements IExtension
 		return this.doSetEnablement(allExtensions, enablementState);
 	}
 
-	private getExtensionsRecursively(extensions: IExtension[], installed: IExtension[], enablementState: EnablementState, options: { dependencies: boolean; pack: boolean }, checked: IExtension[] = []): IExtension[] {
-		const checkedSet = new Set(checked);
+	private getExtensionsRecursively(extensions: IExtension[], installed: IExtension[], enablementState: EnablementState, options: { dependencies: boolean; pack: boolean }, checked: IExtension[] = [], checkedSet: Set<IExtension> = new Set<IExtension>()): IExtension[] {
 		const toCheck = extensions.filter(e => !checkedSet.has(e));
 		if (toCheck.length) {
 			for (const extension of toCheck) {
@@ -3071,7 +3070,7 @@ export class ExtensionsWorkbenchService extends Disposable implements IExtension
 					);
 			});
 			if (extensionsToEanbleOrDisable.length) {
-				extensionsToEanbleOrDisable.push(...this.getExtensionsRecursively(extensionsToEanbleOrDisable, installed, enablementState, options, checked));
+				extensionsToEanbleOrDisable.push(...this.getExtensionsRecursively(extensionsToEanbleOrDisable, installed, enablementState, options, checked, checkedSet));
 			}
 			return extensionsToEanbleOrDisable;
 		}
