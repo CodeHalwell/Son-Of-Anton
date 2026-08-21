@@ -1102,6 +1102,7 @@ class AdditionalDetailsWidget extends Disposable {
 						const categoryElement = append(categoriesElement, $('span.category', { tabindex: '0' }, category));
 						if (hasCategoryFilter) {
 							categoryElement.classList.add('clickable');
+							categoryElement.setAttribute('role', 'button');
 							this.disposables.add(onClick(categoryElement, () => this.extensionsWorkbenchService.openSearch(`@category:"${category}"`)));
 						}
 					}
@@ -1139,7 +1140,7 @@ class AdditionalDetailsWidget extends Disposable {
 			for (const [label, icon, uri] of resources) {
 				const resourceElement = append(resourcesElement, $('.resource'));
 				append(resourceElement, $(ThemeIcon.asCSSSelector(icon)));
-				append(resourceElement, $('a', { tabindex: '0' }, label));
+				append(resourceElement, $('a', { tabindex: '0', role: 'button' }, label));
 				this.disposables.add(onClick(resourceElement, () => this.openerService.open(uri)));
 				this.disposables.add(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), resourceElement, uri.toString()));
 			}

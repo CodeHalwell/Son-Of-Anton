@@ -591,9 +591,11 @@ export class BaseIssueReporterService extends Disposable {
 					if (info && info.classList.contains('hidden')) {
 						show(info);
 						label.textContent = localize('hide', "hide");
+						(showInfo as HTMLAnchorElement).setAttribute('aria-expanded', 'true');
 					} else {
 						hide(info);
 						label.textContent = localize('show', "show");
+						(showInfo as HTMLAnchorElement).setAttribute('aria-expanded', 'false');
 					}
 				}
 			});
@@ -608,9 +610,11 @@ export class BaseIssueReporterService extends Disposable {
 						if (info && info.classList.contains('hidden')) {
 							show(info);
 							label.textContent = localize('hide', "hide");
+							(showInfo as HTMLAnchorElement).setAttribute('aria-expanded', 'true');
 						} else {
 							hide(info);
 							label.textContent = localize('show', "show");
+							(showInfo as HTMLAnchorElement).setAttribute('aria-expanded', 'false');
 						}
 					}
 				}
