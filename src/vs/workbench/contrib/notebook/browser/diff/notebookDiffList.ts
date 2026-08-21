@@ -624,7 +624,10 @@ function buildSourceEditor(instantiationService: IInstantiationService, notebook
 		allowVariableLineHeights: false,
 		readOnly: true,
 	}, {
-		contributions: EditorExtensionsRegistry.getEditorContributions().filter(c => skipContributions.indexOf(c.id) === -1)
+		contributions: (() => {
+			const skipContributionsSet = new Set(skipContributions);
+			return EditorExtensionsRegistry.getEditorContributions().filter(c => !skipContributionsSet.has(c.id));
+		})()
 	});
 
 	return { editor, editorContainer };

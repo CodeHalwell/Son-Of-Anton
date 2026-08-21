@@ -88,7 +88,8 @@ export class NotebookInlineDiffWidget extends Disposable {
 			'editor.contrib.findController',
 			'editor.contrib.emptyTextEditorHint',
 		];
-		const cellEditorContributions = EditorExtensionsRegistry.getEditorContributions().filter(c => skipContributions.indexOf(c.id) === -1);
+		const skipContributionsSet = new Set(skipContributions);
+		const cellEditorContributions = EditorExtensionsRegistry.getEditorContributions().filter(c => !skipContributionsSet.has(c.id));
 
 		this.widget = <IBorrowValue<NotebookEditorWidget>>this.instantiationService.invokeFunction(this.widgetService.retrieveWidget,
 			groupId, input, { contributions, menuIds, cellEditorContributions, options: this.options }, this.dimension, this.window);

@@ -123,7 +123,8 @@ export function getDefaultNotebookCreationOptions(): INotebookEditorCreationOpti
 		'editor.contrib.findController',
 		'editor.contrib.emptyTextEditorHint'
 	];
-	const contributions = EditorExtensionsRegistry.getEditorContributions().filter(c => skipContributions.indexOf(c.id) === -1);
+	const skipContributionsSet = new Set(skipContributions);
+	const contributions = EditorExtensionsRegistry.getEditorContributions().filter(c => !skipContributionsSet.has(c.id));
 
 	return {
 		menuIds: {
