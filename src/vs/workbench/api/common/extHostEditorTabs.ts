@@ -283,15 +283,17 @@ export class ExtHostEditorTabs implements IExtHostEditorTabs {
 		const groupIdsBefore = new Set(this._extHostTabGroups.map(group => group.groupId));
 		const groupIdsAfter = new Set(tabGroups.map(dto => dto.groupId));
 		const diff = diffSets(groupIdsBefore, groupIdsAfter);
+		const diffRemovedSet = new Set(diff.removed);
+		const diffAddedSet = new Set(diff.added);
 
-		const closed: vscode.TabGroup[] = this._extHostTabGroups.filter(group => diff.removed.includes(group.groupId)).map(group => group.apiObject);
+		const closed: vscode.TabGroup[] = this._extHostTabGroups.filter(group => diffRemovedSet.has(group.groupId)).map(group => group.apiObject);
 		const opened: vscode.TabGroup[] = [];
 		const changed: vscode.TabGroup[] = [];
 
 
 		this._extHostTabGroups = tabGroups.map(tabGroup => {
 			const group = new ExtHostEditorTabGroup(tabGroup, () => this._activeGroupId);
-			if (diff.added.includes(group.groupId)) {
+			if (diffAddedSet.has(group.groupId)) {
 				opened.push(group.apiObject);
 			} else {
 				changed.push(group.apiObject);

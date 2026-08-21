@@ -24,9 +24,10 @@ interface IUserDataProfileInfo {
 export function merge(local: IUserDataProfile[], remote: ISyncUserDataProfile[] | null, lastSync: ISyncUserDataProfile[] | null, ignored: string[]): IMergeResult {
 	const localResult: { added: ISyncUserDataProfile[]; removed: IUserDataProfile[]; updated: ISyncUserDataProfile[] } = { added: [], removed: [], updated: [] };
 	let remoteResult: { added: IUserDataProfile[]; removed: ISyncUserDataProfile[]; updated: IUserDataProfile[] } | null = { added: [], removed: [], updated: [] };
+	const ignoredSet = new Set(ignored);
 
 	if (!remote) {
-		const added = local.filter(({ id }) => !ignored.includes(id));
+		const added = local.filter(({ id }) => !ignoredSet.has(id));
 		if (added.length) {
 			remoteResult.added = added;
 		} else {
