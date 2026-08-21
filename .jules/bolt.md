@@ -42,3 +42,7 @@
 ## 2026-07-20 - O(N*M) nested iterations in array filtering for recursive extension checking
 **Learning:** Checking for element presence with `Array.prototype.indexOf()` inside an `Array.prototype.filter()` callback over another growing tracking array (passed by reference in a recursive function like `getExtensionsRecursively`) creates an O(N*M) time complexity bottleneck. This occurs in extension resolution logic, blocking the main thread when many elements are involved.
 **Action:** When filtering an array against another array that acts as a tracking list in recursive calls, convert the tracking array to a local `Set` within the function to use `Set.has()`, and ensure you `Set.add()` whenever `Array.push()`ing to the original array to keep state synchronized. This reduces time complexity to O(N+M).
+
+## 2024-05-18 - Optimize getExtensionsToEnableRecursively lookup performance
+**Learning:** In highly recursive functions dealing with arrays (like `getExtensionsToEnableRecursively` in `ExtensionEnablementService`), using `array.filter(e => checked.indexOf(e) === -1)` creates an O(N*M) bottleneck, where N is the number of extensions to check and M is the size of the `checked` array.
+**Action:** Always optimize this pattern by introducing an optional `Set` parameter that parallels the array to maintain O(1) lookups during recursion, ensuring the default initialization handles cases where external callers don't provide the Set.
