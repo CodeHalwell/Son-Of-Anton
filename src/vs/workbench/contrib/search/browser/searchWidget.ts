@@ -432,7 +432,7 @@ export class SearchWidget extends Widget {
 			hoverDelegate: getDefaultHoverDelegate('element'),
 		};
 		this.toggleReplaceButton = this._register(new Button(parent, opts));
-		this.toggleReplaceButton.element.setAttribute('aria-expanded', 'false');
+		this.toggleReplaceButton.element.setAttribute('aria-expanded', String(this.isReplaceShown()));
 		this.toggleReplaceButton.element.classList.add('toggle-replace-button');
 		this.toggleReplaceButton.icon = searchHideReplaceIcon;
 		this._toggleReplaceButtonListener.value = this.toggleReplaceButton.onDidClick(() => this.onToggleReplaceButton());
