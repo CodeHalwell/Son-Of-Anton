@@ -52,7 +52,8 @@ export class ExtensionsCompletionItemsProvider extends Disposable implements IWo
 	private async provideSupportUntrustedWorkspacesExtensionProposals(alreadyConfigured: string[], range: Range): Promise<CompletionItem[]> {
 		const suggestions: CompletionItem[] = [];
 		const installedExtensions = (await this.extensionManagementService.getInstalled()).filter(e => e.manifest.main);
-		const proposedExtensions = installedExtensions.filter(e => alreadyConfigured.indexOf(e.identifier.id) === -1);
+		const alreadyConfiguredSet = new Set(alreadyConfigured);
+		const proposedExtensions = installedExtensions.filter(e => !alreadyConfiguredSet.has(e.identifier.id));
 
 		if (proposedExtensions.length) {
 			suggestions.push(...proposedExtensions.map(e => {
