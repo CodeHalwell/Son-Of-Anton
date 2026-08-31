@@ -47,3 +47,7 @@
 ## 2024-08-12 - Accessible Button Roles for Interactive Links in Tables
 **Learning:** Custom interactive links (like `<a>` tags with `tabindex: 0`) dynamically rendered inside list/table rows (e.g. extension sources in Keyboard Shortcuts) that act as clickable buttons (handling `CLICK`, `Enter` and `Space`) must have `role="button"` for screen reader users to identify them properly as actionable items. Furthermore, if their text content alone might not provide enough context (or just for completeness matching a tooltip), an explicit `aria-label` provides a better accessible name.
 **Action:** When appending custom `<a>` elements serving as action buttons within dynamic list/table cells, always set `role: 'button'` and assign a localized `aria-label` to ensure users relying on screen readers understand they can interact with the element like a button.
+
+## 2024-05-29 - Use aria-label for custom toggles with dynamically changing text
+**Learning:** Some custom toggles use `role="button"` and `tabindex="0"` but their visible text changes dynamically (like "show" to "hide"). If they don't have an `aria-label`, screen readers only read "show" or "hide", lacking context about what is being toggled.
+**Action:** Always assign a stable, descriptive `aria-label` to custom toggle elements (`role="button"`) whose visible text content changes dynamically. This provides consistent context for screen readers regardless of the current visual state.
