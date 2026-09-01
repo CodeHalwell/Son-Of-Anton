@@ -384,12 +384,12 @@ export class ReplEditor extends EditorPane implements IEditorPaneWithScrolling {
 			codeWindow: this.window
 		}, undefined, this.window);
 
-		const skipContributions = [
+		const skipContributions = new Set([
 			'workbench.notebook.cellToolbar',
 			'editor.contrib.inlineCompletionsController'
-		];
+		]);
 
-		const inputContributions = getDefaultNotebookCreationOptions().cellEditorContributions?.filter(c => skipContributions.indexOf(c.id) === -1);
+		const inputContributions = getDefaultNotebookCreationOptions().cellEditorContributions?.filter(c => !skipContributions.has(c.id));
 		this._codeEditorWidget = this._instantiationService.createInstance(CodeEditorWidget, this._inputEditorContainer, this._editorOptions, {
 			...{
 				isSimpleWidget: false,

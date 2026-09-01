@@ -246,8 +246,8 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 	}
 
 	private _getContributions(): IEditorContributionDescription[] {
-		const skipContributions = [UnusualLineTerminatorsDetector.ID];
-		return EditorExtensionsRegistry.getEditorContributions().filter(c => skipContributions.indexOf(c.id) === -1);
+		const skipContributions = new Set([UnusualLineTerminatorsDetector.ID]);
+		return EditorExtensionsRegistry.getEditorContributions().filter(c => !skipContributions.has(c.id));
 	}
 
 	protected override getCodeEditorWidgetOptions(): ICodeEditorWidgetOptions {
