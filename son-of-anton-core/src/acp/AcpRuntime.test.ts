@@ -74,6 +74,11 @@ test('unsupported protocol and missing adapter fail without orphaned processes',
 		assert.equal(connection.isConnected, false);
 	}
 });
+test('initialization preserves the process failure when stdout closes before exit', async () => {
+	const connection = new AcpConnection({ id: 'delayed-exit', command: process.execPath, args: ['-e', 'process.stdout.end(); setTimeout(() => process.exit(23), 50);'] }, process.cwd());
+	try { await assert.rejects(connection.initialize(), /exited \(23\)/); } finally { await connection.stop(); }
+	assert.equal(connection.isConnected, false);
+});
 test('shutdown cancels active and queued requests and is idempotent', async () => {
 	const runtime = new AcpRuntime({ maxProcesses: 1 });
 	const active = runtime.run(turn('active', 'slow')); const queued = runtime.run(turn('queued'));

@@ -37,17 +37,21 @@ async function verifyGraph(extension) {
 	} finally { child.stdin.end(); child.kill(); await new Promise(resolve => { if (child.exitCode !== null) { resolve(); return; } const timer = setTimeout(() => { child.kill('SIGKILL'); resolve(); }, 2000); child.once('close', () => { clearTimeout(timer); resolve(); }); }); }
 }
 exports.run = async () => {
+	console.log('[installation-test] Starting bundled extension checks');
 	const started = Date.now(), extension = vscode.extensions.getExtension('son-of-anton.son-of-anton');
 	assert.ok(extension, `Built-in Son of Anton extension is unavailable (trusted=${vscode.workspace.isTrusted}; loaded=${vscode.extensions.all.map(item => item.id).join(', ')})`);
+	console.log('[installation-test] Activating Son of Anton');
 	await extension.activate(); assert.equal(extension.isActive, true);
+	console.log('[installation-test] Activated Son of Anton');
 	const commands = await vscode.commands.getCommands(true);
 	const required = ['sota.openChat', 'sota.openTaskBoard', 'sota.openSetupWizard', 'sota.reviewWithCouncil', 'sota.diagnoseAcpAgents'];
 	for (const command of required) { assert.ok(commands.includes(command), `Missing command ${command}`); }
 	// Read-only first-run surfaces must open without credentials or granting agent execution trust.
-	for (const command of ['sota.openChat', 'sota.openSetupWizard', 'sota.reviewWithCouncil']) { await vscode.commands.executeCommand(command); }
+	for (const command of ['sota.openChat', 'sota.openSetupWizard', 'sota.reviewWithCouncil']) { console.log(`[installation-test] Opening ${command}`); await vscode.commands.executeCommand(command); }
 	const native = require(path.join(extension.extensionPath, 'runtime/codegraph/node_modules/@son-of-anton/codegraph-napi/engine.node'));
 	assert.equal(typeof native, 'object');
 	assert.ok(Object.keys(native).length, 'Native graph exports are missing');
 	const graph = await verifyGraph(extension);
+	console.log('[installation-test] Packaged graph query passed');
 	await fs.writeFile(process.env.SOTA_INSTALL_RESULT, JSON.stringify({ success: true, extensionPath: extension.extensionPath, commands: required, graph, graphExports: Object.keys(native), activationMs: Date.now() - started, memory: process.memoryUsage(), trusted: vscode.workspace.isTrusted }, null, 2));
 };

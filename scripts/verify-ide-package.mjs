@@ -54,6 +54,10 @@ try {
 	assert.equal(product.nameLong, 'Son of Anton IDE');
 	const binary = path.join(app, process.platform === 'darwin' ? `Contents/MacOS/${product.nameShort}` : process.platform === 'win32' ? `${product.nameShort}.exe` : product.applicationName);
 	const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
+	// Suppress the test harness's unsupported modal prompt, while keeping workspace trust disabled.
+	const settingsFile = path.join(directory, 'profile/User/settings.json'); await mkdir(path.dirname(settingsFile), { recursive: true });
+	let settings = {}; try { settings = JSON.parse(await readFile(settingsFile)); } catch (error) { if (error.code !== 'ENOENT') { throw error; } }
+	await writeFile(settingsFile, JSON.stringify({ ...settings, 'security.workspace.trust.startupPrompt': 'never' }));
 	const cli = path.join(resources, 'out/cli.js');
 	assert.match(run(binary, [cli, '--version', '--user-data-dir', path.join(directory, 'profile')], { env: { ...env, ELECTRON_RUN_AS_NODE: '1' } }), new RegExp(manifest.ideVersion.replaceAll('.', '\\.')));
 	const extension = path.join(resources, 'extensions/son-of-anton');
@@ -61,26 +65,29 @@ try {
 	const runtime = JSON.parse(await readFile(path.join(extension, 'runtime/codegraph/manifest.json')));
 	assert.deepEqual([runtime.platform, runtime.arch], [process.platform, process.arch]);
 	const helper = path.join(directory, 'test-extension'); await mkdir(helper);
-	await writeFile(path.join(helper, 'package.json'), JSON.stringify({ name: 'sota-install-verification', publisher: 'sota-fixture', version: '0.0.0', engines: { vscode: '*' } }));
+	await writeFile(path.join(helper, 'package.json'), JSON.stringify({ name: 'sota-install-verification', publisher: 'sota-fixture', version: '0.0.0', engines: { vscode: '^1.96.0' }, main: './tests.cjs', capabilities: { untrustedWorkspaces: { supported: true } } }));
 	await cp(path.join(root, 'scripts/ide-install-tests.cjs'), path.join(helper, 'tests.cjs'));
 	const workspace = path.join(directory, 'workspace'); await mkdir(workspace); await writeFile(path.join(workspace, 'README.md'), '# Disposable installation verification\n');
 	const reportPath = path.join(directory, 'result.json');
 	const args = ['--user-data-dir', path.join(directory, 'profile'), '--extensions-dir', path.join(directory, 'extensions'), '--disable-telemetry', '--disable-updates', '--skip-release-notes', '--extensionDevelopmentPath', helper, '--extensionTestsPath', path.join(helper, 'tests.cjs'), workspace];
 	if (process.platform === 'linux' && process.getuid?.() === 0) { args.push('--no-sandbox'); }
+	if (process.env.SOTA_INSTALL_INSPECT) { args.push('--inspect-brk-extensions=9334'); }
 	await new Promise((resolve, reject) => {
-		let logs = '', finished = false;
+		let logs = '', finished = false, timedOut = false;
 		const child = spawn(binary, args, { cwd: directory, env: { ...env, SOTA_INSTALL_RESULT: reportPath }, stdio: 'pipe', detached: process.platform !== 'win32' });
 		child.stdin.end(); child.stdout.on('data', chunk => { logs = (logs + chunk).slice(-64_000); }); child.stderr.on('data', chunk => { logs = (logs + chunk).slice(-64_000); });
 		const stop = () => { if (!child.pid) { return; } if (process.platform === 'win32') { spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { timeout: 5000 }); } else { try { process.kill(-child.pid, 'SIGKILL'); } catch { } } };
-		const timer = setTimeout(() => { stop(); }, 120_000);
+		const timer = setTimeout(() => { timedOut = true; stop(); }, process.env.SOTA_INSTALL_INSPECT ? 300_000 : 120_000);
 		const finish = async error => { if (finished) { return; } finished = true; clearTimeout(timer); stop(); await writeFile(path.join(output, 'installation.log'), logs); error ? reject(error) : resolve(); };
-		child.on('error', error => { void finish(error); }); child.on('close', code => { void finish(code === 0 ? undefined : new Error(`Installed IDE exited ${code}; see installation.log`)); });
+		child.on('error', error => { void finish(error); }); child.on('close', (code, signal) => { void finish(timedOut ? new Error('Installed IDE startup timed out; see installation.log and activation-logs') : code === 0 ? undefined : new Error(`Installed IDE exited ${signal ?? code}; see installation.log`)); });
 	});
 	const report = JSON.parse(await readFile(reportPath)); assert.equal(report.success, true);
 	assert.ok(!report.extensionPath.startsWith(path.join(root, 'extensions')), 'Loaded a development extension instead of the bundled extension');
 	await writeFile(path.join(output, 'installation-report.json'), JSON.stringify({ ...report, target, commit: product.commit, ideVersion: product.version, installer: process.env.SOTA_TEST_INSTALLED_APP ? 'system-package' : 'fresh-temporary-install', checkedAssets: manifest.files.map(file => file.name) }, null, 2) + '\n');
 	console.log(`Installed IDE activation and bundled native graph checks passed (${target}).`);
 } finally {
+	const logs = path.join(directory, 'profile/logs');
+	try { await cp(logs, path.join(output, 'activation-logs'), { recursive: true }); } catch (error) { if (error.code !== 'ENOENT') { console.warn('Unable to retain activation logs'); } }
 	if (mounted) { run('hdiutil', ['detach', mount]); }
 	if (uninstaller) { run(uninstaller, ['/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART']); }
 	await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });

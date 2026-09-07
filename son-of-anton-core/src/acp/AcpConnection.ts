@@ -15,6 +15,8 @@ export class AcpConnection {
 	private sessionId?: string;
 	private active?: { signal: AbortSignal; update?: (update: AcpUpdate) => void; permission?: AcpPermissionHandler };
 	private stopping?: Promise<void>;
+	private transportStopping?: Promise<void>;
+	private processError?: Error;
 	private exited = false;
 	private readonly exitPromise: Promise<void>;
 	private readonly spawned: Promise<void>;
@@ -34,7 +36,7 @@ export class AcpConnection {
 					if (!this.active?.signal.aborted) { this.active?.update?.(params.update as AcpUpdate); }
 				}
 			},
-			close: () => { void this.stop(); },
+			close: () => { void this.stopAfterProcessExit(); },
 		});
 		// Drain diagnostics without retaining unlimited logs or leaking provider credentials.
 		this.child.stderr.resume();
@@ -42,8 +44,8 @@ export class AcpConnection {
 		this.child.stdout.on('error', () => { /* peer handles stream errors */ });
 		this.child.stderr.on('error', () => { /* diagnostics are optional */ });
 		this.exitPromise = new Promise(resolve => {
-			const exit = () => { this.exited = true; this.peer.dispose(new Error(`ACP agent ${definition.id} exited`)); resolve(); };
-			this.child.once('exit', exit);
+			const exit = (error: Error) => { this.processError = error; this.exited = true; this.peer.dispose(error); resolve(); };
+			this.child.once('exit', (code, signal) => exit(new Error(`ACP agent ${definition.id} exited (${signal ?? code})`)));
 			this.child.once('error', exit);
 		});
 		this.spawned = new Promise((resolve, reject) => { this.child.once('spawn', resolve); this.child.once('error', reject); });
@@ -60,7 +62,15 @@ export class AcpConnection {
 			protocolVersion: ACP_VERSION,
 			clientInfo: { name: 'son-of-anton', version: '1.0.0' },
 			clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-		}, { signal });
+		}, { signal }).catch(async error => {
+			if (!this.peer.isConnected) {
+				await this.stopAfterProcessExit();
+				if (!signal?.aborted && ((this.processError as NodeJS.ErrnoException | undefined)?.code === 'ENOENT' || /^ACP (?:stream closed|connection (?:is )?closed)$/.test(error.message))) {
+					throw this.processError ?? error;
+				}
+			}
+			throw error;
+		});
 		if (!object(result) || result.protocolVersion !== ACP_VERSION) {
 			throw new Error(`ACP agent ${this.definition.id} did not negotiate protocol version ${ACP_VERSION}`);
 		}
@@ -114,6 +124,19 @@ export class AcpConnection {
 			if (killTimer) { clearTimeout(killTimer); }
 			this.active = undefined;
 		}
+	}
+
+	private stopAfterProcessExit(): Promise<void> {
+		// Windows command shims can close stdio before cross-spawn reports ENOENT.
+		// Give the process a bounded chance to report its real failure before killing it.
+		return this.transportStopping ??= Promise.resolve().then(async () => {
+			if (!this.exited) {
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				await Promise.race([this.exitPromise, new Promise<void>(resolve => { timer = setTimeout(resolve, 250); })]);
+				if (timer) { clearTimeout(timer); }
+			}
+			await this.stop();
+		});
 	}
 
 	stop(): Promise<void> {

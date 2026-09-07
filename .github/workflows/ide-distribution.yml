@@ -108,6 +108,7 @@ jobs:
         run: |
           node --test son-of-anton-core/dist/acp/*.test.js son-of-anton-core/dist/checkpoint/*.test.js son-of-anton-core/dist/workspace/*.test.js
           node --test son-of-anton-cli/dist/test/updateInstall.test.js
+          node --test scripts/test/ide-release.test.mjs
       - name: Build native code graph
         run: node scripts/build-codegraph-runtime.mjs
       - name: Build complete IDE distribution
@@ -155,6 +156,7 @@ jobs:
           path: |
             .build/ide-release/*/*.log
             .build/ide-release/*/*report.json
+            .build/ide-release/*/activation-logs/**
           if-no-files-found: ignore
       - name: Upload verified installers
         uses: actions/upload-artifact@v4

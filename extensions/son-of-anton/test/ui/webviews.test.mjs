@@ -87,7 +87,7 @@ async function panelHtml(relativeFile, exportName, method, args = []) {
 	const compiled = typescript.transpileModule(source, { compilerOptions: { module: typescript.ModuleKind.CommonJS, target: typescript.ScriptTarget.ES2022 } }).outputText;
 	const exports = {};
 	const sourceRequire = createRequire(filename);
-	const localRequire = name => name === 'vscode' ? { l10n: { t: value => value } } : name.startsWith('son-of-anton-core/') ? require(path.join(root, 'son-of-anton-core/dist', name.slice('son-of-anton-core/'.length))) : sourceRequire(name);
+	const localRequire = name => name === 'vscode' ? { l10n: { t: (value, ...args) => value.replace(/\{(\d+)\}/g, (match, index) => args[Number(index)] === undefined ? match : String(args[Number(index)])) } } : name.startsWith('son-of-anton-core/') ? require(path.join(root, 'son-of-anton-core/dist', name.slice('son-of-anton-core/'.length))) : sourceRequire(name);
 	new Function('require', 'exports', compiled)(localRequire, exports);
 	if (!method) { return exports[exportName](...args); }
 	const panel = Object.assign(Object.create(exports[exportName].prototype), { panel: { webview: { cspSource: 'https://sota.test' } } });
@@ -105,11 +105,15 @@ test('proposal review supports safe file selection, diffs, validation logs and r
 	await page.locator('[data-diff="0"]').click(); await page.locator('[data-select="2"]').check();
 	await page.locator('[data-action="validate"]').click(); await page.locator('[data-log="0"]').click(); await page.locator('[data-action="restore"]').click();
 	assert.deepEqual(await page.evaluate(() => sentMessages), [{ type: 'diff', file: 'src/validator.ts' }, { type: 'select', files: ['src/validator.ts', maliciousName] }, { type: 'validate' }, { type: 'log', index: 0 }, { type: 'restore' }]);
-	await assertNoPageOverflow(page); await screenshot(page, 'proposal-review');
+	await assertNoPageOverflow(page); await screenshot(page, 'proposal-review-adversarial');
 	const busyHtml = await panelHtml('council/ProposalReviewPanel', 'proposalReviewHtml', undefined, [proposal, ['src/validator.ts'], true]);
 	const busyPage = await openSurface(t, 'proposal', 420, undefined, busyHtml);
 	assert.equal(await busyPage.locator('[data-action="apply"]').isDisabled(), true);
 	await busyPage.locator('[data-action="cancel"]').click(); assert.deepEqual(await busyPage.evaluate(() => sentMessages), [{ type: 'cancel' }]);
+	const passed = { ...proposal, files: ['src/validation/clamp.ts', 'test/clamp.test.ts', 'docs/api.md'], appliedFiles: [], validation: { status: 'passed', commands: [{ script: 'build', exitCode: 0, durationMs: 1240 }, { script: 'test', exitCode: 0, durationMs: 930 }] } };
+	const reviewPage = await openSurface(t, 'proposal', 560, undefined, await panelHtml('council/ProposalReviewPanel', 'proposalReviewHtml', undefined, [passed, passed.files.slice(0, 2), false]));
+	assert.match(await reviewPage.locator('[role="status"]').innerText(), /passed · 2 Commands/);
+	await screenshot(reviewPage, 'proposal-review');
 });
 async function frames(page) { await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))); }
 async function screenshot(page, name) {
