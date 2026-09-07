@@ -1,0 +1,197 @@
+name: Build and install Son of Anton IDE
+
+on:
+  push:
+    branches: [main, codex/ide-distribution]
+    tags: ['ide-v*']
+    paths:
+      - 'src/**'
+      - 'extensions/**'
+      - 'son-of-anton-core/**'
+      - 'son-of-anton-cli/**'
+      - 'services/code-graph/**'
+      - 'crates/**'
+      - 'build/**'
+      - 'scripts/**'
+      - 'resources/**'
+      - 'package*.json'
+      - 'product.json'
+      - '.nvmrc'
+      - '.npmrc'
+      - '.github/workflows/ide-distribution.yml'
+  pull_request:
+    paths:
+      - '.github/workflows/ide-distribution.yml'
+      - 'scripts/*ide*'
+      - 'extensions/son-of-anton/**'
+      - 'son-of-anton-core/**'
+      - 'build/**'
+      - 'product.json'
+  workflow_dispatch:
+    inputs:
+      draft_release:
+        description: Create a draft GitHub release after every native install check passes
+        type: boolean
+        default: false
+      require_signing:
+        description: Require Developer ID, notarization and Windows Authenticode credentials
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ide-distribution-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build:
+    name: IDE installer (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: darwin-arm64
+          - os: macos-15-intel
+            target: darwin-x64
+          - os: ubuntu-22.04
+            target: linux-x64
+          - os: windows-2022
+            target: win32-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      NODE_OPTIONS: --max-old-space-size=6144
+      CARGO_BUILD_JOBS: '2'
+      npm_config_audit: 'false'
+      npm_config_fund: 'false'
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Linux build and desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libx11-dev libx11-xcb-dev libxkbfile-dev libsecret-1-dev libkrb5-dev libgtk-3-0 libnss3 libgbm1 libasound2 xvfb dpkg-dev desktop-file-utils
+      - name: Assert native architecture
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+        run: node -e "if (process.platform + '-' + process.arch !== process.env.EXPECTED_TARGET) throw Error('Runner architecture mismatch')"
+      - name: Install locked dependencies
+        run: |
+          npm ci
+          npm --prefix son-of-anton-core ci
+          npm --prefix son-of-anton-cli ci
+          npm --prefix extensions/son-of-anton ci
+          npm --prefix services/code-graph/mcp-server ci
+      - name: Compile before validation
+        run: |
+          npm --prefix son-of-anton-core run build
+          npm --prefix son-of-anton-cli run build
+          npm --prefix services/code-graph/mcp-server run build
+          node node_modules/typescript/bin/tsc -p extensions/son-of-anton/tsconfig.json --noEmit
+          npm run compile-check-ts-native
+          npm run gulp compile-extensions
+          npm --prefix build run typecheck
+      - name: Protocol, checkpoint, proposal and updater regressions
+        run: |
+          node --test son-of-anton-core/dist/acp/*.test.js son-of-anton-core/dist/checkpoint/*.test.js son-of-anton-core/dist/workspace/*.test.js
+          node --test son-of-anton-cli/dist/test/updateInstall.test.js
+      - name: Build native code graph
+        run: node scripts/build-codegraph-runtime.mjs
+      - name: Build complete IDE distribution
+        env:
+          IDE_TARGET: ${{ matrix.target }}
+        run: npm run gulp "vscode-$IDE_TARGET-min"
+      - name: Create native installers
+        env:
+          SOTA_REQUIRE_SIGNING: ${{ inputs.require_signing || false }}
+          MACOS_SIGNING_CERT_P12: ${{ secrets.MACOS_SIGNING_CERT_P12 }}
+          MACOS_SIGNING_CERT_PASSWORD: ${{ secrets.MACOS_SIGNING_CERT_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_NOTARY_KEY_BASE64: ${{ secrets.MACOS_NOTARY_KEY_BASE64 }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_KEY_ISSUER: ${{ secrets.MACOS_NOTARY_KEY_ISSUER }}
+          WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
+          WINDOWS_SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
+        run: node scripts/package-ide.mjs
+      - name: Fresh install, bundled activation and first-run checks
+        if: runner.os != 'Linux'
+        run: node scripts/verify-ide-package.mjs
+      - name: Install Linux package, verify desktop, reinstall and remove
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y ./.build/ide-release/linux-x64/*.deb
+          trap 'sudo apt-get remove -y son-of-anton' EXIT
+          sudo apt-get install --reinstall -y ./.build/ide-release/linux-x64/*.deb
+          desktop-file-validate /usr/share/applications/son-of-anton.desktop
+          SOTA_TEST_INSTALLED_APP=/usr/share/son-of-anton xvfb-run -a node scripts/verify-ide-package.mjs
+      - name: Packaged native graph lifecycle and retrieval
+        env:
+          IDE_TARGET: ${{ matrix.target }}
+        run: |
+          if [[ "$RUNNER_OS" == 'macOS' ]]; then
+            export SOTA_RUNTIME_SOURCE="$GITHUB_WORKSPACE/../Son of Anton-$IDE_TARGET/Son of Anton IDE.app/Contents/Resources/app/extensions/son-of-anton/runtime/codegraph"
+          else
+            export SOTA_RUNTIME_SOURCE="$GITHUB_WORKSPACE/../Son of Anton-$IDE_TARGET/resources/app/extensions/son-of-anton/runtime/codegraph"
+          fi
+          node --test services/code-graph/mcp-server/test/offline.test.mjs services/code-graph/mcp-server/test/incremental.test.mjs
+      - name: Retain install diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ide-failure-${{ matrix.target }}
+          path: |
+            .build/ide-release/*/*.log
+            .build/ide-release/*/*report.json
+          if-no-files-found: ignore
+      - name: Upload verified installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: ide-${{ matrix.target }}
+          path: .build/ide-release/${{ matrix.target }}/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  release:
+    name: Draft downloadable IDE release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/ide-v') || (github.event_name == 'workflow_dispatch' && inputs.draft_release)
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ide-*
+          path: .build/downloaded-ide
+      - name: Verify and stage release assets
+        run: node scripts/stage-ide-release.mjs
+      - name: Attest exact installer bytes
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: '.build/publish-ide/*'
+      - name: Create draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/publish-ide-release.mjs

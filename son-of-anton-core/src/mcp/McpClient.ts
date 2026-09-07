@@ -4,7 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 import { TypedEventEmitter, type Event } from '../eventEmitter';
 import type { Disposable } from '../host';
-import { McpServerConnection, type McpToolAnnotations } from './McpServerConnection';
+import { McpServerConnection, type McpToolAnnotations, type McpServerState } from './McpServerConnection';
+import { McpHttpTransport } from './McpHttpTransport';
 import { McpStdioTransport } from './McpStdioTransport';
 
 /**
@@ -19,9 +20,12 @@ export interface McpClientDeps {
 	readonly getWorkspaceRoot: () => string | undefined;
 	/** Subscribe to changes that should trigger a reconcile. */
 	readonly onSettingChange: (listener: () => void) => Disposable;
+	readonly onServerState?: (name: string, state: McpServerState, error?: string) => void;
+	readonly onServerLog?: (name: string, chunk: string) => void;
 }
 
 export interface McpToolCall {
+	signal?: AbortSignal;
 	server: string;
 	tool: string;
 	inputs: Record<string, unknown>;
@@ -35,13 +39,17 @@ export interface McpToolResult {
 
 export interface McpServerConfig {
 	name: string;
-	command: string;
+	command?: string;
+	url?: string;
+	headers?: Record<string, string>;
+	transport?: 'http' | 'sse';
 	args?: string[];
 	env?: Record<string, string>;
 	cwd?: string;
 }
 
 export interface McpToolListing {
+	inputSchema?: object;
 	server: string;
 	tool: string;
 	description: string;
@@ -83,6 +91,7 @@ function signatureOf(cfg: McpServerConfig): string {
 	}, {}) : undefined;
 	return JSON.stringify({
 		command: cfg.command,
+		url: cfg.url, headers: cfg.headers, transport: cfg.transport,
 		args: cfg.args ?? [],
 		env: env ?? {},
 		cwd: cfg.cwd ?? '',
@@ -168,7 +177,9 @@ export class McpClient {
 	}
 
 	async callTool(call: McpToolCall): Promise<McpToolResult> {
+		call.signal?.throwIfAborted();
 		await this.ensureInitialised();
+		call.signal?.throwIfAborted();
 		const active = this.connections.get(call.server);
 		if (!active) {
 			// Soft-fail when the server isn't configured: throwing here cascades
@@ -188,13 +199,13 @@ export class McpClient {
 		}
 		if (active.connection.state !== 'ready') {
 			return {
-				content: `(MCP server '${call.server}' is not connected. Check the stack with 'docker compose ps'.)`,
+				content: `(MCP server '${call.server}' is not connected. Check the MCP server status and logs.)`,
 				isError: true,
 				latencyMs: 0,
 			};
 		}
 		const start = Date.now();
-		const result = await active.connection.callTool(call.tool, call.inputs);
+		const result = await active.connection.callTool(call.tool, call.inputs, call.signal);
 		return {
 			content: result.content,
 			isError: result.isError,
@@ -238,7 +249,8 @@ export class McpClient {
 	}
 
 	private async initialise(): Promise<void> {
-		const configs = this.readServerConfigs();
+		const configs = await this.readServerConfigs();
+		if (this.disposed) { return; }
 		if (configs.length === 0) {
 			this.cachedListing = [];
 			return;
@@ -256,15 +268,26 @@ export class McpClient {
 		cfg: McpServerConfig,
 		cwdFallback: string | undefined,
 	): Promise<{ connection: McpServerConnection } | undefined> {
-		const transport = new McpStdioTransport({
-			command: cfg.command,
+		const transport = cfg.url ? new McpHttpTransport({ url: cfg.url, headers: cfg.headers, transport: cfg.transport }) : new McpStdioTransport({
+			command: cfg.command!,
 			args: cfg.args ?? [],
 			env: cfg.env,
 			cwd: cfg.cwd ?? cwdFallback,
+			onStderr: chunk => this.deps.onServerLog?.(cfg.name, chunk),
 		});
-		const connection = new McpServerConnection({ name: cfg.name, transport });
+		const connection = new McpServerConnection({ name: cfg.name, transport,
+			onStateChange: (state, error) => {
+				this.deps.onServerState?.(cfg.name, state, error);
+				if ((state === 'closed' || state === 'error') && !this.disposed) {
+					this.cachedListing = this.cachedListing?.filter(tool => tool.server !== cfg.name);
+					this._onDidChangeTools.fire(this.cachedListing ?? []);
+				}
+			},
+			onToolsChanged: () => { void this.refreshCachedListing().then(() => this._onDidChangeTools.fire(this.cachedListing ?? [])).catch(error => console.warn('[McpClient] tool refresh failed', error)); },
+		});
 		try {
 			await connection.connect();
+			if (this.disposed) { connection.dispose(); return undefined; }
 			this.connections.set(cfg.name, {
 				connection,
 				config: cfg,
@@ -287,6 +310,7 @@ export class McpClient {
 	private async refreshCachedListing(): Promise<void> {
 		const listing: McpToolListing[] = [];
 		for (const [, active] of this.connections) {
+			if (active.connection.state !== 'ready') { continue; }
 			try {
 				const tools = await active.connection.listTools();
 				for (const tool of tools) {
@@ -295,6 +319,7 @@ export class McpClient {
 						tool: tool.name,
 						description: tool.description,
 						annotations: tool.annotations,
+						inputSchema: tool.inputSchema,
 					});
 				}
 			} catch (err) {
@@ -344,7 +369,8 @@ export class McpClient {
 			// Initial init failures are already logged; we can still reconcile.
 		}
 
-		const next = this.readServerConfigs();
+		const next = await this.readServerConfigs();
+		if (this.disposed) { return; }
 		const active = [...this.connections.values()].map(a => ({
 			name: a.config.name,
 			signature: a.signature,
@@ -386,8 +412,8 @@ export class McpClient {
 		}
 	}
 
-	private readServerConfigs(): McpServerConfig[] {
-		const raw = this.deps.readServersSetting();
+	private async readServerConfigs(): Promise<McpServerConfig[]> {
+		const raw = await this.deps.readServersSetting();
 		if (!Array.isArray(raw)) {
 			return [];
 		}
@@ -400,8 +426,9 @@ export class McpClient {
 			const candidate = entry as Record<string, unknown>;
 			const name = typeof candidate.name === 'string' ? candidate.name.trim() : '';
 			const command = typeof candidate.command === 'string' ? candidate.command.trim() : '';
-			if (!name || !command) {
-				console.warn('[McpClient] skipping MCP server entry with missing name or command:', entry);
+			const url = typeof candidate.url === 'string' ? candidate.url.trim() : '';
+			if (!name || (!command && !url)) {
+				console.warn('[McpClient] skipping MCP server entry with missing name or endpoint');
 				continue;
 			}
 			if (seenNames.has(name)) {
@@ -418,7 +445,11 @@ export class McpClient {
 			const cwd = typeof candidate.cwd === 'string' && candidate.cwd.length > 0
 				? candidate.cwd
 				: undefined;
-			configs.push({ name, command, args, env, cwd });
+			if (url) {
+				try { const endpoint = new URL(url); if (!['http:', 'https:'].includes(endpoint.protocol) || endpoint.username || endpoint.password) { continue; } } catch { continue; }
+			}
+			const headers = this.coerceStringRecord(candidate.headers && typeof candidate.headers === 'object' ? candidate.headers as Record<string, unknown> : {});
+			configs.push({ name, command: command || undefined, url: url || undefined, headers, transport: candidate.transport === 'sse' ? 'sse' : 'http', args, env, cwd });
 		}
 		return configs;
 	}

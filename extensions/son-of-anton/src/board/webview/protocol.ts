@@ -25,6 +25,7 @@ export interface BoardTaskView {
 	readonly startedAt?: number;
 	readonly finishedAt?: number;
 	readonly summary?: string;
+	proposalId?: string;
 	readonly tokenUsage?: { input: number; output: number };
 }
 
@@ -90,6 +91,8 @@ export interface ReassignMessage { readonly type: 'reassign'; readonly taskId: s
 export interface RerunMessage { readonly type: 'rerun'; readonly taskId: string }
 export interface RevealMessage { readonly type: 'reveal'; readonly taskId: string }
 export interface RefreshMessage { readonly type: 'refresh' }
+export interface OpenChatMessage { readonly type: 'open-chat' }
+export interface CancelChatMessage { readonly type: 'cancel-chat'; readonly requestId: string }
 
 /** Webview -> host: agent-driven board mutations (CopilotKit actions). */
 export type BoardActionName =
@@ -119,10 +122,40 @@ export interface ChatRuntimeRequestMessage {
 }
 
 export type WebviewToHostMessage =
+	| { readonly type: 'review-proposal' | 'cancel-task'; readonly taskId: string }
 	| DispatchMessage
 	| ReassignMessage
 	| RerunMessage
 	| RevealMessage
 	| RefreshMessage
+	| OpenChatMessage
+	| { readonly type: 'review-council' }
+	| CancelChatMessage
 	| BoardActionMessage
 	| ChatRuntimeRequestMessage;
+
+/** Validate untrusted postMessage data once, before narrowing to the shared contract. */
+export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMessage {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) { return false; }
+	const message = value as Record<string, unknown>;
+	const text = (field: string): boolean => typeof message[field] === 'string' && (message[field] as string).length > 0;
+	switch (message.type) {
+		case 'refresh': case 'open-chat': case 'review-council': return true;
+		case 'review-proposal': case 'cancel-task': case 'dispatch': case 'rerun': case 'reveal': return text('taskId');
+		case 'reassign': return text('taskId') && text('newAssignee');
+		case 'cancel-chat': return text('requestId');
+		case 'board-action':
+			switch (message.action) {
+				case 'moveCard': case 'setCardStatus': return text('cardId') && ['backlog', 'ready', 'in-progress', 'review', 'done', 'failed'].includes(String(message.toColumn));
+				case 'setCardAssignee': return text('cardId') && text('assignee');
+				case 'setCardPriority': return text('cardId') && ['low', 'medium', 'high'].includes(String(message.priority));
+				case 'addCard': return text('instruction') && (message.assignee === undefined || text('assignee'));
+				default: return false;
+			}
+		case 'chat-runtime':
+			return text('requestId') && typeof message.model === 'string' && Array.isArray(message.messages) && message.messages.length > 0 && message.messages.length <= 1000
+				&& message.messages.every(entry => entry && ['system', 'user', 'assistant'].includes(entry.role) && typeof entry.content === 'string')
+				&& (message.tools === undefined || (Array.isArray(message.tools) && message.tools.every(tool => tool && typeof tool.name === 'string' && typeof tool.description === 'string' && tool.inputSchema?.type === 'object' && tool.inputSchema.properties && typeof tool.inputSchema.properties === 'object' && !Array.isArray(tool.inputSchema.properties) && (tool.inputSchema.required === undefined || (Array.isArray(tool.inputSchema.required) && tool.inputSchema.required.every((key: unknown) => typeof key === 'string'))))));
+		default: return false;
+	}
+}

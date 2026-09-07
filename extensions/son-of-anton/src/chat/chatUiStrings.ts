@@ -1,0 +1,68 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+import * as vscode from 'vscode';
+
+/** Localized labels shared with the isolated chat webview. */
+export function getChatUiStrings(): Record<string, string> {
+	return {
+		browseAcpAdapters: vscode.l10n.t('Browse ACP Adapters'),
+		reviewWithCouncil: vscode.l10n.t('Review with Council'),
+		councilHistory: vscode.l10n.t('Council History'),
+		providerConfigured: vscode.l10n.t('Configured'),
+		providerUnconfigured: vscode.l10n.t('Not configured'),
+		managedByAcp: vscode.l10n.t('Managed by ACP'),
+		acpModelHelp: vscode.l10n.t('Model selection is managed by the configured ACP agent: {0}'),
+		integrations: vscode.l10n.t('Integrations'),
+		integrationsHelp: vscode.l10n.t('Skills, plugins, and MCP servers discovered from Claude, Codex, Cursor, and shared agent folders. Skills load on demand. Connect MCP servers to make their tools available; source applications keep their own authentication and plugin UI.'),
+		searchIntegrations: vscode.l10n.t('Search Integrations…'),
+		integrationKind: vscode.l10n.t('Integration Type'),
+		allIntegrations: vscode.l10n.t('All Types'),
+		skills: vscode.l10n.t('Skills'),
+		plugins: vscode.l10n.t('Plugins'),
+		mcp: vscode.l10n.t('MCP Servers'),
+		integrationLoading: vscode.l10n.t('Reading installed integrations…'),
+		integrationWarnings: vscode.l10n.t('Configuration Warnings ({0})'),
+		integrationRefresh: vscode.l10n.t('Refresh'),
+		integrationResults: vscode.l10n.t('{0} integrations · {1} configuration warnings'),
+		integrationEmpty: vscode.l10n.t('No integrations match this search.'),
+		integrationConnect: vscode.l10n.t('Connect'),
+		integrationDisconnect: vscode.l10n.t('Disconnect'),
+		integrationOpen: vscode.l10n.t('Show Source'),
+		integrationAvailable: vscode.l10n.t('Available'),
+		integrationConfigured: vscode.l10n.t('Configured · Awaiting Connection'),
+		integrationReady: vscode.l10n.t('Connected'),
+
+		responseTable: vscode.l10n.t('Response Table'),
+		usageUnavailable: vscode.l10n.t('Usage Unavailable'),
+		externalUsage: vscode.l10n.t('ACP agents do not report complete token usage or billing. These totals are incomplete.'),
+		responseStopped: vscode.l10n.t('Response Stopped'),
+		searchConversations: vscode.l10n.t('Search Conversations…'),
+		noConversations: vscode.l10n.t('No conversations match your search.'),
+		showMore: vscode.l10n.t('Show More'),
+		today: vscode.l10n.t('Today'),
+		yesterday: vscode.l10n.t('Yesterday'),
+		pastWeek: vscode.l10n.t('Previous 7 Days'),
+		earlier: vscode.l10n.t('Earlier'),
+		extensionVersion: vscode.l10n.t('Version: {0}'),
+		conversationResult: vscode.l10n.t('{0} conversation'),
+		conversationResults: vscode.l10n.t('{0} conversations'),
+		workspaceContext: vscode.l10n.t('Workspace Context'),
+		includeWorkspaceContext: vscode.l10n.t('Include Workspace Context'),
+		contextExplanation: vscode.l10n.t('Preview the automatic context for your next message. Files and images you attach separately are still included.'),
+		refreshPreview: vscode.l10n.t('Refresh Preview'),
+		contextLoading: vscode.l10n.t('Reading workspace…'),
+		contextEmpty: vscode.l10n.t('No automatic context available. Check the workspace context setting or open a source file.'),
+		contextOff: vscode.l10n.t('Automatic context is off for this conversation.'),
+		contextTokens: vscode.l10n.t('About {0} tokens'),
+		chooseModel: vscode.l10n.t('Choose a Model'),
+		searchModels: vscode.l10n.t('Search Models…'),
+		noModels: vscode.l10n.t('No models match your search.'),
+		draftSaved: vscode.l10n.t('Draft Saved'),
+		draftImages: vscode.l10n.t('Text Draft Saved · Images Kept Until Reload'),
+		newConversation: vscode.l10n.t('New Conversation'),
+		on: vscode.l10n.t('On'),
+		off: vscode.l10n.t('Off'),
+	};
+}

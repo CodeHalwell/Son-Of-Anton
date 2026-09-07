@@ -12,16 +12,24 @@
 		"Other"
 	],
 	"activationEvents": [
-		"onStartupFinished"
+		"onStartupFinished",
+		"onWebviewPanel:sota.council"
 	],
 	"main": "./dist/extension.js",
+	"capabilities": {
+		"untrustedWorkspaces": {
+			"supported": "limited",
+			"description": "%workspaceTrust.description%"
+		},
+		"virtualWorkspaces": false
+	},
 	"contributes": {
 		"chatParticipants": [
 			{
 				"id": "sota.anton",
 				"name": "anton",
 				"fullName": "Anton",
-				"description": "AI orchestrator — routes requests to specialist agents",
+				"description": "AI orchestrator \u2014 routes requests to specialist agents",
 				"isSticky": true,
 				"commands": [
 					{
@@ -46,7 +54,7 @@
 				"id": "sota.anton-code",
 				"name": "anton-code",
 				"fullName": "Anton Code",
-				"description": "Code generation specialist — writes and modifies code",
+				"description": "Code generation specialist \u2014 writes and modifies code",
 				"commands": [
 					{
 						"name": "generate",
@@ -62,7 +70,7 @@
 				"id": "sota.anton-test",
 				"name": "anton-test",
 				"fullName": "Anton Test",
-				"description": "Test writing specialist — generates comprehensive tests",
+				"description": "Test writing specialist \u2014 generates comprehensive tests",
 				"commands": [
 					{
 						"name": "test",
@@ -78,7 +86,7 @@
 				"id": "sota.anton-security",
 				"name": "anton-security",
 				"fullName": "Anton Security",
-				"description": "Security analysis specialist — scans for vulnerabilities",
+				"description": "Security analysis specialist \u2014 scans for vulnerabilities",
 				"commands": [
 					{
 						"name": "scan",
@@ -94,7 +102,7 @@
 				"id": "sota.anton-docs",
 				"name": "anton-docs",
 				"fullName": "Anton Docs",
-				"description": "Documentation specialist — generates and updates docs",
+				"description": "Documentation specialist \u2014 generates and updates docs",
 				"commands": [
 					{
 						"name": "document",
@@ -110,7 +118,7 @@
 				"id": "sota.anton-e2e",
 				"name": "anton-e2e",
 				"fullName": "Anton E2E",
-				"description": "E2E test specialist — generates browser-based end-to-end tests",
+				"description": "E2E test specialist \u2014 generates browser-based end-to-end tests",
 				"commands": [
 					{
 						"name": "e2e",
@@ -126,7 +134,7 @@
 				"id": "sota.anton-ci",
 				"name": "anton-ci",
 				"fullName": "Anton CI",
-				"description": "CI/CD specialist — monitors pipelines and fixes failures",
+				"description": "CI/CD specialist \u2014 monitors pipelines and fixes failures",
 				"commands": [
 					{
 						"name": "ci-status",
@@ -142,7 +150,7 @@
 				"id": "sota.anton-pr",
 				"name": "anton-pr",
 				"fullName": "Anton PR",
-				"description": "PR generation specialist — creates merge-ready pull requests",
+				"description": "PR generation specialist \u2014 creates merge-ready pull requests",
 				"commands": [
 					{
 						"name": "pr",
@@ -154,7 +162,7 @@
 				"id": "sota.anton-moderniser",
 				"name": "anton-moderniser",
 				"fullName": "Anton Moderniser",
-				"description": "Legacy code modernisation specialist — systematically brings old code up to standard",
+				"description": "Legacy code modernisation specialist \u2014 systematically brings old code up to standard",
 				"commands": [
 					{
 						"name": "modernise",
@@ -178,7 +186,7 @@
 				"id": "sota.anton-spec",
 				"name": "anton-spec",
 				"fullName": "Anton Spec",
-				"description": "Spec pipeline specialist — generates requirements, designs, and tasks from natural language",
+				"description": "Spec pipeline specialist \u2014 generates requirements, designs, and tasks from natural language",
 				"commands": [
 					{
 						"name": "spec",
@@ -309,14 +317,6 @@
 				"title": "Anton: Record Project Memory"
 			},
 			{
-				"command": "sota.startSpec",
-				"title": "Anton: Start Spec Pipeline"
-			},
-			{
-				"command": "sota.listSpecs",
-				"title": "Anton: List Spec Features"
-			},
-			{
 				"command": "sota.createBackgroundTask",
 				"title": "Anton: Create Background Task"
 			},
@@ -346,14 +346,6 @@
 			{
 				"command": "sota.showImpactAnalysis",
 				"title": "Anton: Show Impact Analysis"
-			},
-			{
-				"command": "sota.runSecurityScan",
-				"title": "Anton: Run Security Scan"
-			},
-			{
-				"command": "sota.generateSpec",
-				"title": "Anton: Generate Spec"
 			},
 			{
 				"command": "sota.konami",
@@ -443,6 +435,23 @@
 				"command": "sota.codeGraph.openLogs",
 				"title": "Anton: Code Graph: Open Logs",
 				"category": "Son of Anton"
+			},
+			{
+				"command": "sota.reviewWithCouncil",
+				"title": "Anton: Review with Council"
+			},
+			{
+				"command": "sota.councilHistory",
+				"title": "Anton: Council History"
+			},
+			{
+				"command": "sota.browseAcpAdapters",
+				"title": "Anton: Browse ACP Adapters"
+			},
+			{
+				"command": "sota.diagnoseAcpAgents",
+				"title": "Anton: Check ACP Connections",
+				"category": "Son of Anton"
 			}
 		],
 		"keybindings": [
@@ -482,12 +491,14 @@
 				{
 					"id": "sota.conversationList",
 					"name": "History",
+					"visibility": "collapsed",
 					"icon": "$(history)",
 					"contextualTitle": "Son of Anton"
 				},
 				{
 					"id": "sota.specialistRoster",
 					"name": "Anton Roster",
+					"visibility": "collapsed",
 					"icon": "$(organization)",
 					"contextualTitle": "Son of Anton"
 				}
@@ -578,12 +589,12 @@
 					"type": "boolean",
 					"default": false,
 					"deprecationMessage": "Replaced by the per-category auto-approval flags (`sota.autoApprove.read`, `sota.autoApprove.write`, `sota.autoApprove.shell`, `sota.autoApprove.mcp`). The legacy value is mirrored into `sota.autoApprove.read` on first run; please migrate when convenient.",
-					"markdownDescription": "Legacy single-toggle auto-approval — kept for backward compatibility. The Phase 86 governance panel under Settings → Features replaces this with per-category toggles. **Use `sota.autoApprove.*` for new configuration.**"
+					"markdownDescription": "Legacy single-toggle auto-approval \u2014 kept for backward compatibility. The Phase 86 governance panel under Settings \u2192 Features replaces this with per-category toggles. **Use `sota.autoApprove.*` for new configuration.**"
 				},
 				"sota.autoApprove.read": {
 					"type": "boolean",
 					"default": true,
-					"markdownDescription": "Auto-approve **read-only** tool calls (`read_file`, `list_directory`, `search_workspace`, `fetch_url`). On by default — these tools cannot mutate your workspace. Disable to require explicit approval for every read."
+					"markdownDescription": "Auto-approve **read-only** tool calls (`read_file`, `list_directory`, `search_workspace`, `fetch_url`). On by default \u2014 these tools cannot mutate your workspace. Disable to require explicit approval for every read."
 				},
 				"sota.autoApprove.write": {
 					"type": "boolean",
@@ -623,7 +634,7 @@
 					"type": "number",
 					"default": 1,
 					"minimum": 0,
-					"markdownDescription": "Per-task USD spend cap. When a single user turn (one message → all subtasks → all tool calls) exceeds this cost, Anton aborts mid-turn. Use `/continue` to retry once the cap is raised. Advisory unless `sota.spendLimit.enabled` is `true`."
+					"markdownDescription": "Per-task USD spend cap. When a single user turn (one message \u2192 all subtasks \u2192 all tool calls) exceeds this cost, Anton aborts mid-turn. Use `/continue` to retry once the cap is raised. Advisory unless `sota.spendLimit.enabled` is `true`."
 				},
 				"sota.spendLimit.enabled": {
 					"type": "boolean",
@@ -633,7 +644,7 @@
 				"sota.chat.focusChainEnabled": {
 					"type": "boolean",
 					"default": true,
-					"markdownDescription": "Show a focus-chain checklist beside long agent runs. Advisory — runtime wiring is in flight."
+					"markdownDescription": "Show a focus-chain checklist beside long agent runs. Advisory \u2014 runtime wiring is in flight."
 				},
 				"sota.chat.perMessageHoverDetails": {
 					"type": "boolean",
@@ -643,7 +654,7 @@
 				"sota.chat.personaAccents": {
 					"type": "boolean",
 					"default": true,
-					"markdownDescription": "Tint message bubbles with the assigned persona's accent colour. Advisory — disable for a neutral colour scheme."
+					"markdownDescription": "Tint message bubbles with the assigned persona's accent colour. Advisory \u2014 disable for a neutral colour scheme."
 				},
 				"sota.personality.voiceIntensity": {
 					"type": "number",
@@ -675,14 +686,14 @@
 						"normal",
 						"often"
 					],
-					"markdownDescription": "How often Anton's observations surface. `rare` = 2–4h window, `normal` = 30min–4h window, `often` = 10min–2h window."
+					"markdownDescription": "How often Anton's observations surface. `rare` = 2\u20134h window, `normal` = 30min\u20134h window, `often` = 10min\u20132h window."
 				},
 				"sota.terminal.outputLineCap": {
 					"type": "number",
 					"default": 100,
 					"minimum": 20,
 					"maximum": 500,
-					"markdownDescription": "Maximum lines of terminal output Anton ingests per attachment. Advisory — the runtime cap is enforced separately."
+					"markdownDescription": "Maximum lines of terminal output Anton ingests per attachment. Advisory \u2014 the runtime cap is enforced separately."
 				},
 				"sota.terminal.shellIntegration": {
 					"type": "boolean",
@@ -710,7 +721,7 @@
 				"sota.checkpoints.enabled": {
 					"type": "boolean",
 					"default": true,
-					"markdownDescription": "Capture a workspace checkpoint (via `git stash create`) on every chat turn so you can roll the working tree back to any prior state. Disable to opt out of the per-turn capture overhead — existing checkpoints remain restorable."
+					"markdownDescription": "Capture a workspace checkpoint (via `git stash create`) on every chat turn so you can roll the working tree back to any prior state. Disable to opt out of the per-turn capture overhead \u2014 existing checkpoints remain restorable."
 				},
 				"sota.checkpoints.maxCount": {
 					"type": "number",
@@ -726,16 +737,23 @@
 					},
 					"default": [],
 					"scope": "application",
-					"markdownDescription": "Workspaces where Son of Anton has been granted trust to run tools and modify code. Edit via the **Son of Anton: Manage Trusted Folders** command, or hand-edit this list to audit / pre-bless folders. Paths added here are merged with entries persisted via the in-product trust prompt; removing a path here does **not** implicitly revoke trust — use **Son of Anton: Revoke Workspace Trust** for that."
+					"markdownDescription": "Workspaces where Son of Anton has been granted trust to run tools and modify code. Edit via the **Son of Anton: Manage Trusted Folders** command, or hand-edit this list to audit / pre-bless folders. Paths added here are merged with entries persisted via the in-product trust prompt; removing a path here does **not** implicitly revoke trust \u2014 use **Son of Anton: Revoke Workspace Trust** for that."
 				},
 				"sota.completions.enabled": {
 					"type": "boolean",
 					"default": true,
 					"description": "Enable inline ghost-text completions"
 				},
+				"sota.completions.model": {
+					"type": "string",
+					"default": "",
+					"description": "Model for inline ghost-text completions. Leave blank to use your default chat model, or select a faster model from your configured provider."
+				},
 				"sota.completions.debounceMs": {
 					"type": "number",
 					"default": 300,
+					"minimum": 0,
+					"maximum": 2000,
 					"description": "Debounce time in milliseconds before triggering completions"
 				},
 				"sota.traces.maxSessions": {
@@ -808,7 +826,7 @@
 					"type": "string",
 					"default": "",
 					"scope": "application",
-					"markdownDescription": "API key for Microsoft Foundry / Azure OpenAI. Get it from the Azure portal: navigate to your Azure OpenAI resource → Keys and Endpoint. Falls back to `AZURE_OPENAI_API_KEY` or `FOUNDRY_API_KEY` env var when this is empty."
+					"markdownDescription": "API key for Microsoft Foundry / Azure OpenAI. Get it from the Azure portal: navigate to your Azure OpenAI resource \u2192 Keys and Endpoint. Falls back to `AZURE_OPENAI_API_KEY` or `FOUNDRY_API_KEY` env var when this is empty."
 				},
 				"sota.foundryEndpoint": {
 					"type": "string",
@@ -832,13 +850,13 @@
 					"type": "string",
 					"default": "{}",
 					"scope": "application",
-					"markdownDescription": "JSON object mapping a custom display name to a Foundry deployment profile: `{ \"<name>\": { \"endpoint\": \"https://...\", \"deployment\": \"...\", \"apiVersion\": \"...\" } }`. Surfaces in the model picker as `Foundry · <name>`. The legacy `sota.foundryDeployments` model→deployment map continues to work for the default profile."
+					"markdownDescription": "JSON object mapping a custom display name to a Foundry deployment profile: `{ \"<name>\": { \"endpoint\": \"https://...\", \"deployment\": \"...\", \"apiVersion\": \"...\" } }`. Surfaces in the model picker as `Foundry \u00b7 <name>`. The legacy `sota.foundryDeployments` model\u2192deployment map continues to work for the default profile."
 				},
 				"sota.bedrockProfiles": {
 					"type": "string",
 					"default": "{}",
 					"scope": "application",
-					"markdownDescription": "JSON object mapping a custom display name to a Bedrock credential profile: `{ \"<name>\": { \"region\": \"us-east-1\", \"profile\": \"...\", \"accessKeyId\": \"...\", \"secretAccessKey\": \"...\" } }`. Surfaces in the model picker as `Bedrock · <name>`. Use this to switch between regions or accounts mid-session."
+					"markdownDescription": "JSON object mapping a custom display name to a Bedrock credential profile: `{ \"<name>\": { \"region\": \"us-east-1\", \"profile\": \"...\", \"accessKeyId\": \"...\", \"secretAccessKey\": \"...\" } }`. Surfaces in the model picker as `Bedrock \u00b7 <name>`. Use this to switch between regions or accounts mid-session."
 				},
 				"sota.googleProfiles": {
 					"type": "string",
@@ -850,13 +868,13 @@
 					"type": "string",
 					"default": "us-east-1",
 					"scope": "application",
-					"markdownDescription": "AWS region for Bedrock requests (e.g. `us-east-1`, `us-west-2`, `eu-west-3`). Each region exposes a different subset of foundation models — check Bedrock's model availability page."
+					"markdownDescription": "AWS region for Bedrock requests (e.g. `us-east-1`, `us-west-2`, `eu-west-3`). Each region exposes a different subset of foundation models \u2014 check Bedrock's model availability page."
 				},
 				"sota.bedrockAccessKeyId": {
 					"type": "string",
 					"default": "",
 					"scope": "application",
-					"markdownDescription": "AWS access key ID. Leave blank to use the standard AWS credential chain (env vars, shared credentials file, IAM role, etc.). Falls back to `AWS_ACCESS_KEY_ID` env var. **For long-lived credentials only — do not paste production access keys here unless this user-data dir is appropriately protected.**"
+					"markdownDescription": "AWS access key ID. Leave blank to use the standard AWS credential chain (env vars, shared credentials file, IAM role, etc.). Falls back to `AWS_ACCESS_KEY_ID` env var. **For long-lived credentials only \u2014 do not paste production access keys here unless this user-data dir is appropriately protected.**"
 				},
 				"sota.bedrockSecretAccessKey": {
 					"type": "string",
@@ -880,19 +898,19 @@
 					"type": "string",
 					"default": "{}",
 					"scope": "application",
-					"markdownDescription": "JSON object mapping Son of Anton's Bedrock model ids to actual Bedrock model invocation IDs. Default mapping if empty: `bedrock-claude-sonnet` → `anthropic.claude-3-5-sonnet-20241022-v2:0`, `bedrock-claude-haiku` → `anthropic.claude-3-5-haiku-20241022-v1:0`. Override here for region-specific or cross-region inference profiles."
+					"markdownDescription": "JSON object mapping Son of Anton's Bedrock model ids to actual Bedrock model invocation IDs. Default mapping if empty: `bedrock-claude-sonnet` \u2192 `anthropic.claude-3-5-sonnet-20241022-v2:0`, `bedrock-claude-haiku` \u2192 `anthropic.claude-3-5-haiku-20241022-v1:0`. Override here for region-specific or cross-region inference profiles."
 				},
 				"sota.googleApiKey": {
 					"type": "string",
 					"default": "",
 					"scope": "application",
-					"markdownDescription": "API key for the Google Gemini API. Get one from [aistudio.google.com](https://aistudio.google.com/app/apikey). Falls back to `GOOGLE_API_KEY` or `GEMINI_API_KEY` env var when this is empty. Note: this is the consumer Gemini API endpoint (`generativelanguage.googleapis.com`), not full Vertex AI — Vertex with ADC OAuth is a separate forthcoming integration."
+					"markdownDescription": "API key for the Google Gemini API. Get one from [aistudio.google.com](https://aistudio.google.com/app/apikey). Falls back to `GOOGLE_API_KEY` or `GEMINI_API_KEY` env var when this is empty. Note: this is the consumer Gemini API endpoint (`generativelanguage.googleapis.com`), not full Vertex AI \u2014 Vertex with ADC OAuth is a separate forthcoming integration."
 				},
 				"sota.googleModelMap": {
 					"type": "string",
 					"default": "{}",
 					"scope": "application",
-					"markdownDescription": "JSON object mapping Son of Anton's Gemini model ids to actual Google API model names. Default mapping if empty: `gemini-1-5-pro` → `gemini-1.5-pro`, `gemini-1-5-flash` → `gemini-1.5-flash`, `gemini-2-0-flash` → `gemini-2.0-flash-exp`. Override here to pin specific versions or use experimental endpoints."
+					"markdownDescription": "JSON object mapping Son of Anton's Gemini model ids to actual Google API model names. Default mapping if empty: `gemini-1-5-pro` \u2192 `gemini-1.5-pro`, `gemini-1-5-flash` \u2192 `gemini-1.5-flash`, `gemini-2-0-flash` \u2192 `gemini-2.0-flash-exp`. Override here to pin specific versions or use experimental endpoints."
 				},
 				"sota.anthropicBaseUrl": {
 					"type": "string",
@@ -1048,19 +1066,146 @@
 					},
 					"default": [],
 					"scope": "application",
-					"markdownDescription": "Names of MCP servers (from `#sota.mcp.servers#`) that Son of Anton may connect to **without** prompting. MCP servers spawn a local process and can expose tools that read files and run commands, so any server not listed here — or previously approved via the in-product **Trust Always** prompt — is blocked until you explicitly confirm the connection. This is an **application-scoped** (user/global) list on purpose: a workspace cannot pre-trust a server on your behalf. Edit this list to pre-bless or audit trusted servers; removing a name takes effect on the next window reload."
+					"markdownDescription": "Names of MCP servers (from `#sota.mcp.servers#`) that Son of Anton may connect to **without** prompting. MCP servers spawn a local process and can expose tools that read files and run commands, so any server not listed here \u2014 or previously approved via the in-product **Trust Always** prompt \u2014 is blocked until you explicitly confirm the connection. This is an **application-scoped** (user/global) list on purpose: a workspace cannot pre-trust a server on your behalf. Edit this list to pre-bless or audit trusted servers; removing a name takes effect on the next window reload."
 				},
 				"sotaAuth.anthropic-oauth.clientId": {
 					"type": "string",
 					"default": "",
 					"scope": "application",
-					"markdownDescription": "OAuth client ID for the Claude (claude.ai) sign-in flow. **Most users should leave this blank and use an API key instead** — Anthropic does not currently offer public OAuth client registration for third-party tools. If you have been issued a client ID by Anthropic (e.g. as part of a partner program), paste it here. Otherwise set `#sota.apiKey#` to your Anthropic API key from [console.anthropic.com](https://console.anthropic.com/settings/keys)."
+					"markdownDescription": "OAuth client ID for the Claude (claude.ai) sign-in flow. **Most users should leave this blank and use an API key instead** \u2014 Anthropic does not currently offer public OAuth client registration for third-party tools. If you have been issued a client ID by Anthropic (e.g. as part of a partner program), paste it here. Otherwise set `#sota.apiKey#` to your Anthropic API key from [console.anthropic.com](https://console.anthropic.com/settings/keys)."
 				},
 				"sotaAuth.chatgpt-oauth.clientId": {
 					"type": "string",
 					"default": "",
 					"scope": "application",
-					"markdownDescription": "OAuth client ID for the ChatGPT / Codex (OpenAI) sign-in flow. **Most users should leave this blank and use an API key instead** — OpenAI does not currently offer a third-party OAuth program comparable to a developer console here. If you have been issued a client ID for OpenAI's PKCE flow, paste it here. Otherwise set `#sota.openaiApiKey#` to your OpenAI API key from [platform.openai.com](https://platform.openai.com/api-keys)."
+					"markdownDescription": "OAuth client ID for the ChatGPT / Codex (OpenAI) sign-in flow. **Most users should leave this blank and use an API key instead** \u2014 OpenAI does not currently offer a third-party OAuth program comparable to a developer console here. If you have been issued a client ID for OpenAI's PKCE flow, paste it here. Otherwise set `#sota.openaiApiKey#` to your OpenAI API key from [platform.openai.com](https://platform.openai.com/api-keys)."
+				},
+				"sota.acp.agents": {
+					"type": "array",
+					"default": [],
+					"scope": "machine",
+					"description": "External ACP stdio agents. Install each adapter separately. Agent commands run only in trusted workspaces. Reload the window after changes.",
+					"items": {
+						"type": "object",
+						"required": [
+							"id",
+							"command"
+						],
+						"additionalProperties": false,
+						"properties": {
+							"id": {
+								"type": "string"
+							},
+							"command": {
+								"type": "string"
+							},
+							"args": {
+								"type": "array",
+								"items": {
+									"type": "string"
+								}
+							},
+							"env": {
+								"type": "object",
+								"additionalProperties": {
+									"type": "string"
+								}
+							},
+							"authMethodId": {
+								"type": "string"
+							}
+						}
+					}
+				},
+				"sota.acp.maxProcesses": {
+					"type": "number",
+					"default": 4,
+					"minimum": 1,
+					"maximum": 32,
+					"scope": "machine",
+					"description": "Maximum reusable ACP agent processes in this window. Reload after changes."
+				},
+				"sota.acp.maxQueue": {
+					"type": "number",
+					"default": 32,
+					"minimum": 1,
+					"maximum": 256,
+					"scope": "machine",
+					"description": "Maximum queued ACP turns before new work is rejected. Reload after changes."
+				},
+				"sota.agents.anton-code.acpAgent": {
+					"type": "string",
+					"default": "",
+					"scope": "machine",
+					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses the built-in agent. Reload after changes."
+				},
+				"sota.agents.anton-test.acpAgent": {
+					"type": "string",
+					"default": "",
+					"scope": "machine",
+					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses the built-in agent. Reload after changes."
+				},
+				"sota.agents.anton-security.acpAgent": {
+					"type": "string",
+					"default": "",
+					"scope": "machine",
+					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses the built-in agent. Reload after changes."
+				},
+				"sota.agents.anton-docs.acpAgent": {
+					"type": "string",
+					"default": "",
+					"scope": "machine",
+					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses the built-in agent. Reload after changes."
+				},
+				"sota.agents.anton-e2e.acpAgent": {
+					"type": "string",
+					"default": "",
+					"scope": "machine",
+					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses the built-in agent. Reload after changes."
+				},
+				"sota.agents.anton-ci.acpAgent": {
+					"type": "string",
+					"default": "",
+					"scope": "machine",
+					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses the built-in agent. Reload after changes."
+				},
+				"sota.agents.anton-pr.acpAgent": {
+					"type": "string",
+					"default": "",
+					"scope": "machine",
+					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses the built-in agent. Reload after changes."
+				},
+				"sota.agents.anton-moderniser.acpAgent": {
+					"type": "string",
+					"default": "",
+					"scope": "machine",
+					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses the built-in agent. Reload after changes."
+				},
+				"sota.agents.anton-review.acpAgent": {
+					"type": "string",
+					"default": "",
+					"scope": "machine",
+					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses the built-in agent. Reload after changes."
+				},
+				"sota.integrations.enabled": {
+					"type": "boolean",
+					"default": true,
+					"description": "Discover installed skills, plugins, and MCP configurations from Claude, Codex, Cursor, and shared agent directories."
+				},
+				"sota.integrations.mcpServers": {
+					"type": "array",
+					"default": [],
+					"items": {
+						"type": "string"
+					},
+					"scope": "application",
+					"description": "Discovered MCP IDs enabled in Settings \u2192 Integrations. Source credentials remain in their original configuration; connections use the MCP trust gate."
+				},
+				"sota.council.storageDirectory": {
+					"type": "string",
+					"default": "",
+					"scope": "application",
+					"description": "Optional Council report and group storage directory. Defaults to a workspace-specific folder under ~/.son-of-anton/councils."
 				}
 			}
 		}
@@ -1068,7 +1213,8 @@
 	"scripts": {
 		"build": "npx tsx esbuild.mts",
 		"watch": "npx tsx esbuild.mts --watch",
-		"test": "mocha"
+		"test": "mocha",
+		"test:ui": "node --test test/ui/webviews.test.mjs"
 	},
 	"dependencies": {
 		"@aws-sdk/client-bedrock-runtime": "^3.700.0",

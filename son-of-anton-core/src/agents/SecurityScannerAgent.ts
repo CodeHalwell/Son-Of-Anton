@@ -19,6 +19,17 @@ export class SecurityScannerAgent extends BaseAgent {
 		return loadAgentPrompt(this.handle);
 	}
 
+	override interpretAcpResult(result: SubtaskResult): SubtaskResult {
+		// Preserve blocking findings when ACP replaces the execution backend.
+		try {
+			const block = /```json\s*\n([\s\S]*?)\n\s*```/.exec(result.summary);
+			const parsed: unknown = block ? JSON.parse(block[1]) : undefined;
+			if (!parsed || typeof parsed !== 'object' || !('findings' in parsed) || !Array.isArray(parsed.findings) || !parsed.findings.every(finding => finding && typeof finding === 'object' && ['critical', 'high', 'medium', 'low'].includes(finding.severity))) { throw new Error('Invalid findings'); }
+		} catch { return { ...result, success: false, summary: 'Security scan returned no valid structured findings. ' + result.summary }; }
+		const findings = this.parseFindings(result.summary);
+		return { ...result, success: !findings.some(finding => finding.blocking), summary: this.formatFindingsSummary(findings) };
+	}
+
 	async execute(context: AgentContext): Promise<SubtaskResult> {
 		const task = this.agentManager.createTask('Security Scanner', context.instruction, context.parentTaskId);
 		this.agentManager.startTask(task.id);

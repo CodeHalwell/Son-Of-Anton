@@ -5,6 +5,7 @@
 
 import * as vscode from 'vscode';
 import { AgentStack } from 'son-of-anton-core/agents/AgentStackFactory';
+import { AcpAgent } from 'son-of-anton-core/agents/AcpAgent';
 import { AgentHandle } from 'son-of-anton-core/agents/types';
 import type { ModelId } from 'son-of-anton-core/llm/LlmClient';
 import { AgentEvent } from './agentEvents';
@@ -87,13 +88,27 @@ export class AgentBridge {
 	 * "Trust This Workspace" remain distinct decisions.
 	 */
 	private readonly sessionTrustedFolders = new Set<string>();
+	private readonly _onDidChangeTrust = new vscode.EventEmitter<void>();
+	readonly onDidChangeTrust = this._onDidChangeTrust.event;
+
+	/** Include temporary grants when presenting the current window's trust state. */
+	isWorkspaceTrusted(folderPath: string): boolean {
+		return vscode.workspace.isTrusted && (this.sessionTrustedFolders.has(folderPath) || !!this.trustedFolders?.isTrusted(folderPath));
+	}
+
+	/** ACP adapters do not guarantee token or billing reports to the host. */
+	isAcpAgent(specialistId: string): boolean {
+		return this.stack.specialists.get(specialistId as AgentHandle) instanceof AcpAgent;
+	}
 
 	constructor(
 		private readonly stack: AgentStack,
 		private readonly trustedFolders?: TrustedFolders,
+		private readonly isolatedStack?: (root: string) => AgentStack,
 	) { }
 
 	dispose(): void {
+		this._onDidChangeTrust.dispose();
 		this._onDidEmitEvent.dispose();
 		this.sessionTrustedFolders.clear();
 	}
@@ -143,18 +158,19 @@ export class AgentBridge {
 		}
 
 		const choice = await vscode.window.showWarningMessage(
-			`Trust Son of Anton in '${folder.name}'?\n\nSon of Anton agents can read your files, run shell commands, and modify code. Grant trust only if you trust this workspace.`,
-			{ modal: true },
-			'Trust This Workspace',
-			'Trust Forever',
-			'Cancel',
+			vscode.l10n.t("Trust Son of Anton in '{0}'?", folder.name),
+			{ modal: true, detail: vscode.l10n.t("Son of Anton agents can read your files, run shell commands, and modify code. Grant trust only if you trust this workspace.") },
+			{ title: vscode.l10n.t("Trust This Workspace"), id: 'session' },
+			{ title: vscode.l10n.t("Trust Forever"), id: 'persistent' },
+			{ title: vscode.l10n.t("Cancel"), id: 'cancel', isCloseAffordance: true },
 		);
 
-		if (choice === 'Trust This Workspace') {
+		if (choice?.id === 'session') {
 			this.sessionTrustedFolders.add(folderPath);
+			this._onDidChangeTrust.fire();
 			return true;
 		}
-		if (choice === 'Trust Forever') {
+		if (choice?.id === 'persistent') {
 			this.trustedFolders.grant(folderPath);
 			return true;
 		}
@@ -274,6 +290,17 @@ export class AgentBridge {
 	 */
 	getActivePlan() {
 		return this.stack.orchestrator.getActivePlan();
+	}
+
+	/** An isolated task gets fresh agent state and tools rooted in its retained worktree. */
+	async runIsolatedSpecialist(root: string, handle: AgentHandle, prompt: string, emit: (event: AgentEvent) => void, token: vscode.CancellationToken): Promise<void> {
+		if (!await this.ensureWorkspaceTrust()) { throw new Error('Workspace trust is required'); }
+		if (!this.isolatedStack) { throw new Error('Isolated agent execution is unavailable'); }
+		if (token.isCancellationRequested) { return; }
+		const stack = this.isolatedStack(root);
+		const bridge = new AgentBridge(stack);
+		try { await bridge.runSpecialist(handle, prompt, emit, token, undefined, undefined, `isolated:${root}`); }
+		finally { bridge.dispose(); await stack.acpRuntime?.release(`${handle}:isolated:${root}`); await stack.dispose(); }
 	}
 
 	/**

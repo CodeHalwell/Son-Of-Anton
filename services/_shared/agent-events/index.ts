@@ -114,6 +114,7 @@ export type MessageRole = 'user' | 'assistant' | 'system';
 /** A single content block (text or tool result) in a uniform message. */
 export type MessageContent =
 	| { readonly type: 'text'; readonly text: string }
+	| { readonly type: 'tool_use'; readonly toolUseId: string; readonly name: string; readonly input: Record<string, unknown> }
 	| {
 		readonly type: 'tool_result';
 		readonly toolUseId: string;

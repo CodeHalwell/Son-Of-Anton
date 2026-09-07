@@ -7,6 +7,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
+rusqlite = "0.31"
 sota-codegraph-core = { path = "../sota-codegraph-core" }
 napi = { version = "2", features = ["async", "napi6"] }
 napi-derive = "2"

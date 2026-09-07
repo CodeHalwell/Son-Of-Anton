@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import * as vscode from 'vscode';
+import { randomBytes } from 'crypto';
 import { AgentManager } from 'son-of-anton-core/agents/AgentManager';
 
 /**
@@ -122,12 +123,13 @@ export class TraceViewerPanel {
 	}
 
 	private getHtmlContent(_context: vscode.ExtensionContext): string {
+		const nonce = randomBytes(16).toString('hex');
 		return /* html */`<!DOCTYPE html>
 <html lang="en">
 <head>
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'none';">
+	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
 	<title>Agent Traces</title>
 	<style>
 		body {
@@ -186,6 +188,12 @@ export class TraceViewerPanel {
 		}
 
 		.span-row {
+			width: 100%;
+			background: transparent;
+			color: inherit;
+			font: inherit;
+			text-align: left;
+			border: 0;
 			display: flex;
 			align-items: center;
 			padding: 4px 0;
@@ -303,11 +311,21 @@ export class TraceViewerPanel {
 			padding: 0;
 			font-size: inherit;
 		}
+		:where(button, select):focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
+		.toolbar, .stats, .task-filter-banner { flex-wrap: wrap; }
+		.detail-panel td { overflow-wrap: anywhere; }
+		@media (max-width: 600px) {
+			.span-row { flex-wrap: wrap; gap: 6px; }
+			.span-name { flex: 1; min-width: 0; }
+			.span-bar-container { flex-basis: 100%; order: 1; }
+			.span-duration { width: 50px; }
+			.detail-panel td:first-child { width: auto; }
+		}
 	</style>
 </head>
 <body>
 	<div class="toolbar">
-		<select id="filterType">
+		<select id="filterType" aria-label="${vscode.l10n.t('Filter Span Type')}">
 			<option value="all">All Types</option>
 			<option value="llm_call">LLM Calls</option>
 			<option value="mcp_tool">MCP Tools</option>
@@ -339,7 +357,7 @@ export class TraceViewerPanel {
 		<table id="detailTable"><tbody></tbody></table>
 	</div>
 
-	<script>
+	<script nonce="${nonce}">
 		const vscode = acquireVsCodeApi();
 		let allSpans = [];
 
@@ -382,14 +400,14 @@ export class TraceViewerPanel {
 				const width = Math.max(1, ((end - span.startTime) / totalDuration) * 100);
 				const duration = end - span.startTime;
 
-					return '<div class="span-row" data-span-id="' + escapeHtml(span.id) + '">' +
+					return '<button type="button" class="span-row" data-span-id="' + escapeHtml(span.id) + '">' +
 					'<div class="span-name">' + escapeHtml(span.name) + '</div>' +
 						'<div class="span-type">' + escapeHtml(span.type) + '</div>' +
 					'<div class="span-bar-container">' +
 						'<div class="span-bar ' + escapeHtml(span.type) + '" style="left:' + start + '%;width:' + width + '%"></div>' +
 					'</div>' +
 					'<div class="span-duration">' + formatDuration(duration) + '</div>' +
-					'</div>';
+					'</button>';
 			}).join('');
 
 			// Click handlers

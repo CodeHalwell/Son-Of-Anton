@@ -49,10 +49,35 @@ pub fn init(db_path: String) -> Result<()> {
     Ok(())
 }
 
+fn bind_embedder(eng: &Engine, fingerprint: &str) -> Result<()> {
+    use rusqlite::OptionalExtension;
+    let mut store = eng.store.lock();
+    let previous: Option<String> = store
+        .conn
+        .query_row("SELECT value FROM metadata WHERE key='embedder'", [], |r| {
+            r.get(0)
+        })
+        .optional()
+        .map_err(map_err)?;
+    if previous.as_deref() != Some(fingerprint) {
+        let tx = store.conn.transaction().map_err(map_err)?;
+        tx.execute("DELETE FROM embeddings", []).map_err(map_err)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO metadata(key,value) VALUES ('embedder',?1)",
+            [fingerprint],
+        )
+        .map_err(map_err)?;
+        tx.commit().map_err(map_err)?;
+        *eng.index.lock() = None;
+    }
+    Ok(())
+}
+
 #[napi]
 pub fn configure_local_embedder() -> Result<()> {
     let eng = engine()?;
     let emb = LocalEmbedder::new().map_err(map_err)?;
+    bind_embedder(eng, "local:BGE-small-en-v1.5:384")?;
     *eng.embedder.lock() = Some(Arc::new(emb));
     Ok(())
 }
@@ -65,6 +90,10 @@ pub fn configure_provider_embedder(
     api_key: Option<String>,
 ) -> Result<()> {
     let eng = engine()?;
+    if dims == 0 || dims > 65536 {
+        return Err(Error::from_reason("invalid embedding dimensions"));
+    }
+    bind_embedder(eng, &format!("provider:{endpoint}:{model}:{dims}"))?;
     let emb = ProviderEmbedder::new(endpoint, model, dims as usize, api_key);
     *eng.embedder.lock() = Some(Arc::new(emb));
     Ok(())
@@ -78,6 +107,8 @@ pub struct IndexStatsJs {
     pub symbols: u32,
     pub edges: u32,
     pub skipped_unchanged: u32,
+    pub total_files: u32,
+    pub total_symbols: u32,
 }
 
 impl From<IndexStats> for IndexStatsJs {
@@ -87,6 +118,8 @@ impl From<IndexStats> for IndexStatsJs {
             symbols: s.symbols as u32,
             edges: s.edges as u32,
             skipped_unchanged: s.skipped_unchanged as u32,
+            total_files: s.total_files as u32,
+            total_symbols: s.total_symbols as u32,
         }
     }
 }
@@ -205,11 +238,10 @@ pub async fn semantic_search(
         .lock()
         .clone()
         .ok_or_else(|| Error::from_reason("no embedder configured"))?;
-    let index = eng
-        .index
-        .lock()
-        .clone()
-        .ok_or_else(|| Error::from_reason("vector index not built; call build_vector_index()"))?;
+    let index =
+        eng.index.lock().clone().ok_or_else(|| {
+            Error::from_reason("vector index not built; call build_vector_index()")
+        })?;
     let store = eng.store.clone();
 
     // Phase 1 — embed the query. No store lock held across this await.

@@ -266,7 +266,11 @@ function getSotaVersion(): string {
 }
 
 function vendorCacheRoot(): string {
-	return path.join(os.homedir(), '.sota', 'cache', getSotaVersion());
+	const configured = process.env.SOTA_CACHE_DIR;
+	if (configured && !path.isAbsolute(configured)) { throw new Error('SOTA_CACHE_DIR must be absolute'); }
+	const info = fs.statSync(process.execPath);
+	const identity = (require('node:crypto') as typeof import('node:crypto')).createHash('sha256').update(`${process.execPath}:${info.size}:${info.mtimeMs}`).digest('hex').slice(0, 20);
+	return path.join(configured ?? path.join(os.homedir(), '.sota', 'cache'), `${getSotaVersion()}-${identity}`);
 }
 
 function vendorBinDir(): string {
@@ -301,41 +305,20 @@ function ensureVendorExtracted(): boolean {
 		// PATH might still have a system-installed claude/codex.
 		return false;
 	}
-	const tmpDir = path.join(os.tmpdir(), `sota-vendor-${process.pid}-${Date.now()}`);
-	const tmpArchive = path.join(tmpDir, 'vendor.tgz');
-	fs.mkdirSync(tmpDir, { recursive: true });
-	fs.writeFileSync(tmpArchive, Buffer.from(archive));
-	const stage = path.join(tmpDir, 'stage');
-	fs.mkdirSync(stage, { recursive: true });
-	const tarBin = process.platform === 'win32' ? 'tar.exe' : 'tar';
-	const result = child_process.spawnSync(tarBin, ['-xzf', tmpArchive, '-C', stage], { stdio: 'pipe' });
-	if (result.status !== 0) {
-		process.stderr.write(`sota: failed to extract vendor.tgz (${tarBin}): ${result.stderr?.toString() ?? ''}\n`);
-		return false;
-	}
-	// Move the staged tree into the final cache location atomically. On
-	// races, only one process wins; the others surface the survivor's tree
-	// via the sentinel check above.
-	fs.mkdirSync(path.dirname(cacheRoot), { recursive: true });
+	fs.mkdirSync(path.dirname(cacheRoot), { recursive: true, mode: 0o700 });
+	const tmpDir = fs.mkdtempSync(path.join(path.dirname(cacheRoot), '.sota-vendor-'));
 	try {
-		fs.renameSync(stage, cacheRoot);
-	} catch (err) {
-		if (fs.existsSync(cacheRoot)) {
-			// Another process won the race; clean our staging and trust theirs.
-			fs.rmSync(stage, { recursive: true, force: true });
-		} else {
-			process.stderr.write(`sota: failed to install vendor cache at ${cacheRoot}: ${String(err)}\n`);
-			fs.rmSync(tmpDir, { recursive: true, force: true });
-			return false;
-		}
-	}
-	patchShimsToCurrentBinary(vendorBinDir());
-	try {
-		fs.writeFileSync(sentinel, new Date().toISOString());
-	} catch {
-		// Sentinel is best-effort; the next run will just re-extract.
-	}
-	fs.rmSync(tmpDir, { recursive: true, force: true });
+		const tmpArchive = path.join(tmpDir, 'vendor.tgz');
+		fs.writeFileSync(tmpArchive, Buffer.from(archive), { mode: 0o600 });
+		const stage = path.join(tmpDir, 'stage'); fs.mkdirSync(stage, { mode: 0o700 });
+		const tarBin = process.platform === 'win32' ? 'tar.exe' : 'tar';
+		const result = child_process.spawnSync(tarBin, ['-xzf', tmpArchive, '-C', stage], { stdio: 'pipe', timeout: 120_000 });
+		if (result.status !== 0) { throw new Error(`Vendor extraction failed: ${result.error?.message ?? result.status}`); }
+		patchShimsToCurrentBinary(path.join(stage, 'node_modules', '.bin'));
+		fs.writeFileSync(path.join(stage, '.extracted'), new Date().toISOString(), { mode: 0o600 });
+		try { fs.renameSync(stage, cacheRoot); }
+		catch (error) { if (!fs.existsSync(sentinel)) { throw error; } }
+	} finally { fs.rmSync(tmpDir, { recursive: true, force: true }); }
 	return true;
 }
 
@@ -349,7 +332,7 @@ function patchShimsToCurrentBinary(binDir: string): void {
 	if (!fs.existsSync(binDir)) {
 		return;
 	}
-	const replacement = process.execPath;
+	const replacement = process.platform === 'win32' ? process.execPath.replace(/%/g, '%%') : process.execPath.replace(/[\\"$`]/g, character => '\\' + character);
 	for (const entry of fs.readdirSync(binDir)) {
 		const full = path.join(binDir, entry);
 		let stat;

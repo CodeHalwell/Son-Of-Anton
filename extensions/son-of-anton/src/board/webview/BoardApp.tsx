@@ -13,11 +13,8 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
-import { BoardRuntime } from './BoardRuntime';
 import { BoardChat } from './BoardChat';
 import { KanbanColumn } from './KanbanColumn';
-import { useBoardActions } from './useBoardActions';
-import { useBoardReadable } from './useBoardReadable';
 import { postToHost } from './vscode';
 import type { BoardSnapshotView, PersonaView, SubtaskState, HostToWebviewMessage } from './protocol';
 import { boardStyles } from './styles';
@@ -40,6 +37,7 @@ const COLUMNS: ReadonlyArray<{ state: SubtaskState; title: string }> = [
 	{ state: 'backlog', title: 'Backlog' },
 	{ state: 'ready', title: 'Ready' },
 	{ state: 'in-progress', title: 'In Progress' },
+	{ state: 'review', title: 'In Review' },
 	{ state: 'done', title: 'Done' },
 	{ state: 'failed', title: 'Failed' },
 ];
@@ -68,10 +66,10 @@ export function BoardApp(): JSX.Element {
 	}, []);
 
 	return (
-		<BoardRuntime>
+		<>
 			<style>{boardStyles}</style>
 			<BoardInner state={state} />
-		</BoardRuntime>
+		</>
 	);
 }
 
@@ -80,10 +78,13 @@ interface BoardInnerProps {
 }
 
 /**
- * Inner component so the action / readable hooks live inside the
- * `<CopilotKit>` provider (they require the context).
+ * Task filters and assistant controls. The host supplies board context and validates actions.
  */
 function BoardInner({ state }: BoardInnerProps): JSX.Element {
+	const [query, setQuery] = useState('');
+	const [assignee, setAssignee] = useState('');
+	const [filter, setFilter] = useState<'all' | 'active' | 'attention' | 'done'>('all');
+	const [chatOpen, setChatOpen] = useState(false);
 	const personasById = useMemo(() => {
 		const map = new Map<string, PersonaView>();
 		for (const p of state.personas) {
@@ -94,10 +95,19 @@ function BoardInner({ state }: BoardInnerProps): JSX.Element {
 
 	const assignees = useMemo(() => state.personas.map(p => p.id), [state.personas]);
 
-	useBoardActions(assignees);
-	useBoardReadable(state.snapshot, state.conversationTitle, state.personas);
 
-	const buckets = useMemo(() => bucketize(state.snapshot), [state.snapshot]);
+	const tasks = state.snapshot?.tasks ?? [];
+	const visibleTasks = tasks.filter(task => {
+		const matchesQuery = [task.instruction, task.id, task.assignee, ...task.scopeFiles].join(' ').toLocaleLowerCase().includes(query.trim().toLocaleLowerCase());
+		const matchesFilter = filter === 'all' || (filter === 'active' && ['in-progress', 'review'].includes(task.state)) || (filter === 'attention' && task.state === 'failed') || (filter === 'done' && task.state === 'done');
+		return matchesQuery && matchesFilter && (!assignee || task.assignee === assignee);
+	});
+	const buckets = bucketize(visibleTasks);
+	const completed = tasks.filter(task => task.state === 'done').length;
+	const active = tasks.filter(task => task.state === 'in-progress' || task.state === 'review').length;
+	const failed = tasks.filter(task => task.state === 'failed').length;
+	const progress = tasks.length ? Math.round(completed / tasks.length * 100) : 0;
+	const isFiltered = !!(query || assignee || filter !== 'all');
 
 	const onRefresh = (): void => postToHost({ type: 'refresh' });
 
@@ -106,22 +116,46 @@ function BoardInner({ state }: BoardInnerProps): JSX.Element {
 	return (
 		<main className="shell">
 			<header className="header">
-				<h1>Task Board</h1>
-				{state.conversationId && (
-					<span className="conversation">conversation: {state.conversationTitle}</span>
-				)}
-				<span className="spacer" />
-				<button type="button" onClick={onRefresh}>Refresh</button>
+				<div className="board-heading">
+					<span className="eyebrow">Son of Anton / Task Board</span>
+					<h1>{state.conversationId ? state.conversationTitle : 'From idea to done.'}</h1>
+					<p>Follow the plan. See what needs you. Keep work moving.</p>
+				</div>
+				<div className="header-actions">
+					<button type="button" className="quiet-button" onClick={() => postToHost({ type: 'review-council' })}>Review with Council</button>
+					<button type="button" className="quiet-button" onClick={onRefresh}>Refresh</button>
+					<button type="button" className="secondary-button" aria-expanded={chatOpen} aria-controls="board-assistant" onClick={() => setChatOpen(!chatOpen)}>{chatOpen ? 'Hide Assistant' : 'Ask Anton'}</button>
+				</div>
 			</header>
-			<div className="board-layout">
+			{hasTasks && <>
+				<section className="board-overview" aria-label="Plan progress">
+					<div className="progress-summary"><strong>{progress}%</strong><div><span>{completed} of {tasks.length} complete</span><progress value={completed} max={tasks.length} aria-label="Tasks completed" /></div></div>
+					<div className="overview-filters" aria-label="Filter tasks">
+						{([{ value: 'all', label: 'All Tasks', count: tasks.length }, { value: 'active', label: 'Active', count: active }, { value: 'attention', label: 'Needs Attention', count: failed }, { value: 'done', label: 'Completed', count: completed }] as const).map(item => <button key={item.value} type="button" className={`overview-filter ${item.value}`} aria-pressed={filter === item.value} onClick={() => setFilter(item.value)}><span className="status-dot" />{item.label}<span className="filter-count">{item.count}</span></button>)}
+					</div>
+				</section>
+				<div className="board-toolbar">
+					<label className="task-search"><span aria-hidden="true">⌕</span><input type="search" aria-label="Search tasks" placeholder="Search tasks, files, or agents…" value={query} onChange={event => setQuery(event.target.value)} /></label>
+					<select aria-label="Filter by agent" value={assignee} onChange={event => setAssignee(event.target.value)}><option value="">All Agents</option>{assignees.map(id => <option key={id} value={id}>@{id}</option>)}</select>
+					<span className="results-count" role="status">{visibleTasks.length} {visibleTasks.length === 1 ? 'task' : 'tasks'}</span>
+					{isFiltered && <button type="button" className="quiet-button" onClick={() => { setQuery(''); setAssignee(''); setFilter('all'); }}>Clear Filters</button>}
+				</div>
+			</>}
+			<div className={`board-layout${chatOpen ? ' with-assistant' : ''}`}>
 				{!hasTasks && (
 					<section className="empty">
-						No active plan. Send a request to <code>@anton</code> to generate one.
+						<div className="empty-board-mark" aria-hidden="true"><span /><span /><span /></div>
+						<span className="eyebrow">A clear path forward</span>
+						<h2>Your next project starts here.</h2>
+						<p>Describe what you want to build in chat. Anton will break it into tasks you can follow, run, and review here.</p>
+						<button type="button" className="primary-button" onClick={() => postToHost({ type: 'open-chat' })}>Open Chat <span aria-hidden="true">↗</span></button>
+						<div className="empty-workflow"><span>01 · Plan</span><span>02 · Build</span><span>03 · Review</span></div>
 					</section>
 				)}
 				{hasTasks && (
-					<section className="columns">
-						{COLUMNS.map(col => (
+					<section className="columns" aria-label="Task board" tabIndex={0}>
+						{visibleTasks.length === 0 && <div className="column-empty">No tasks match your filters.</div>}
+						{COLUMNS.filter(col => !isFiltered || buckets[col.state].length > 0).map(col => (
 							<KanbanColumn
 								key={col.state}
 								title={col.title}
@@ -132,13 +166,13 @@ function BoardInner({ state }: BoardInnerProps): JSX.Element {
 						))}
 					</section>
 				)}
-				<BoardChat assignees={assignees} />
+				<div id="board-assistant" className="assistant-container" hidden={!chatOpen}><BoardChat key={state.conversationId ?? 'empty'} assignees={assignees} /></div>
 			</div>
 		</main>
 	);
 }
 
-function bucketize(snapshot: BoardSnapshotView | null): Record<SubtaskState, BoardSnapshotView['tasks'][number][]> {
+function bucketize(tasks: BoardSnapshotView['tasks']): Record<SubtaskState, BoardSnapshotView['tasks'][number][]> {
 	const buckets: Record<SubtaskState, BoardSnapshotView['tasks'][number][]> = {
 		'backlog': [],
 		'ready': [],
@@ -147,16 +181,9 @@ function bucketize(snapshot: BoardSnapshotView | null): Record<SubtaskState, Boa
 		'done': [],
 		'failed': [],
 	};
-	if (!snapshot) {
-		return buckets;
-	}
-	for (const task of snapshot.tasks) {
+	for (const task of tasks) {
 		const bucket = buckets[task.state] ?? buckets.backlog;
 		bucket.push(task);
 	}
-	// Review tiles ride along with in-progress visually — same merging the
-	// vanilla JS surface did. The state badge on each tile still shows the
-	// precise state, so the LLM sees the difference via the readable hook.
-	buckets['in-progress'] = [...buckets['in-progress'], ...buckets['review']];
 	return buckets;
 }

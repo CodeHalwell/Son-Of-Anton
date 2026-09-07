@@ -1,0 +1,812 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+// Exercises the shipped webview HTML, CSS and bundle with an offline host fixture.
+// Build core + extension first. Run: node --test test/ui/webviews.test.mjs
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile, mkdir } from 'node:fs/promises';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import { chromium } from 'playwright';
+const require = createRequire(import.meta.url);
+const extension = fileURLToPath(new URL('../..', import.meta.url));
+const root = path.resolve(extension, '../..');
+const { PERSONAS, getRoster } = require(path.join(root, 'son-of-anton-core/dist/chat/personas.js'));
+const { SPECIALIST_ROLES } = require(path.join(root, 'son-of-anton-core/dist/chat/specialistRegistry.js'));
+const { MODEL_METADATA } = require(path.join(root, 'son-of-anton-core/dist/llm/modelMetadata.js'));
+const theme = {
+	'font-family': 'system-ui, sans-serif', 'font-size': '13px', 'foreground': '#dce2ec',
+	'editor-background': '#171a20', 'sideBar-background': '#1c2027', 'editorWidget-background': '#242a33',
+	'descriptionForeground': '#a4afbf', 'panel-border': '#373f4b', 'input-background': '#242a33', 'input-foreground': '#e4e9f2',
+	'input-placeholderForeground': '#a4afbf', 'button-background': '#2868ba', 'button-foreground': '#ffffff',
+	'button-hoverBackground': '#357ac9', 'focusBorder': '#78afff', 'textLink-foreground': '#78afff',
+	'badge-background': '#333e50', 'badge-foreground': '#e4e9f2', 'dropdown-background': '#242a33',
+	'charts-green': '#80cda8', 'charts-yellow': '#e5bf70', 'charts-blue': '#78afff', 'charts-purple': '#bda0ed', 'errorForeground': '#ff9c8c',
+};
+const fixture = {
+	type: 'snapshot', conversationId: 'ui-fixture', conversationTitle: 'Build a better developer experience',
+	personas: getRoster(), snapshot: { conversationId: 'ui-fixture', createdAt: 1, tasks: [
+		['backlog', 'Document the new workspace setup', 'anton-docs', 'docs/getting-started.md'],
+		['ready', 'Add keyboard navigation to the task board', 'anton-code', 'src/board/navigation.ts'],
+		['in-progress', 'Keep long conversations responsive while tokens stream', 'anton-code', 'src/chat/streaming.ts'],
+		['review', 'Review checkpoint recovery and workspace isolation', 'anton-security', 'src/checkpoint/store.ts'],
+		['done', 'Index source changes without stale symbols', 'anton-code', 'src/graph/index.ts'],
+		['failed', 'Validate the installed application on a clean machine', 'anton-test', 'test/installation.test.ts'],
+	].map(([state, instruction, assignee, file], index) => ({ id: `task-${index}`, state, instruction, assignee, scopeFiles: [file], dependencies: index === 3 ? ['task-1'] : [], summary: state === 'failed' ? 'The native module is missing from the packaged application.' : undefined })) },
+};
+let browser;
+before(async () => { browser = await chromium.launch({ ...(process.env.SOTA_UI_BROWSER ? { executablePath: process.env.SOTA_UI_BROWSER } : {}), headless: true }); });
+after(async () => { await browser?.close(); });
+
+async function openSurface(t, surface, width = 1440, initialState, suppliedHtml, specialists = SPECIALIST_ROLES) {
+	const context = await browser.newContext({ viewport: { width, height: 900 }, reducedMotion: 'reduce' });
+	t.after(() => context.close());
+	const page = await context.newPage();
+	const errors = [];
+	page.on('pageerror', error => errors.push(error.message));
+	t.after(() => assert.deepEqual(errors, [], 'The webview must not throw during interaction'));
+	await page.addInitScript(({ values, initialState }) => {
+		window.sentMessages = [];
+		let state = initialState;
+		window.acquireVsCodeApi = () => ({ postMessage: message => window.sentMessages.push(message), getState: () => state, setState: next => { state = next; window.savedWebviewState = next; } });
+		document.addEventListener('DOMContentLoaded', () => {
+			for (const [name, value] of Object.entries(values)) document.documentElement.style.setProperty('--vscode-' + name, value);
+			document.body.classList.add('vscode-dark');
+		});
+	}, { values: theme, initialState });
+	let html;
+	if (suppliedHtml) {
+		html = suppliedHtml;
+	} else if (surface === 'chat') {
+		const source = await readFile(path.join(extension, 'src/chat/ChatPanel.ts'), 'utf8');
+		html = source.slice(source.indexOf('return /* html */`<!DOCTYPE html>')).split('`')[1];
+		const labelsSource = await readFile(path.join(extension, 'src/chat/chatUiStrings.ts'), 'utf8');
+		const labels = Object.fromEntries([...labelsSource.matchAll(/(\w+): vscode\.l10n\.t\('([^']*)'\)/g)].map(match => [match[1], match[2]]));
+		const values = { conversationId: 'initial-conversation', uiStringsJson: JSON.stringify(labels), 'this.webview.cspSource': 'https://sota.test', nonce: 'ui-fixture', cssUri: 'https://sota.test/chat.css', webviewJsUri: 'https://sota.test/chat-webview.js', defaultModel: 'sonnet', initialTab: 'chat', specialistRolesJson: JSON.stringify(specialists), personasJson: JSON.stringify(PERSONAS), rosterJson: JSON.stringify(getRoster()), slashCommandsJson: '[]', modelMetadataJson: JSON.stringify(MODEL_METADATA) };
+		html = html.replace(/\$\{([^}]+)\}/g, (_, name) => { assert.ok(name in values, name); return values[name]; });
+	} else { html = '<!doctype html><html lang="en"><head><meta charset="utf-8"></head><body><div id="root"></div><script src="https://sota.test/board.js"></script></body></html>'; }
+	await context.route('**/*', async route => {
+		const url = new URL(route.request().url());
+		if (url.origin !== 'https://sota.test') { await route.abort(); return; }
+		const asset = { '/chat.css': 'media/chat.css', '/chat-webview.js': 'media/chat-webview.js', '/board.js': 'dist/board.js', '/council.js': 'media/council.js', '/council.css': 'media/council.css' }[url.pathname];
+		await route.fulfill({ status: 200, contentType: asset ? (asset.endsWith('.css') ? 'text/css' : 'text/javascript') : 'text/html', body: asset ? await readFile(path.join(extension, asset)) : html });
+	});
+	await page.goto('https://sota.test/');
+	await page.locator(surface === 'chat' ? '#messageInput' : suppliedHtml ? 'body' : '.shell').waitFor();
+	return page;
+}
+
+/** Exercise the panel's actual HTML generator without starting native services. */
+async function panelHtml(relativeFile, exportName, method, args = []) {
+	const filename = path.join(extension, 'src', relativeFile + '.ts');
+	const typescript = require('typescript');
+	const source = await readFile(filename, 'utf8');
+	const compiled = typescript.transpileModule(source, { compilerOptions: { module: typescript.ModuleKind.CommonJS, target: typescript.ScriptTarget.ES2022 } }).outputText;
+	const exports = {};
+	const sourceRequire = createRequire(filename);
+	const localRequire = name => name === 'vscode' ? { l10n: { t: value => value } } : name.startsWith('son-of-anton-core/') ? require(path.join(root, 'son-of-anton-core/dist', name.slice('son-of-anton-core/'.length))) : sourceRequire(name);
+	new Function('require', 'exports', compiled)(localRequire, exports);
+	if (!method) { return exports[exportName](...args); }
+	const panel = Object.assign(Object.create(exports[exportName].prototype), { panel: { webview: { cspSource: 'https://sota.test' } } });
+	return panel[method](...args);
+}
+async function post(page, message) { await page.evaluate(data => window.dispatchEvent(new MessageEvent('message', { data })), message); }
+
+test('proposal review supports safe file selection, diffs, validation logs and restore at sidebar widths', async t => {
+	const maliciousName = '<img src=x onerror=alert(1)>.ts';
+	const proposal = { id: 'proposal', files: ['src/validator.ts', 'src/api.ts', maliciousName], appliedFiles: ['src/api.ts'], applications: [{ files: ['src/api.ts'], recovery: { ref: 'checkpoint' } }], validation: { status: 'failed', commands: [{ script: 'test', exitCode: 7, durationMs: 1200, log: '/fixture.log' }], error: 'Test failed <script>alert(1)</script>' } };
+	const html = await panelHtml('council/ProposalReviewPanel', 'proposalReviewHtml', undefined, [proposal, ['src/validator.ts'], false]);
+	const page = await openSurface(t, 'proposal', 420, undefined, html);
+	assert.equal(await page.locator('img').count(), 0);
+	assert.equal(await page.locator('[data-select="1"]').isDisabled(), true);
+	await page.locator('[data-diff="0"]').click(); await page.locator('[data-select="2"]').check();
+	await page.locator('[data-action="validate"]').click(); await page.locator('[data-log="0"]').click(); await page.locator('[data-action="restore"]').click();
+	assert.deepEqual(await page.evaluate(() => sentMessages), [{ type: 'diff', file: 'src/validator.ts' }, { type: 'select', files: ['src/validator.ts', maliciousName] }, { type: 'validate' }, { type: 'log', index: 0 }, { type: 'restore' }]);
+	await assertNoPageOverflow(page); await screenshot(page, 'proposal-review');
+	const busyHtml = await panelHtml('council/ProposalReviewPanel', 'proposalReviewHtml', undefined, [proposal, ['src/validator.ts'], true]);
+	const busyPage = await openSurface(t, 'proposal', 420, undefined, busyHtml);
+	assert.equal(await busyPage.locator('[data-action="apply"]').isDisabled(), true);
+	await busyPage.locator('[data-action="cancel"]').click(); assert.deepEqual(await busyPage.evaluate(() => sentMessages), [{ type: 'cancel' }]);
+});
+async function frames(page) { await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))); }
+async function screenshot(page, name) {
+	if (!process.env.SOTA_UI_SCREENSHOTS) return;
+	await mkdir(process.env.SOTA_UI_SCREENSHOTS, { recursive: true });
+	await page.screenshot({ path: path.join(process.env.SOTA_UI_SCREENSHOTS, name + '.png') });
+}
+async function assertNoPageOverflow(page) {
+	assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'Only the board, not the whole page, may scroll horizontally');
+}
+
+test('chat: responsive welcome, provider search, keyboard tabs and composer', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	await page.locator('#emptyStateReady').waitFor({ state: 'visible' });
+	await screenshot(page, 'chat-welcome');
+	await page.getByRole('button', { name: /Understand the Code/ }).click();
+	assert.match(await page.locator('#messageInput').inputValue(), /Explain what/);
+	await page.getByRole('tab', { name: 'Chat tab', exact: true }).focus();
+	await page.keyboard.press('ArrowRight');
+	assert.equal(await page.getByRole('tab', { name: 'Tasks tab', exact: true }).getAttribute('aria-selected'), 'true');
+	await page.getByRole('tab', { name: 'Chat tab', exact: true }).click();
+	await post(page, { type: 'connectionState', status: { providers: [], apiKeys: {} } });
+	await page.getByRole('searchbox', { name: 'Find a provider' }).fill('ollama');
+	assert.equal(await page.locator('#emptyStateProviders .provider-card:visible').count(), 1);
+	await page.getByRole('searchbox', { name: 'Find a provider' }).fill('does-not-exist');
+	await page.locator('#providerSearchEmpty').waitFor({ state: 'visible' });
+	for (const width of [280, 400, 800]) { await page.setViewportSize({ width, height: 900 }); await assertNoPageOverflow(page); }
+});
+
+test('chat: batched streaming preserves reading position, text, and composer focus', async t => {
+	const page = await openSurface(t, 'chat', 420);
+	await page.locator('#messageInput').fill('Review this implementation');
+	await page.locator('#messageInput').press('Enter');
+	await post(page, { type: 'streamToken', token: 'A long response.\n'.repeat(150) });
+	await frames(page);
+	await page.locator('#messageList').evaluate(list => { list.scrollTop = 0; list.dispatchEvent(new Event('scroll')); });
+	await page.locator('#messageInput').focus();
+	await page.evaluate(() => { for (let i = 0; i < 1000; i++) window.dispatchEvent(new MessageEvent('message', { data: { type: 'streamToken', token: 'x' } })); });
+	await frames(page);
+	assert.equal(await page.locator('#messageList').evaluate(list => list.scrollTop), 0);
+	assert.equal(await page.locator('#messageInput').evaluate(input => input === document.activeElement), true);
+	await page.locator('#jumpToLatest').waitFor({ state: 'visible' });
+	await post(page, { type: 'messageComplete', totalTokens: 1200, estimatedCost: '0.01' });
+	assert.match(await page.locator('.msg-text-rendered').textContent(), /x{1000}/);
+	await page.locator('#jumpToLatest').click();
+	await frames(page);
+	assert.equal(await page.locator('#messageList').evaluate(list => list.scrollHeight - list.clientHeight - list.scrollTop < 2), true);
+	await screenshot(page, 'chat-streaming');
+	await page.locator('#messageInput').fill('Start another task');
+	await page.locator('#messageInput').press('Enter');
+	await page.locator('#sendBtn.is-streaming').waitFor();
+	await post(page, { type: 'loadConversation', messages: [] });
+	assert.equal(await page.getByRole('button', { name: 'Stop generating', exact: true }).count(), 0);
+});
+
+test('chat: live Markdown hides protocol fragments and preserves tool controls and source code', async t => {
+	const page = await openSurface(t, 'chat', 420);
+	await page.locator('#messageInput').fill('Explain this example');
+	await page.locator('#messageInput').press('Enter');
+	await post(page, { type: 'streamToken', token: '## Result\n\n```ts\nconst example = "<tag>";' });
+	await frames(page);
+	assert.equal(await page.locator('.thinking-indicator').count(), 0);
+	assert.equal(await page.locator('.msg-text-stream h2').textContent(), 'Result');
+	assert.equal(await page.locator('.msg-text-stream pre code').textContent(), 'const example = "<tag>";');
+	await post(page, { type: 'streamToken', token: '\n```' });
+	await post(page, { type: 'toolCall', id: 'read', name: 'read_file', input: { path: 'clamp.ts' }, status: 'done', output: 'Read complete' });
+	await post(page, { type: 'streamToken', token: '\n\nFinished.\n<<sota:sug' });
+	await frames(page);
+	assert.doesNotMatch(await page.locator('.msg-body').last().textContent(), /<<sota/);
+	await post(page, { type: 'streamToken', token: 'gestions>>["Explain the guard"]<<sota:end>>' });
+	await frames(page);
+	assert.doesNotMatch(await page.locator('.msg-body').last().textContent(), /Explain the guard|sota:end/);
+	await post(page, { type: 'messageComplete', inputTokens: 12, outputTokens: 34, totalTokens: 46, estimatedCost: '0.00' });
+	assert.equal(await page.locator('.tool-card').count(), 1);
+	assert.equal(await page.locator('.msg-text-rendered pre code').textContent(), 'const example = "<tag>";');
+	await page.getByRole('button', { name: 'Explain the guard', exact: true }).waitFor();
+	assert.match(await page.locator('#transcriptTaskMeter').textContent(), /12.*34/);
+	await post(page, { type: 'messageComplete', usageUnavailable: true });
+	await post(page, { type: 'sessionUsage', totalTokens: 46, totalCost: 0, turnCount: 2, unmeteredTurns: 1 });
+	assert.equal(await page.locator('#tokenCount').textContent(), 'Usage Unavailable');
+	assert.equal(await page.locator('#sessionUsageCost').textContent(), '—');
+});
+
+test('chat: Markdown tables render accessible cells without overflowing narrow conversations', async t => {
+	const page = await openSurface(t, 'chat', 420);
+	const content = '## Edge cases\n\n| Input | Result | Notes |\n|:---|---:|:---:|\n| `min > max` | `max` | **Validate bounds** |\n| `a | b` | 3 | escaped \\| pipe |\n| <script>alert(1)</script> | 0 | [Docs](https://example.com) |\n\nDone.';
+	await post(page, { type: 'loadConversation', messages: [{ role: 'assistant', content }] });
+	assert.equal(await page.locator('.markdown-table tbody tr').count(), 3);
+	assert.deepEqual(await page.locator('.markdown-table tbody tr').nth(1).locator('td').allTextContents(), ['a | b', '3', 'escaped | pipe']);
+	assert.equal(await page.locator('.markdown-table script').count(), 0);
+	assert.equal(await page.locator('.markdown-table th[scope="col"]').count(), 3);
+	await page.getByRole('region', { name: 'Response Table' }).focus();
+	assert.equal(await page.locator('body').evaluate(body => body.scrollWidth <= window.innerWidth), true);
+	await screenshot(page, 'markdown-table');
+});
+
+test('sidebar chat: compact conversations keep menus, streaming and composer controls reachable', async t => {
+	const page = await openSurface(t, 'chat', 360);
+	const content = '## Bounds check\n\n| Input | Result | Explanation |\n|---|---|---|\n| `clamp(5, 0, 10)` | `5` | Within the bounds |\n| `clamp(-2, 0, 10)` | `0` | Below the minimum |\n| `clamp(8, 10, 5)` | `5` | Reversed bounds need validation |\n\n```typescript\nif (min > max) {\n\tthrow new RangeError("Minimum must not exceed maximum");\n}\n```\n\n[Documentation](https://example.com/docs)';
+	await post(page, { type: 'loadConversation', messages: [{ role: 'user', content: 'Explain bounds validation in this example' }, { role: 'assistant', content, specialistId: 'anton-docs' }] });
+	await post(page, { type: 'costUpdate', tokens: 12000, inputTokens: 10000, outputTokens: 2000, dollars: 0.24 });
+	await post(page, { type: 'messageComplete', usageUnavailable: true });
+	await post(page, { type: 'sessionUsage', totalTokens: 12000, totalCost: 0.24, turnCount: 3, unmeteredTurns: 1 });
+	const visibleBounds = async selector => {
+		const box = await page.locator(selector).boundingBox();
+		const viewport = page.viewportSize();
+		assert.ok(box && box.width > 0 && box.height > 0 && box.x >= 0 && box.y >= 0 && box.x + box.width <= viewport.width + 1 && box.y + box.height <= viewport.height + 1, `${selector} must fit inside the sidebar: ${JSON.stringify(box)}`);
+	};
+	for (const viewport of [{ width: 360, height: 620 }, { width: 280, height: 480 }, { width: 420, height: 540 }]) {
+		await page.setViewportSize(viewport);
+		await frames(page);
+		await assertNoPageOverflow(page);
+		await page.locator('#messageList').evaluate(list => { list.scrollTop = list.scrollHeight; });
+		const listBounds = await page.locator('#messageList').boundingBox();
+		const headerBounds = await page.locator('#transcriptTaskHeader').boundingBox();
+		assert.ok(Math.abs(headerBounds.y - listBounds.y) <= 1, 'The pinned task header must cover the top of the transcript');
+		const linkBounds = await page.getByRole('link', { name: 'Documentation', exact: true }).boundingBox();
+		const codeBounds = await page.locator('.code-block').boundingBox();
+		assert.ok(linkBounds.y - (codeBounds.y + codeBounds.height) <= 32, 'Code fences must not create empty text rows before the next paragraph');
+		const actionBounds = await page.locator('.msg-assistant .msg-actions').boundingBox();
+		assert.ok(actionBounds.y >= linkBounds.y + linkBounds.height, 'Message actions must occupy their own row below the response');
+		for (const selector of ['#messageInput', '#sendBtn', '#newChatBtn', '#sessionUsage']) { await visibleBounds(selector); }
+		assert.ok((await page.locator('#messageList').boundingBox()).height >= 100, 'The transcript needs reading space above the composer');
+		for (const [anchor, menu] of [['#modelChip', '#modelMenu'], ['#agentChip', '#agentMenu'], ['#hdrCost', '#hdrCostPopover']]) {
+			await page.locator(anchor).click();
+			await visibleBounds(menu);
+			await page.locator(anchor).click();
+		}
+		await screenshot(page, `sidebar-chat-${viewport.width}`);
+	}
+	await page.locator('#messageInput').fill('Explain the guard');
+	await page.locator('#messageInput').press('Enter');
+	await post(page, { type: 'streamToken', token: '## Validate first\n\nReject reversed bounds before clamping.' });
+	await frames(page);
+	await visibleBounds('#sendBtn');
+	await page.locator('#sendBtn').click();
+	assert.equal(await page.evaluate(() => sentMessages.some(message => message.type === 'cancelRequest')), true);
+});
+
+test('board: complete lifecycle, filters, keyboard card actions and responsive layout', async t => {
+	const page = await openSurface(t, 'board');
+	await post(page, fixture);
+	await page.locator('.tile').first().waitFor();
+	assert.equal(await page.locator('.column').count(), 6);
+	assert.equal(await page.locator('.column[data-state="review"] .tile').count(), 1);
+	await screenshot(page, 'task-board');
+	await page.getByRole('searchbox', { name: 'Search tasks' }).fill('navigation.ts');
+	assert.equal(await page.locator('.tile').count(), 1);
+	await page.getByRole('button', { name: 'Run Task', exact: true }).focus();
+	await page.keyboard.press('Enter');
+	assert.equal(await page.evaluate(() => sentMessages.some(message => message.type === 'dispatch' && message.taskId === 'task-1')), true);
+	await page.getByRole('button', { name: 'Clear Filters' }).click();
+	await page.getByRole('button', { name: /Needs Attention/ }).click();
+	assert.equal(await page.locator('.tile').count(), 1);
+	await page.locator('.task-details summary').focus();
+	await page.keyboard.press('Enter');
+	assert.equal(await page.locator('.task-details').getAttribute('open'), '');
+	await page.getByRole('button', { name: 'Clear Filters' }).click();
+	for (const width of [1440, 900, 400, 280]) { await page.setViewportSize({ width, height: 900 }); await assertNoPageOverflow(page); }
+	await screenshot(page, 'task-board-narrow');
+});
+
+test('chat controls: code actions execute under the shipped content security policy', async t => {
+	const page = await openSurface(t, 'chat', 420);
+	const code = '// path: src/example.ts\nexport const answer = 42;';
+	const diff = '--- a/src/example.ts\n+++ b/src/example.ts\n@@ -1 +1 @@\n-export const answer = 41;\n+export const answer = 42;';
+	await post(page, { type: 'loadConversation', messages: [{ role: 'assistant', content: '```ts\n' + code + '\n```\n\n```diff\n' + diff + '\n```' }] });
+	await page.locator('.code-copy').first().click();
+	await page.locator('.code-open').first().click();
+	await page.locator('.code-save').first().click();
+	await page.locator('.code-diff').click();
+	const messages = await page.evaluate(() => sentMessages);
+	assert.deepEqual(messages.filter(message => ['copyCode', 'openCodeInEditor', 'saveCodeToFile', 'previewDiff'].includes(message.type)), [
+		{ type: 'copyCode', text: code }, { type: 'openCodeInEditor', code, language: 'ts' },
+		{ type: 'saveCodeToFile', code, relPath: 'src/example.ts' }, { type: 'previewDiff', diff: diff + '\n' },
+	]);
+});
+
+test('trace viewer: live data, every filter, keyboard details, refresh and export', async t => {
+	const html = await panelHtml('trace/TraceViewerPanel', 'TraceViewerPanel', 'getHtmlContent', [{}]);
+	const page = await openSurface(t, 'panel', 800, undefined, html);
+	const types = ['llm_call', 'mcp_tool', 'file_change', 'hook', 'lifecycle'];
+	const spans = types.map((type, index) => ({ id: 'span-' + index, name: 'Review ' + type, type, startTime: 1000 + index * 100, endTime: 2000 + index * 100, taskId: 'task-1', attributes: { detail: '<script>escaped content</script>' } }));
+	await post(page, { type: 'traceData', spans, tokenUsage: { input: 10, output: 20 }, estimatedCost: '0.04', focusTaskId: 'task-1', focusTaskLabel: 'Review UI', totalSpans: 5 });
+	assert.equal(await page.locator('.span-row').count(), 5);
+	for (const type of types) {
+		await page.locator('#filterType').selectOption(type);
+		assert.equal(await page.locator('.span-row').count(), 1);
+		await page.locator('.span-row').focus();
+		await page.keyboard.press('Enter');
+		assert.equal(await page.locator('#detailTitle').textContent(), 'Review ' + type);
+	}
+	await page.locator('#filterType').selectOption('all');
+	for (const selector of ['#refreshBtn', '#exportBtn', '#clearTaskFilterBtn']) { await page.locator(selector).click(); }
+	assert.deepEqual(await page.evaluate(() => sentMessages.map(message => message.type)), ['refresh', 'exportTraces', 'clearTaskFilter']);
+	await page.setViewportSize({ width: 360, height: 620 });
+	await assertNoPageOverflow(page);
+	await screenshot(page, 'trace-viewer');
+});
+
+test('setup wizard: every provider form, help, save feedback, back, cancel and skip', async t => {
+	const html = await panelHtml('onboarding/SetupWizardPanel', 'SetupWizardPanel', 'renderHtml');
+	const page = await openSurface(t, 'panel', 760, undefined, html);
+	for (const provider of ['anthropic', 'openai', 'foundry', 'bedrock', 'google']) {
+		await page.locator(`.card[data-provider="${provider}"]`).click();
+		assert.equal(await page.locator(`#form-${provider}`).getAttribute('class'), 'section active', JSON.stringify(await page.evaluate(() => ({ messages: sentMessages, sections: [...document.querySelectorAll('.section')].map(section => [section.id, section.className]) }))));
+		const form = page.locator(`form[data-provider="${provider}"]`);
+		for (const input of await form.locator('input').all()) { await input.fill('ui-fixture'); }
+		await page.locator(`#form-${provider} .link`).click();
+		await form.getByRole('button', { name: 'Save and validate', exact: true }).click();
+		assert.equal(await page.evaluate(provider => sentMessages.some(message => message.type === 'save-credentials' && message.provider === provider), provider), true);
+		await post(page, { type: 'save-result', provider, ok: false, message: 'Fixture: check these credentials' });
+		assert.match(await form.locator('.status').textContent(), /check these credentials/);
+		await post(page, { type: 'save-result', provider, ok: true, message: 'Fixture: configured' });
+		await form.getByRole('button', { name: 'Cancel', exact: true }).click();
+		await page.locator(`.card[data-provider="${provider}"]`).click();
+		await page.locator(`#form-${provider} button[data-target="picker"]`).click();
+	}
+	await page.locator('#skip-button').click();
+	assert.equal(await page.evaluate(() => sentMessages.filter(message => message.type === 'open-link').length), 5);
+	assert.equal(await page.evaluate(() => sentMessages.at(-1).type), 'skip');
+	await page.setViewportSize({ width: 280, height: 620 });
+	await assertNoPageOverflow(page);
+	await screenshot(page, 'setup-wizard');
+});
+
+test('impact analysis: every filter and keyboard file navigation handle long content', async t => {
+	const nodes = ['direct', 'transitive', 'test', 'documentation'].map((type, index) => ({ id: String(index), label: 'Review ' + type, filePath: '/workspace/' + 'long-folder/'.repeat(12) + type + '.ts', type, depth: index }));
+	const html = await panelHtml('impact/ImpactAnalysisPanel', 'ImpactAnalysisPanel', 'getHtml', [{ target: { name: 'clamp', filePath: '/workspace/example.ts' }, nodes, edges: [], summary: { directCount: 1, transitiveCount: 1, testCount: 1, documentationCount: 1 } }]);
+	const page = await openSurface(t, 'panel', 800, undefined, html);
+	for (const node of nodes) {
+		await page.locator(`[data-filter="${node.type}"]`).click();
+		assert.equal(await page.locator('.node-item').count(), 1);
+		await page.locator('.node-item').focus();
+		await page.keyboard.press('Enter');
+		assert.equal(await page.evaluate(() => sentMessages.at(-1)?.filePath), node.filePath);
+	}
+	await page.locator('[data-filter="all"]').click();
+	assert.equal(await page.locator('.node-item').count(), 4);
+	await page.setViewportSize({ width: 360, height: 620 });
+	await assertNoPageOverflow(page);
+	await screenshot(page, 'impact-analysis');
+});
+
+test('fleet dashboard: active, failed and completed tasks expose refresh, cancellation and results', async t => {
+	const task = { id: 'active', name: 'Review a long-running UI task', status: 'running', startedAt: Date.now() - 5000, completedAt: Date.now(), progress: { percentage: 50, message: 'Checking controls' }, tokenUsage: { estimatedCostUsd: 0.1 } };
+	const html = await panelHtml('dashboard/FleetDashboardPanel', 'FleetDashboardPanel', 'buildHtml', [[task], [{ ...task, id: 'done', status: 'completed' }], [], [{ type: 'error', message: 'A task needs attention' }]]);
+	const page = await openSurface(t, 'panel', 800, undefined, html);
+	for (const action of ['cancel', 'results', 'refresh']) { await page.locator(`[data-action="${action}"]`).click(); }
+	assert.deepEqual(await page.evaluate(() => sentMessages), [{ command: 'cancelTask', taskId: 'active' }, { command: 'viewResults', taskId: 'done' }, { command: 'refresh' }]);
+	await page.setViewportSize({ width: 360, height: 620 });
+	await assertNoPageOverflow(page);
+	await page.locator('[data-action="cancel"]').focus();
+	await post(page, { type: 'dashboardUpdate', html });
+	assert.equal(await page.locator('[data-action="cancel"]').evaluate(button => button === document.activeElement), true);
+	await page.locator('[data-action="cancel"]').press('Enter');
+	assert.equal(await page.evaluate(() => sentMessages.at(-1).command), 'cancelTask');
+	await screenshot(page, 'fleet-dashboard');
+});
+
+test('board assistant: keep tool activity through tokens and cancel the host request', async t => {
+	const page = await openSurface(t, 'board');
+	await post(page, fixture);
+	await page.getByRole('button', { name: 'Ask Anton', exact: true }).click();
+	await page.getByRole('textbox', { name: 'Message the board assistant' }).fill('Summarise progress');
+	await page.getByRole('button', { name: 'Send ↑' }).click();
+	const request = await page.evaluate(() => sentMessages.find(message => message.type === 'chat-runtime'));
+	assert.ok(request);
+	await post(page, { type: 'chat-runtime-chunk', requestId: request.requestId, event: { type: 'tool-call', id: 'call-1', name: 'setCardAssignee', input: { cardId: 'task-1', assignee: 'anton-code' } } });
+	await post(page, { type: 'chat-runtime-chunk', requestId: request.requestId, event: { type: 'token', token: 'The plan is moving forward.' } });
+	await frames(page);
+	assert.equal(await page.locator('.chat-tool-call').count(), 1);
+	await page.getByRole('textbox', { name: 'Message the board assistant' }).fill('A draft for later');
+	await page.getByRole('button', { name: 'Stop', exact: true }).click();
+	assert.equal(await page.evaluate(id => sentMessages.some(message => message.type === 'cancel-chat' && message.requestId === id), request.requestId), true);
+	assert.equal(await page.getByRole('textbox', { name: 'Message the board assistant' }).inputValue(), 'A draft for later');
+	await post(page, { type: 'chat-runtime-chunk', requestId: request.requestId, event: { type: 'token', token: 'LATE TOKEN' } });
+	assert.doesNotMatch(await page.locator('.chat-log').textContent(), /LATE TOKEN/);
+	await screenshot(page, 'board-assistant');
+});
+
+test('light and high contrast themes: empty board, provider picker, and conversation remain usable', async t => {
+	const light = { ...theme, foreground: '#253143', 'editor-background': '#ffffff', 'sideBar-background': '#f6f7f9', 'editorWidget-background': '#f2f4f7', 'descriptionForeground': '#536175', 'panel-border': '#ced5df', 'input-background': '#f2f4f7', 'input-foreground': '#253143', 'input-placeholderForeground': '#536175', 'dropdown-background': '#f2f4f7', 'badge-background': '#e8ecf2', 'badge-foreground': '#253143', 'focusBorder': '#2868ba', 'charts-green': '#26734b', 'charts-yellow': '#88600b', 'charts-blue': '#2868ba', 'charts-purple': '#774ba8', 'errorForeground': '#b93828' };
+	for (const surface of ['board', 'chat']) {
+		const page = await openSurface(t, surface, surface === 'chat' ? 400 : 1440);
+		await page.evaluate(values => { document.body.className = 'vscode-light'; for (const [name, value] of Object.entries(values)) document.documentElement.style.setProperty('--vscode-' + name, value); }, light);
+		if (surface === 'board') {
+			await screenshot(page, 'board-empty-light');
+			await page.getByRole('button', { name: 'Open Chat', exact: false }).click();
+			assert.equal(await page.evaluate(() => sentMessages.some(message => message.type === 'open-chat')), true);
+			await post(page, fixture);
+		} else {
+			await screenshot(page, 'chat-welcome-light');
+			await post(page, { type: 'connectionState', status: { providers: [], apiKeys: {} } });
+			await page.getByRole('searchbox', { name: 'Find a provider' }).fill('OpenAI');
+		}
+		await screenshot(page, surface + '-light');
+		await page.evaluate(() => { document.body.className = 'vscode-high-contrast'; document.documentElement.style.setProperty('--vscode-contrastBorder', '#000000'); });
+		await assertNoPageOverflow(page);
+		await screenshot(page, surface + '-contrast');
+	}
+});
+
+test('history: search, date groups, active title, bounded rendering, and keyboard navigation', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const now = Date.now();
+	const conversations = Array.from({ length: 80 }, (_, i) => ({ id: 'conversation-' + i, title: i === 2 ? 'Investigate authentication timeouts' : 'Implementation discussion ' + i, updatedAt: now - i * 24 * 60 * 60 * 1000, messageCount: i + 1, lastSpecialist: i === 2 ? 'anton-security' : 'anton-code' }));
+	const snapshot = { type: 'historySnapshot', activeId: 'conversation-2', conversations };
+	await post(page, snapshot);
+	await page.getByRole('tab', { name: 'History tab', exact: true }).click();
+	assert.equal(await page.locator('.history-pane-row').count(), 50);
+	assert.equal(await page.locator('#conversationTitle').textContent(), 'Investigate authentication timeouts');
+	await page.getByRole('button', { name: 'Show More', exact: true }).click();
+	assert.equal(await page.locator('.history-pane-row').count(), 80);
+	await page.getByRole('searchbox', { name: 'Search Conversations…' }).fill('anton-security');
+	assert.equal(await page.locator('.history-pane-row').count(), 1);
+	await page.locator('.history-pane-row-open').focus();
+	await post(page, snapshot);
+	assert.equal(await page.locator('.history-pane-row-open').evaluate(button => button === document.activeElement), true);
+	await page.keyboard.press('Enter');
+	assert.equal(await page.evaluate(() => sentMessages.some(message => message.command === 'sota.openConversation' && message.arg === 'conversation-2')), true);
+	await page.getByRole('tab', { name: 'History tab', exact: true }).click();
+	await screenshot(page, 'history-search');
+	await page.getByRole('searchbox', { name: 'Search Conversations…' }).fill('no such conversation');
+	await page.locator('#historyNoResults').waitFor({ state: 'visible' });
+	for (const width of [280, 400, 800]) { await page.setViewportSize({ width, height: 900 }); await assertNoPageOverflow(page); }
+});
+
+test('drafts: separate conversations, restore after reload, and clear only the sent draft', async t => {
+	const page = await openSurface(t, 'chat', 420);
+	await page.locator('#messageInput').fill('Please review my unfinished implementation');
+	await page.getByRole('button', { name: 'Add context', exact: true }).click();
+	await page.getByRole('menuitem', { name: 'Current file', exact: true }).click();
+	await post(page, { type: 'loadConversation', conversationId: 'second', messages: [] });
+	assert.equal(await page.locator('#messageInput').inputValue(), '');
+	assert.equal(await page.locator('#contextChips').textContent(), '');
+	await page.locator('#messageInput').fill('A different draft');
+	await post(page, { type: 'loadConversation', conversationId: 'initial-conversation', messages: [] });
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Please review my unfinished implementation');
+	assert.match(await page.locator('#contextChips').textContent(), /Current file/i);
+	const saved = await page.evaluate(() => savedWebviewState);
+	const reloaded = await openSurface(t, 'chat', 420, saved);
+	assert.equal(await reloaded.locator('#messageInput').inputValue(), 'Please review my unfinished implementation');
+	await reloaded.locator('#messageInput').press('Enter');
+	await post(reloaded, { type: 'messageComplete' });
+	await post(reloaded, { type: 'loadConversation', conversationId: 'second', messages: [] });
+	assert.equal(await reloaded.locator('#messageInput').inputValue(), 'A different draft');
+	await post(reloaded, { type: 'conversationCleared', conversationId: 'fresh' });
+	assert.equal(await reloaded.locator('#messageInput').inputValue(), '');
+	await post(reloaded, { type: 'loadConversation', conversationId: 'initial-conversation', messages: [] });
+	assert.equal(await reloaded.locator('#messageInput').inputValue(), '');
+});
+
+test('model picker: search by provider, choose with keyboard, escape restores focus, and narrow positioning', async t => {
+	const page = await openSurface(t, 'chat', 280);
+	await page.locator('#modelChip').click();
+	await page.getByRole('searchbox', { name: 'Search Models…' }).fill('deepseek-v3');
+	const visible = page.locator('#modelMenu [data-model]:visible');
+	assert.ok(await visible.count() > 0);
+	await page.keyboard.press('ArrowDown');
+	assert.equal(await visible.first().evaluate(button => button === document.activeElement), true);
+	const selected = await visible.first().getAttribute('data-model');
+	await page.keyboard.press('Enter');
+	await page.locator('#modelMenu').waitFor({ state: 'hidden' });
+	assert.equal(await page.locator('#modelChip').evaluate(button => button === document.activeElement), true);
+	await page.locator('#modelChip').click();
+	await page.getByRole('searchbox', { name: 'Search Models…' }).fill('does-not-exist');
+	await page.locator('#modelSearchEmpty').waitFor({ state: 'visible' });
+	await page.keyboard.press('Escape');
+	assert.equal(await page.locator('#modelChip').getAttribute('aria-expanded'), 'false');
+	await page.locator('#messageInput').fill('Use the selected model');
+	await page.locator('#messageInput').press('Enter');
+	assert.equal(await page.evaluate(() => sentMessages.find(message => message.type === 'sendMessage').model), selected);
+	await post(page, { type: 'messageComplete' });
+	await page.locator('#modelChip').click();
+	await page.getByRole('searchbox', { name: 'Search Models…' }).fill('claude');
+	await assertNoPageOverflow(page);
+	const bounds = await page.locator('#modelMenu').boundingBox();
+	assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= 280 && bounds.y >= 0);
+	await screenshot(page, 'model-search');
+});
+
+test('context: preview real host context, ignore stale updates, and send the per-conversation setting', async t => {
+	const page = await openSurface(t, 'chat', 420);
+	await page.locator('#workspaceContextDetails summary').click();
+	await page.waitForFunction(() => sentMessages.some(message => message.type === 'previewWorkspaceContext'));
+	await post(page, { type: 'workspaceContextPreview', conversationId: 'initial-conversation', markdown: '## Workspace Context\n\n**Active File:** src/editor.ts\n\nSelection: lines 20–36', estimatedTokens: 72 });
+	assert.match(await page.locator('#workspaceContextPreview').textContent(), /src\/editor.ts/);
+	await screenshot(page, 'context-preview');
+	await page.getByRole('checkbox', { name: 'Include Workspace Context' }).uncheck();
+	await post(page, { type: 'workspaceContextPreview', conversationId: 'initial-conversation', markdown: 'LATE CONTEXT', estimatedTokens: 5 });
+	assert.doesNotMatch(await page.locator('#workspaceContextPreview').textContent(), /LATE/);
+	await page.locator('#messageInput').fill('Explain this concept without my workspace');
+	await page.locator('#messageInput').press('Enter');
+	assert.equal(await page.evaluate(() => sentMessages.find(message => message.type === 'sendMessage').includeWorkspaceContext), false);
+	await post(page, { type: 'messageComplete' });
+	await post(page, { type: 'loadConversation', conversationId: 'second', messages: [] });
+	assert.equal(await page.getByRole('checkbox', { name: 'Include Workspace Context' }).isChecked(), true);
+	await post(page, { type: 'workspaceContextPreview', conversationId: 'initial-conversation', markdown: 'OLD WORKSPACE', estimatedTokens: 5 });
+	assert.doesNotMatch(await page.locator('#workspaceContextPreview').textContent(), /OLD WORKSPACE/);
+});
+
+test('streaming: drafting a follow-up cannot accidentally stop the current response', async t => {
+	const page = await openSurface(t, 'chat', 420);
+	await page.locator('#messageInput').fill('Start a task');
+	await page.locator('#messageInput').press('Enter');
+	await post(page, { type: 'streamToken', token: 'Working on the task…' });
+	await page.locator('#messageInput').fill('A follow-up for later');
+	await page.locator('#messageInput').press('Enter');
+	assert.equal(await page.evaluate(() => sentMessages.some(message => message.type === 'cancelRequest')), false);
+	await page.locator('#sendBtn').click();
+	assert.equal(await page.evaluate(() => sentMessages.some(message => message.type === 'cancelRequest')), true);
+	await post(page, { type: 'requestSettled', cancelled: true });
+	await page.getByText('Response Stopped', { exact: true }).waitFor();
+	assert.equal((await page.locator('#messageInput').inputValue()).trim(), 'A follow-up for later');
+	assert.equal(await page.locator('#sendBtn').getAttribute('aria-label'), 'Send');
+});
+
+test('settings: all sections hydrate, support keyboard navigation and dispatch every editable setting', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	await page.getByRole('tab', { name: 'Settings tab', exact: true }).click();
+	assert.equal(await page.evaluate(() => sentMessages.some(m => m.type === 'requestSettings') && sentMessages.some(m => m.type === 'requestMcpServers')), true);
+	await post(page, { type: 'settingsState', version: '1.2.3', settings: { 'sota.defaultModel': 'gpt-5', 'sota.thinkingBudgetTokens': 16000 } });
+	await page.getByRole('tab', { name: 'API Configuration', exact: true }).focus();
+	for (const id of ['models', 'specialists', 'features', 'personality', 'mcp', 'integrations', 'terminal', 'about']) {
+		await page.keyboard.press('ArrowRight');
+		assert.equal(await page.locator('#settingsTab-' + id).getAttribute('aria-selected'), 'true');
+		await assertNoPageOverflow(page);
+	}
+	assert.equal(await page.locator('#settingsAboutVersion').textContent(), 'Version: 1.2.3');
+	await page.locator('[data-action="reset-all-settings"]').click();
+	assert.equal(await page.evaluate(() => sentMessages.at(-1).type), 'resetAllSettings');
+	for (const id of ['models', 'features', 'personality', 'terminal']) {
+		await page.locator('#settingsTab-' + id).click();
+		const pane = page.locator('#settingsSubtab-' + id);
+		for (const input of await pane.locator('input[data-setting]').all()) {
+			await input.setChecked(!(await input.isChecked()));
+			assert.equal(await page.evaluate(() => sentMessages.at(-1).settingId), await input.getAttribute('data-setting'));
+		}
+		for (const select of await pane.locator('select[data-setting-select]').all()) {
+			const options = await select.locator('option').evaluateAll(nodes => nodes.map(n => n.value));
+			assert.ok(options.length > 1);
+			await select.selectOption(options.at(-1));
+			assert.equal(await page.evaluate(() => sentMessages.at(-1).settingId), await select.getAttribute('data-setting-select'));
+		}
+		for (const input of await pane.locator('input[type="range"]').all()) {
+			await input.focus(); await input.press('ArrowRight');
+			assert.equal(await page.evaluate(() => sentMessages.at(-1).settingId), await input.getAttribute('data-setting-number'));
+		}
+		for (const input of await pane.locator('input[type="number"], textarea[data-setting-text]').all()) {
+			await input.fill((await input.getAttribute('type')) === 'number' ? '2' : '^dangerous-command$');
+			await input.press('Tab');
+			assert.equal(await page.evaluate(() => sentMessages.at(-1).type), 'settingChange');
+		}
+	}
+	await page.locator('#settingsTab-mcp').click();
+	await post(page, { type: 'mcpServersState', servers: [{ name: 'fixture', command: 'node', args: ['server.js'] }] });
+	await page.locator('#settingsMcpServers [data-action="edit"]').click();
+	await page.locator('#mcpFld-command').fill('python');
+	await page.locator('#settingsMcpServers [data-action="save"]').click();
+	assert.equal(await page.evaluate(() => sentMessages.at(-1).type), 'mcpServerSave');
+	await post(page, { type: 'mcpServerSaveResult', ok: true, message: 'Saved' });
+	await page.locator('#settingsMcpServers [data-action="delete"]').click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'mcpServerDelete', name: 'fixture' });
+	await page.locator('#settingsTab-features').click();
+	await screenshot(page, 'settings-features');
+});
+
+test('roster and specialist models: every specialist can be selected and every model override is wired', async t => {
+	const page = await openSurface(t, 'chat', 360);
+	await page.getByRole('tab', { name: 'Roster tab', exact: true }).click();
+	const labels = await page.getByRole('button', { name: /^Talk to @/ }).allTextContents();
+	assert.equal(labels.length, 10);
+	for (const label of labels) {
+		await page.getByRole('button', { name: label, exact: true }).click();
+		assert.equal(await page.getByRole('tab', { name: 'Chat tab', exact: true }).getAttribute('aria-selected'), 'true');
+		await page.getByRole('tab', { name: 'Roster tab', exact: true }).click();
+	}
+	await screenshot(page, 'roster');
+	await page.getByRole('tab', { name: 'Settings tab', exact: true }).click();
+	await page.locator('#settingsTab-specialists').click();
+	await post(page, { type: 'specialistModelsState', entries: labels.map(label => ({ handle: label.replace('Talk to @', ''), displayName: label, defaultModel: 'sonnet', value: '', pinned: false })) });
+	for (const select of await page.locator('.specialist-row-model').all()) {
+		await select.selectOption('haiku');
+		assert.equal(await page.evaluate(() => sentMessages.at(-1).type), 'setSpecialistModel');
+	}
+	await page.locator('#specialistModelsReload').click();
+	assert.equal(await page.evaluate(() => sentMessages.at(-1).type), 'reloadWindow');
+	await assertNoPageOverflow(page);
+	await screenshot(page, 'settings-specialists');
+});
+
+test('provider configuration: every provider form supports help, advanced fields, test, save and return', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	await post(page, { type: 'connectionState', status: { providers: [], apiKeys: {} } });
+	await page.getByRole('tab', { name: 'Settings tab', exact: true }).click();
+	const providers = await page.locator('[data-settings-provider]').evaluateAll(nodes => nodes.map(n => n.dataset.settingsProvider));
+	assert.equal(providers.length, 14);
+	for (const provider of providers) {
+		await page.locator(`[data-settings-provider="${provider}"]`).click();
+		const form = page.locator('.provider-form:visible');
+		for (const link of await form.locator('a[data-link]').all()) { await link.click(); }
+		assert.equal(await page.evaluate(() => sentMessages.at(-1).type), 'openLink');
+		if (await form.locator('summary').count()) { await form.locator('summary').click(); }
+		for (const input of await form.locator('input:visible').all()) { await input.fill((await input.getAttribute('type')) === 'number' ? '1' : 'ui-fixture'); }
+		await form.locator('[data-action="test-connection"]').click();
+		assert.equal(await page.evaluate(() => sentMessages.at(-1).type), 'providerTest');
+		await post(page, { type: 'providerTestResult', provider, ok: false, message: 'Fixture connection failed' });
+		await form.locator('[data-action="save"]').click();
+		const count = await page.evaluate(() => sentMessages.filter(m => m.type === 'providerSave').length);
+		await form.locator('input').first().press('Enter');
+		assert.equal(await page.evaluate(() => sentMessages.filter(m => m.type === 'providerSave').length), count, 'Enter cannot submit twice while saving');
+		await post(page, { type: 'providerSaveResult', provider, ok: false, message: 'Fixture validation failed' });
+		assert.match(await form.locator('[data-form-status]').textContent(), /validation failed/);
+		await assertNoPageOverflow(page);
+		await form.locator('[data-action="back"]').first().click();
+		assert.equal(await page.getByRole('tab', { name: 'Settings tab', exact: true }).getAttribute('aria-selected'), 'true');
+	}
+	await screenshot(page, 'settings-providers');
+});
+
+test('integrations: search, filtering, pagination, connection updates and error recovery', async t => {
+	const page = await openSurface(t, 'chat', 320);
+	await page.getByRole('tab', { name: 'Settings tab', exact: true }).click();
+	await page.locator('#settingsTab-integrations').click();
+	assert.equal(await page.evaluate(() => sentMessages.at(-1).integrationAction), 'list');
+	const state = { entries: Array.from({ length: 55 }, (_, index) => ({ id: `skill-${index}`, kind: 'skill', name: `Skill ${index}`, source: 'codex', scope: 'user', description: 'Installed skill', enabled: true, configured: false })), issues: [{ path: '/fixture/config.toml', message: 'Could not parse configuration.' }] };
+	state.entries.push({ id: 'mcp-1', kind: 'mcp', name: 'Local MCP', source: 'claude', scope: 'user', description: 'MCP server', enabled: true, configured: false });
+	state.entries.push({ id: 'plugin-1', kind: 'plugin', name: 'Cached Plugin', source: 'cursor', scope: 'user', description: 'Plugin', enabled: false, configured: false, reason: 'Cached or disabled in source application' });
+	await post(page, { type: 'systemIntegrationsState', state });
+	assert.equal(await page.locator('.integration-card').count(), 50);
+	await page.locator('#integrationMore').click();
+	assert.equal(await page.locator('.integration-card').count(), 57);
+	await page.locator('#integrationSearch').fill('cached');
+	assert.equal(await page.locator('.integration-card').count(), 1);
+	assert.match(await page.locator('.integration-card').textContent(), /Cached or disabled/);
+	await page.locator('#integrationSearch').fill('');
+	await page.locator('#integrationKind').selectOption('mcp');
+	await page.getByRole('button', { name: 'Connect', exact: true }).click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'systemIntegrations', integrationAction: 'connect', integrationId: 'mcp-1' });
+	state.entries[55].configured = true; state.entries[55].state = 'ready';
+	await post(page, { type: 'systemIntegrationsState', state });
+	assert.match(await page.locator('.integration-card').textContent(), /Connected/);
+	assert.equal(await page.evaluate(() => document.activeElement.textContent), 'Disconnect');
+	await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
+	assert.equal(await page.evaluate(() => sentMessages.at(-1).integrationAction), 'disconnect');
+	state.entries[55].configured = false; delete state.entries[55].state;
+	await post(page, { type: 'systemIntegrationsState', state });
+	await page.getByRole('button', { name: 'Show Source', exact: true }).click();
+	assert.equal(await page.evaluate(() => sentMessages.at(-1).integrationAction), 'open');
+	await post(page, { type: 'systemIntegrationsState', state });
+	await assertNoPageOverflow(page);
+	await screenshot(page, 'integrations-narrow');
+	await post(page, { type: 'systemIntegrationsChanged' });
+	assert.equal(await page.evaluate(() => sentMessages.at(-1).integrationAction), 'list');
+	await post(page, { type: 'systemIntegrationsState', error: 'Discovery unavailable. Refresh to try again.' });
+	assert.match(await page.locator('#integrationStatus').textContent(), /Discovery unavailable/);
+	await page.locator('#integrationRefresh').click();
+	assert.equal(await page.evaluate(() => sentMessages.at(-1).integrationAction), 'refresh');
+	await post(page, { type: 'systemIntegrationsState', state });
+	assert.match(await page.locator('#integrationStatus').textContent(), /1 integrations/);
+});
+
+test('specialist models: ACP routes show their owning agent instead of an ineffective model picker', async t => {
+	const specialists = SPECIALIST_ROLES.map(role => ({ ...role, acpAgent: role.id === 'anton-docs' ? 'local-anton-docs' : '' }));
+	const page = await openSurface(t, 'chat', 320, undefined, undefined, specialists);
+	await post(page, { type: 'loadConversation', conversationId: 'acp-model', lastSpecialist: 'anton-docs', messages: [] });
+	assert.equal(await page.locator('#modelChip').isDisabled(), true);
+	assert.match(await page.locator('#modelChip').textContent(), /Managed by ACP/);
+	assert.match(await page.locator('#modelChip').getAttribute('title'), /local-anton-docs/);
+	await post(page, { type: 'loadConversation', conversationId: 'native-model', lastSpecialist: 'anton', messages: [] });
+	assert.equal(await page.locator('#modelChip').isEnabled(), true);
+	assert.match(await page.locator('#modelChip').textContent(), /Sonnet/);
+	await page.getByRole('tab', { name: 'Settings tab', exact: true }).click();
+	await page.locator('#settingsTab-specialists').click();
+	await post(page, { type: 'specialistModelsState', entries: [{ handle: 'anton-docs', displayName: 'Anton Docs', defaultModel: 'haiku', value: 'sonnet', pinned: true, acpAgent: 'local-anton-docs' }] });
+	const model = page.getByRole('combobox', { name: 'Model for @anton-docs' });
+	assert.equal(await model.isDisabled(), true);
+	assert.equal(await model.textContent(), 'local-anton-docs');
+	assert.match(await page.locator('.specialist-row-status').textContent(), /Managed by ACP/);
+	await assertNoPageOverflow(page);
+});
+
+test('history restores the selected specialist and retains each response author and unavailable usage', async t => {
+	const page = await openSurface(t, 'chat', 360);
+	await post(page, { type: 'loadConversation', conversationId: 'restored-docs', lastSpecialist: 'anton-docs', lastMode: 'act', messages: [
+		{ role: 'user', content: 'Review this example.' },
+		{ role: 'assistant', content: 'Code review.', specialistId: 'anton-code' },
+		{ role: 'assistant', content: 'Documentation review.', specialistId: 'anton-docs', usageUnavailable: true },
+	] });
+	assert.deepEqual(await page.locator('.msg-specialist-name').allTextContents(), ['Anton Code', 'Anton Docs']);
+	assert.match(await page.locator('#agentChip').textContent(), /Anton Docs/);
+	await post(page, { type: 'costReset' });
+	await post(page, { type: 'costUpdate', tokens: 0, dollars: 0, inputTokens: 0, outputTokens: 0 });
+	assert.match(await page.locator('#transcriptTaskMeter').textContent(), /Usage Unavailable/);
+	await page.locator('#messageInput').fill('Continue the documentation review.');
+	await page.locator('#sendBtn').click();
+	assert.equal(await page.evaluate(() => sentMessages.findLast(message => message.type === 'sendMessage').specialistId), 'anton-docs');
+});
+
+async function openCouncil(t, width = 1100, state) {
+	const source = await readFile(path.join(extension, 'src/council/CouncilPanel.ts'), 'utf8');
+	const labels = Object.fromEntries([...source.matchAll(/(?:'([^']+)'|(\w+)): vscode\.l10n\.t\('([^']*)'\)/g)].map(match => [match[1] || match[2], match[3]]));
+	const values = { nonce: 'ui-fixture', script: 'https://sota.test/council.js', css: 'https://sota.test/council.css', 'webview.cspSource': 'https://sota.test', labels: JSON.stringify(labels) };
+	const html = source.slice(source.indexOf('return /* html */`<!DOCTYPE html>')).split('`')[1].replace(/\$\{([^}]+)\}/g, (_, name) => values[name]);
+	return openSurface(t, 'council', width, state, html);
+}
+const councilGroup = { id: 'review', name: 'Change Review', members: [{ id: 'code' }, { id: 'tests' }, { id: 'security' }], quorum: 2, concurrency: 2, rounds: 1, runTimeoutMs: 600000, reviewer: { id: 'reviewer' } };
+const councilReport = { version: 1, id: 'report-1', sequence: 2, owned: true, objective: 'Review the parser', group: councilGroup, createdAt: 1, status: 'running', snapshot: { base: 'a'.repeat(40), head: 'b'.repeat(40), digest: 'c'.repeat(64), limitations: ['Tracked diff only'] }, stages: [{ id: 'member-code', kind: 'member', round: 1, member: { label: 'Code Reviewer', model: 'sonnet' }, status: 'running', text: '<img src=x onerror="window.unsafe = true"> partial evidence' }] };
+
+test('Council form, progress, cancellation, evidence, export, promotion and restored reports work under CSP', async t => {
+	const page = await openCouncil(t);
+	assert.equal(await page.locator('#start').isDisabled(), true);
+	await post(page, { type: 'councilState', groups: [councilGroup], reports: [] });
+	await page.locator('#objective').fill('Audit parser changes'); await page.locator('#revision').fill('HEAD~1'); await page.locator('#finalReview').check(); await page.locator('#start').click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'start', objective: 'Audit parser changes', groupId: 'review', revision: 'HEAD~1', rounds: 1, finalReview: true });
+	await post(page, { type: 'councilState', groups: [councilGroup], reports: [councilReport], selected: 'report-1' });
+	assert.equal(await page.locator('#report img').count(), 0); assert.equal(await page.locator('#start').isDisabled(), true);
+	await page.getByRole('button', { name: 'Cancel Review', exact: true }).click(); assert.equal(await page.evaluate(() => sentMessages.at(-1).type), 'cancel');
+	const completed = { ...councilReport, sequence: 3, status: 'completed', stages: [{ ...councilReport.stages[0], status: 'completed', answer: { summary: 'A bounds check is missing.', findings: [{ title: 'Missing guard', severity: 'medium', file: 'src/parser.ts', line: 4, evidence: 'const n = input.length;', detail: 'Undefined input throws before validation.' }], dissent: ['The current test does not cover undefined.'], questions: ['Is undefined supported?'] } }] };
+	await post(page, { type: 'councilReport', report: completed });
+	await page.getByRole('button', { name: 'Open Evidence', exact: true }).click(); assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'evidence', id: 'report-1', stageId: 'member-code', index: 0 });
+	await page.getByRole('button', { name: 'Add Findings to Board', exact: true }).click(); assert.equal(await page.evaluate(() => sentMessages.at(-1).type), 'promote');
+	await page.getByRole('button', { name: 'Export Markdown', exact: true }).focus();
+	await post(page, { type: 'councilReport', report: { ...completed, sequence: 4 } });
+	assert.equal(await page.evaluate(() => document.activeElement.textContent), 'Export Markdown');
+	await page.getByRole('button', { name: 'Export Markdown', exact: true }).click(); assert.equal(await page.evaluate(() => sentMessages.at(-1).type), 'export');
+	await post(page, { type: 'councilReport', report: councilReport }); assert.equal(await page.getByRole('button', { name: 'Cancel Review', exact: true }).count(), 0);
+	await page.getByRole('button', { name: 'Refresh', exact: true }).click(); assert.equal(await page.evaluate(() => sentMessages.at(-1).type), 'ready');
+	await page.getByRole('button', { name: 'Edit Groups', exact: true }).click(); assert.equal(await page.evaluate(() => sentMessages.at(-1).type), 'groups');
+	await assertNoPageOverflow(page);
+	if (process.env.SOTA_UI_SCREENSHOTS) { await page.screenshot({ path: path.join(process.env.SOTA_UI_SCREENSHOTS, 'council-review.png'), fullPage: true }); }
+});
+
+test('Council narrow panes preserve error recovery, partial results and keyboard controls', async t => {
+	const page = await openCouncil(t, 320);
+	await post(page, { type: 'councilState', groups: [councilGroup], reports: [{ ...councilReport, status: 'quorum-failed', error: 'Only one member completed. Partial work is preserved.', stages: [{ ...councilReport.stages[0], status: 'failed', error: 'Provider disconnected' }] }] });
+	await page.getByText('Partial / Raw Response', { exact: true }).click();
+	assert.match(await page.locator('#report').textContent(), /Quorum Not Reached/); await assertNoPageOverflow(page);
+	await post(page, { type: 'councilState', error: 'Invalid saved group. Edit Groups to repair it.' }); assert.match(await page.getByRole('alert').textContent(), /Invalid saved group/);
+	await page.getByRole('button', { name: 'Edit Groups', exact: true }).focus(); await page.keyboard.press('Enter'); assert.equal(await page.evaluate(() => sentMessages.at(-1).type), 'groups');
+	if (process.env.SOTA_UI_SCREENSHOTS) { await page.screenshot({ path: path.join(process.env.SOTA_UI_SCREENSHOTS, 'council-narrow.png'), fullPage: true }); }
+});
+
+test('Council restores setup drafts and loads report detail only when its history row is selected', async t => {
+	const page = await openCouncil(t, 1100, { objective: 'Keep my review draft', revision: 'HEAD~2', rounds: '2', groupId: 'review', finalReview: true });
+	const summary = { id: 'older', sequence: 3, status: 'completed', objective: 'Earlier review', createdAt: 0 };
+	await post(page, { type: 'councilState', groups: [councilGroup], reports: [councilReport, summary] });
+	assert.deepEqual(await page.evaluate(() => ['objective', 'revision', 'rounds'].map(id => document.getElementById(id).value)), ['Keep my review draft', 'HEAD~2', '2']);
+	await page.getByRole('button', { name: /Earlier review/ }).click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'select', id: 'older' });
+	assert.match(await page.locator('#report').textContent(), /Loading Council reports/);
+	await post(page, { type: 'councilReport', report: { ...councilReport, ...summary } });
+	assert.equal(await page.locator('#report h2').textContent(), 'Earlier review');
+	await post(page, { type: 'councilState', reports: [summary] });
+	assert.equal(await page.locator('#report h2').textContent(), 'Earlier review');
+	assert.equal(await page.evaluate(() => savedWebviewState.objective), 'Keep my review draft');
+});
+
+test('large boards render bounded columns and keep later cards searchable', async t => {
+	const page = await openSurface(t, 'board');
+	const large = { ...fixture, snapshot: { ...fixture.snapshot, tasks: Array.from({ length: 2000 }, (_, index) => ({ ...fixture.snapshot.tasks[1], id: `large-${index}`, instruction: `Task number ${index}` })) } };
+	await post(page, large); await frames(page);
+	assert.equal(await page.locator('.tile').count(), 50);
+	await page.getByRole('button', { name: 'Show More (1950 remaining)' }).click();
+	assert.equal(await page.locator('.tile').count(), 100);
+	await page.getByRole('searchbox', { name: 'Search tasks', exact: true }).fill('Task number 1999');
+	assert.equal(await page.locator('.tile').count(), 1);
+	await page.getByRole('button', { name: 'Run Task', exact: true }).click();
+	assert.ok((await page.evaluate(() => window.sentMessages)).some(message => message.type === 'dispatch' && message.taskId === 'large-1999'));
+});
+
+test('long chat paging preserves turn indices, live messages and checkpoint controls', async t => {
+	const page = await openSurface(t, 'chat', 420);
+	const messages = Array.from({ length: 2000 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `Message ${index}`, timestamp: index + 1 }));
+	await post(page, { type: 'loadConversation', conversationId: 'long', messages }); await frames(page);
+	assert.equal(await page.locator('.msg').count(), 200);
+	assert.equal(await page.locator('.msg').first().getAttribute('data-conversation-index'), '1800');
+	await page.getByRole('button', { name: 'Show Earlier Messages (1800)' }).click();
+	assert.equal(await page.locator('.msg').count(), 300);
+	assert.equal(await page.locator('.msg').first().getAttribute('data-conversation-index'), '1700');
+	assert.equal(await page.locator('.msg').last().getAttribute('data-conversation-index'), '1999');
+	await post(page, { type: 'conversationCleared', conversationId: 'new' });
+	assert.equal(await page.getByRole('button', { name: /Show Earlier Messages/ }).count(), 0);
+});
+
+test('Council task review, cancellation and retry route through the native host', async t => {
+	const page = await openSurface(t, 'board');
+	const instruction = 'Fix inverted clamp bounds\n\n' + 'Preserve the detailed evidence for review. '.repeat(100);
+	await post(page, { ...fixture, snapshot: { ...fixture.snapshot, tasks: [{ ...fixture.snapshot.tasks[5], instruction, id: 'council:fixture', proposalId: 'retained' }] } }); await frames(page);
+	assert.equal(await page.locator('.tile-instruction').textContent(), 'Fix inverted clamp bounds');
+	assert.ok((await page.locator('.tile').boundingBox()).height < 450);
+	await page.locator('.tile-instruction').click();
+	assert.equal(await page.locator('.task-full-instruction').textContent(), instruction);
+	await page.locator('.tile-instruction').click();
+	await page.getByRole('button', { name: 'Review Changes' }).click(); await page.getByRole('button', { name: 'Retry', exact: true }).click();
+	await post(page, { ...fixture, snapshot: { ...fixture.snapshot, tasks: [{ ...fixture.snapshot.tasks[5], state: 'in-progress', id: 'council:fixture', proposalId: 'retained' }] } }); await frames(page);
+	await page.getByRole('button', { name: 'Cancel Task' }).click();
+	assert.deepEqual((await page.evaluate(() => window.sentMessages)).filter(message => ['review-proposal', 'rerun', 'cancel-task'].includes(message.type)), [{ type: 'review-proposal', taskId: 'council:fixture' }, { type: 'rerun', taskId: 'council:fixture' }, { type: 'cancel-task', taskId: 'council:fixture' }]);
+});

@@ -43,13 +43,31 @@ export function BoardChat({ assignees }: BoardChatProps): JSX.Element {
 	const [pending, setPending] = useState(false);
 	const streamingTextRef = useRef('');
 	const cancelRef = useRef<{ cancel: () => void } | null>(null);
+	const frameRef = useRef<number | null>(null);
+	const logRef = useRef<HTMLDivElement>(null);
+	const inputRef = useRef<HTMLTextAreaElement>(null);
+	const followRef = useRef(true);
+	const [following, setFollowing] = useState(true);
+	const [status, setStatus] = useState('');
+	const flushText = useCallback((): void => {
+		if (frameRef.current !== null) { cancelAnimationFrame(frameRef.current); frameRef.current = null; }
+		const content = streamingTextRef.current;
+		setMessages(prev => prev.map((message, index) => index === prev.length - 1 ? { ...message, content } : message));
+	}, []);
+
+	useEffect(() => {
+		if (followRef.current && logRef.current) { logRef.current.scrollTop = logRef.current.scrollHeight; }
+	}, [messages]);
 
 	// Re-derive the tools list whenever assignees change so the
 	// `setCardAssignee` enum stays in sync with the active personas.
 	const tools = useMemo(() => buildBoardTools(buildBoardActions(assignees)), [assignees]);
 
 	useEffect(() => {
-		return () => cancelRef.current?.cancel();
+		return () => {
+			cancelRef.current?.cancel();
+			if (frameRef.current !== null) { cancelAnimationFrame(frameRef.current); }
+		};
 	}, []);
 
 	const submit = useCallback((): void => {
@@ -62,6 +80,9 @@ export function BoardChat({ assignees }: BoardChatProps): JSX.Element {
 		setMessages(next);
 		setDraft('');
 		setPending(true);
+		setStatus('Anton is working…');
+		followRef.current = true;
+		setFollowing(true);
 		streamingTextRef.current = '';
 		// Push a placeholder assistant bubble we'll mutate as tokens stream in.
 		setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
@@ -72,11 +93,7 @@ export function BoardChat({ assignees }: BoardChatProps): JSX.Element {
 			{
 				onToken: (token) => {
 					streamingTextRef.current += token;
-					setMessages(prev => {
-						const out = prev.slice();
-						out[out.length - 1] = { role: 'assistant', content: streamingTextRef.current };
-						return out;
-					});
+					if (frameRef.current === null) { frameRef.current = requestAnimationFrame(flushText); }
 				},
 				onToolCall: (call) => {
 					// Route through the same dispatcher the manual
@@ -97,6 +114,7 @@ export function BoardChat({ assignees }: BoardChatProps): JSX.Element {
 					});
 				},
 				onComplete: (fullText) => {
+					flushText();
 					setMessages(prev => {
 						const out = prev.slice();
 						const last = out[out.length - 1];
@@ -104,22 +122,34 @@ export function BoardChat({ assignees }: BoardChatProps): JSX.Element {
 						return out;
 					});
 					setPending(false);
+					setStatus('Response complete');
 					cancelRef.current = null;
 				},
 				onError: (error) => {
+					flushText();
 					setMessages(prev => {
 						const out = prev.slice();
-						out[out.length - 1] = { role: 'assistant', content: 'Error: ' + error };
+						out[out.length - 1] = { ...out[out.length - 1], content: [streamingTextRef.current, 'Request failed: ' + error].filter(Boolean).join('\n\n') };
 						return out;
 					});
 					setPending(false);
+					setStatus('Request failed');
 					cancelRef.current = null;
 				},
 			},
 			tools,
 		);
 		cancelRef.current = handle;
-	}, [draft, messages, pending, tools]);
+	}, [draft, messages, pending, tools, flushText]);
+
+	const stop = (): void => {
+		cancelRef.current?.cancel();
+		cancelRef.current = null;
+		flushText();
+		setPending(false);
+		setStatus('Generation stopped');
+		inputRef.current?.focus();
+	};
 
 	const onSubmit = useCallback((ev: FormEvent<HTMLFormElement>): void => {
 		ev.preventDefault();
@@ -127,23 +157,28 @@ export function BoardChat({ assignees }: BoardChatProps): JSX.Element {
 	}, [submit]);
 
 	const onKeyDown = useCallback((ev: KeyboardEvent<HTMLTextAreaElement>): void => {
-		if (ev.key === 'Enter' && !ev.shiftKey) {
+		if (ev.key === 'Enter' && !ev.shiftKey && !ev.nativeEvent.isComposing) {
 			ev.preventDefault();
 			submit();
 		}
 	}, [submit]);
 
 	return (
-		<aside className="chat-pane">
-			<div className="chat-header">Talk to the board</div>
-			<div className="chat-log">
+		<aside className="chat-pane" aria-label="Board assistant">
+			<div className="chat-header"><span className="avatar" aria-hidden="true">A</span><div><strong>Board Assistant</strong><small>Plan, organise, and unblock</small></div></div>
+			<div className="chat-log" ref={logRef} role="region" aria-label="Board conversation" tabIndex={0} onScroll={() => {
+				const log = logRef.current;
+				if (log) { followRef.current = log.scrollHeight - log.clientHeight - log.scrollTop < 48; setFollowing(followRef.current); }
+			}}>
 				{messages.length === 0 && (
 					<div className="chat-empty">
-						Ask the board to move cards, reassign tasks, or summarise progress.
+						<h3>A little help moving forward.</h3><p>Ask about progress, find blockers, or organise the work ahead.</p>
+						<div className="chat-suggestions">{['Summarise the plan’s progress', 'Which tasks need my attention?', 'What can we work on next?'].map(prompt => <button key={prompt} type="button" onClick={() => { setDraft(prompt); inputRef.current?.focus(); }}>{prompt} <span aria-hidden="true">↗</span></button>)}</div>
 					</div>
 				)}
 				{messages.map((m, i) => (
 					<div key={i} className={`chat-bubble chat-${m.role}`}>
+						<span className="chat-role">{m.role === 'user' ? 'You' : 'Anton'}</span>
 						{m.content || (m.role === 'assistant' && pending ? '…' : '')}
 						{m.toolCalls && m.toolCalls.length > 0 && (
 							<ul className="chat-tool-calls">
@@ -158,18 +193,21 @@ export function BoardChat({ assignees }: BoardChatProps): JSX.Element {
 					</div>
 				))}
 			</div>
+			{!following && <button type="button" className="chat-jump" onClick={() => { followRef.current = true; setFollowing(true); if (logRef.current) { logRef.current.scrollTop = logRef.current.scrollHeight; } }}>↓ Latest Response</button>}
+			<div className="chat-status" role="status" aria-live="polite">{status}</div>
 			<form className="chat-input" onSubmit={onSubmit}>
 				<textarea
+					ref={inputRef}
+					aria-label="Message the board assistant"
 					value={draft}
 					onChange={(e) => setDraft(e.target.value)}
 					onKeyDown={onKeyDown}
 					placeholder="Ask the board…"
 					rows={2}
-					disabled={pending}
 				/>
-				<button type="submit" disabled={pending || !draft.trim()}>
-					{pending ? '…' : 'Send'}
-				</button>
+				<div className="chat-input-footer"><span>Enter to send · Shift+Enter for a new line</span>
+					{pending ? <button key="stop" type="button" className="secondary-button" onClick={event => { event.preventDefault(); stop(); }}>Stop</button> : <button key="send" type="submit" className="primary-button" disabled={!draft.trim()}>Send ↑</button>}
+				</div>
 			</form>
 		</aside>
 	);

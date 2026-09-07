@@ -18,7 +18,6 @@ import {
 import { AgentEvent } from './agentEvents';
 import { BaseAgent, AgentContext, truncateForTaskTitle } from './BaseAgent';
 import { loadAgentPrompt } from './promptLoader';
-import { ReviewAgent } from './ReviewAgent';
 import {
 	AgentHandle,
 	ExecutionPlan,
@@ -43,7 +42,7 @@ const QUOTE_PROBABILITY = 0.5;
  */
 export class OrchestratorAgent extends BaseAgent {
 	private readonly specialists: Map<AgentHandle, BaseAgent> = new Map();
-	private reviewAgent: ReviewAgent | undefined;
+	private reviewAgent: BaseAgent | undefined;
 	private activePlan: ExecutionPlan | undefined;
 	private nextPlanId = 1;
 
@@ -59,7 +58,7 @@ export class OrchestratorAgent extends BaseAgent {
 		this.specialists.set(agent.handle, agent);
 	}
 
-	setReviewAgent(agent: ReviewAgent): void {
+	setReviewAgent(agent: BaseAgent): void {
 		this.reviewAgent = agent;
 	}
 
@@ -478,7 +477,7 @@ export class OrchestratorAgent extends BaseAgent {
 				// `.then`/`.catch` and the `inFlightDoneResolvers` queue so
 				// the outer loop can re-evaluate dependencies as soon as any
 				// subtask resolves.
-				this.executeSubtask(subtask, taskId, stream, structuredEmit)
+				this.executeSubtask(subtask, taskId, stream, structuredEmit, token)
 					.then(result => {
 						results.set(subtask.id, result);
 						if (result.success) {
@@ -690,6 +689,7 @@ export class OrchestratorAgent extends BaseAgent {
 		parentTaskId: string,
 		stream: ChatStreamLike,
 		structuredEmit?: (event: AgentEvent) => void,
+		cancellation?: CancellationLike,
 	): Promise<SubtaskResult> {
 		const specialist = this.specialists.get(subtask.assignee);
 		if (!specialist) {
@@ -701,158 +701,170 @@ export class OrchestratorAgent extends BaseAgent {
 			};
 		}
 
-		const startTime = Date.now();
-		subtask.status = 'in_progress';
+		const controller = new AbortController();
+		const subscription = cancellation?.onCancellationRequested(() => controller.abort());
+		if (cancellation?.isCancellationRequested) { controller.abort(); }
+		try {
+			const startTime = Date.now();
+			subtask.status = 'in_progress';
 
-		// Build graph context for the subtask's scope
-		let graphContext = '';
-		for (const file of subtask.scopeFiles) {
-			const summary = await this.queryFileGraph(parentTaskId, file);
-			graphContext += `### ${file}\n${summary}\n\n`;
-		}
+			// Build graph context for the subtask's scope
+			let graphContext = '';
+			for (const file of subtask.scopeFiles) {
+				const summary = await this.queryFileGraph(parentTaskId, file);
+				graphContext += `### ${file}\n${summary}\n\n`;
+			}
 
-		// `onToken` is omitted when no structured channel is wired (native chat
-		// participant flow), keeping the cheaper non-streaming LLM path.
-		// `orchestratorModelHint` carries the chat composer's per-turn pick
-		// (stashed on the plan when it was drafted) so specialists with
-		// un-pinned defaults can re-route to the same subscription family
-		// the user is signed into. See BaseAgent.resolveModel.
-		const context: AgentContext = {
-			instruction: subtask.instruction,
-			scopeFiles: subtask.scopeFiles,
-			graphContext,
-			parentTaskId,
-			onToken: structuredEmit
-				? (token) => structuredEmit({ type: 'subtask-token', subtaskId: subtask.id, token })
-				: undefined,
-			orchestratorModelHint: this.activePlan?.orchestratorModel,
-		};
+			// `onToken` is omitted when no structured channel is wired (native chat
+			// participant flow), keeping the cheaper non-streaming LLM path.
+			// `orchestratorModelHint` carries the chat composer's per-turn pick
+			// (stashed on the plan when it was drafted) so specialists with
+			// un-pinned defaults can re-route to the same subscription family
+			// the user is signed into. See BaseAgent.resolveModel.
+			const context: AgentContext = {
+				instruction: subtask.instruction,
+				signal: controller.signal,
+				scopeFiles: subtask.scopeFiles,
+				graphContext,
+				parentTaskId,
+				onToken: structuredEmit
+					? (token) => structuredEmit({ type: 'subtask-token', subtaskId: subtask.id, token })
+					: undefined,
+				orchestratorModelHint: this.activePlan?.orchestratorModel,
+			};
 
-		// Per-turn timeout (H9). Race the specialist's execute() against a
-		// wall-clock timer; if the timer wins, surface a timed-out
-		// SubtaskResult and skip retries — a hung specialist won't unblock
-		// by re-running. The losing branch is fenced with a `settled` flag
-		// so a late-resolving execute() can't smuggle a stale result back
-		// into the orchestrator.
-		const perTurnTimeoutMs = this.config.perTurnTimeoutMs ?? 5 * 60 * 1000;
+			// Per-turn timeout (H9). Race the specialist's execute() against a
+			// wall-clock timer; if the timer wins, surface a timed-out
+			// SubtaskResult and skip retries — a hung specialist won't unblock
+			// by re-running. The losing branch is fenced with a `settled` flag
+			// so a late-resolving execute() can't smuggle a stale result back
+			// into the orchestrator.
+			const perTurnTimeoutMs = this.config.perTurnTimeoutMs ?? 5 * 60 * 1000;
 
-		// Execute with retry loop
-		let result: SubtaskResult | undefined;
-		let retryCount = 0;
+			// Execute with retry loop
+			let result: SubtaskResult | undefined;
+			let retryCount = 0;
 
-		while (retryCount < this.config.maxRetries) {
-			let settled = false;
-			let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-			const timeoutPromise = new Promise<SubtaskResult>(resolve => {
-				timeoutHandle = setTimeout(() => {
+			while (retryCount < this.config.maxRetries) {
+				controller.signal.throwIfAborted();
+				let settled = false;
+				let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+				const timeoutPromise = new Promise<SubtaskResult>(resolve => {
+					timeoutHandle = setTimeout(() => {
+						if (settled) {
+							return;
+						}
+						settled = true;
+						controller.abort(new Error('Specialist deadline exceeded'));
+						resolve({
+							success: false,
+							changes: [],
+							summary: `Timed out after ${perTurnTimeoutMs} ms`,
+							tokenUsage: { inputTokens: 0, outputTokens: 0, cachedTokens: 0, naiveInputTokens: 0 },
+						});
+					}, perTurnTimeoutMs);
+				});
+
+				const executePromise = specialist.execute(context).then(r => {
 					if (settled) {
-						return;
+						// Timeout already won; discard this stale result so it
+						// can't leak back into `results`.
+						return undefined as unknown as SubtaskResult;
 					}
 					settled = true;
-					resolve({
-						success: false,
-						changes: [],
-						summary: `Timed out after ${perTurnTimeoutMs} ms`,
-						tokenUsage: { inputTokens: 0, outputTokens: 0, cachedTokens: 0, naiveInputTokens: 0 },
+					if (timeoutHandle !== undefined) {
+						clearTimeout(timeoutHandle);
+					}
+					return r;
+				});
+
+				let raced: SubtaskResult;
+				try { raced = await Promise.race([executePromise, timeoutPromise]); }
+				finally { if (timeoutHandle) { clearTimeout(timeoutHandle); } }
+				result = raced;
+				const latencyMs = Date.now() - startTime;
+
+				// Timeout path: record an escalation, do NOT retry.
+				if (result && !result.success && result.summary.startsWith('Timed out after ')) {
+					this.metricsTracker.recordEscalation(subtask.assignee);
+					break;
+				}
+
+				this.metricsTracker.recordInvocation(subtask.assignee, latencyMs, result.tokenUsage);
+
+				// Send through review agent if available
+				controller.signal.throwIfAborted();
+				if (this.reviewAgent && result.success) {
+					const reviewResult = await this.reviewAgent.execute({
+						instruction: `Review changes from @${subtask.assignee}: ${subtask.instruction}`,
+						signal: controller.signal,
+						scopeFiles: result.changes.map(c => c.filePath),
+						graphContext: '',
+						parentTaskId,
 					});
-				}, perTurnTimeoutMs);
-			});
 
-			const executePromise = specialist.execute(context).then(r => {
-				if (settled) {
-					// Timeout already won; discard this stale result so it
-					// can't leak back into `results`.
-					return undefined as unknown as SubtaskResult;
+					if (!reviewResult.success) {
+						const feedback = reviewResult.reviewFeedback;
+
+						// Confidence-driven escalation (H3): when the reviewer
+						// reports low confidence that a retry would actually fix
+						// the issues, skip the retry and escalate immediately.
+						// This saves a (potentially expensive) doomed turn and
+						// surfaces the issue to the user faster.
+						const lowConfidence = feedback?.confidenceInRetrySuccess !== undefined
+							&& feedback.confidenceInRetrySuccess < 0.3;
+
+						if (!lowConfidence && retryCount < this.config.maxRetries) {
+							retryCount++;
+							subtask.retryCount = retryCount;
+							this.metricsTracker.recordRetry(subtask.assignee);
+
+							context.instruction = buildRetryInstruction(subtask.instruction, reviewResult.summary, feedback);
+
+							const confidenceTag = feedback?.confidenceInRetrySuccess !== undefined
+								? ` (retry confidence: ${(feedback.confidenceInRetrySuccess * 100).toFixed(0)}%)`
+								: '';
+							stream.markdown(`*Retry ${retryCount}/${this.config.maxRetries}${confidenceTag}: incorporating review feedback...*\n`);
+							continue;
+						}
+
+						// No retries left (or retry deemed unlikely to help):
+						// mark the subtask failed and surface the structured
+						// feedback to the developer.
+						result.success = false;
+						result.reviewFeedback = feedback;
+						result.summary = [
+							result.summary || 'Subtask failed final review.',
+							'',
+							lowConfidence ? 'Skipping retry — reviewer reported low confidence in success.' : 'Final review feedback:',
+							reviewResult.summary,
+						].join('\n');
+
+						this.metricsTracker.recordEscalation(subtask.assignee);
+					} else {
+						result.reviewFeedback = reviewResult.reviewFeedback;
+					}
 				}
-				settled = true;
-				if (timeoutHandle !== undefined) {
-					clearTimeout(timeoutHandle);
+
+				if (retryCount === 0 && result.success) {
+					this.metricsTracker.recordFirstPassSuccess(subtask.assignee);
 				}
-				return r;
-			});
 
-			const raced = await Promise.race([executePromise, timeoutPromise]);
-			result = raced;
-			const latencyMs = Date.now() - startTime;
-
-			// Timeout path: record an escalation, do NOT retry.
-			if (result && !result.success && result.summary.startsWith('Timed out after ')) {
-				this.metricsTracker.recordEscalation(subtask.assignee);
 				break;
 			}
 
-			this.metricsTracker.recordInvocation(subtask.assignee, latencyMs, result.tokenUsage);
-
-			// Send through review agent if available
-			if (this.reviewAgent && result.success) {
-				const reviewResult = await this.reviewAgent.execute({
-					instruction: `Review changes from @${subtask.assignee}: ${subtask.instruction}`,
-					scopeFiles: result.changes.map(c => c.filePath),
-					graphContext: '',
-					parentTaskId,
-				});
-
-				if (!reviewResult.success) {
-					const feedback = reviewResult.reviewFeedback;
-
-					// Confidence-driven escalation (H3): when the reviewer
-					// reports low confidence that a retry would actually fix
-					// the issues, skip the retry and escalate immediately.
-					// This saves a (potentially expensive) doomed turn and
-					// surfaces the issue to the user faster.
-					const lowConfidence = feedback?.confidenceInRetrySuccess !== undefined
-						&& feedback.confidenceInRetrySuccess < 0.3;
-
-					if (!lowConfidence && retryCount < this.config.maxRetries) {
-						retryCount++;
-						subtask.retryCount = retryCount;
-						this.metricsTracker.recordRetry(subtask.assignee);
-
-						context.instruction = buildRetryInstruction(subtask.instruction, reviewResult.summary, feedback);
-
-						const confidenceTag = feedback?.confidenceInRetrySuccess !== undefined
-							? ` (retry confidence: ${(feedback.confidenceInRetrySuccess * 100).toFixed(0)}%)`
-							: '';
-						stream.markdown(`*Retry ${retryCount}/${this.config.maxRetries}${confidenceTag}: incorporating review feedback...*\n`);
-						continue;
-					}
-
-					// No retries left (or retry deemed unlikely to help):
-					// mark the subtask failed and surface the structured
-					// feedback to the developer.
-					result.success = false;
-					result.reviewFeedback = feedback;
-					result.summary = [
-						result.summary || 'Subtask failed final review.',
-						'',
-						lowConfidence ? 'Skipping retry — reviewer reported low confidence in success.' : 'Final review feedback:',
-						reviewResult.summary,
-					].join('\n');
-
-					this.metricsTracker.recordEscalation(subtask.assignee);
-				} else {
-					result.reviewFeedback = reviewResult.reviewFeedback;
-				}
+			if (!result) {
+				this.metricsTracker.recordEscalation(subtask.assignee);
+				return {
+					success: false,
+					changes: [],
+					summary: 'Max retries exceeded — escalating to developer.',
+					tokenUsage: { inputTokens: 0, outputTokens: 0, cachedTokens: 0, naiveInputTokens: 0 },
+				};
 			}
 
-			if (retryCount === 0 && result.success) {
-				this.metricsTracker.recordFirstPassSuccess(subtask.assignee);
-			}
-
-			break;
-		}
-
-		if (!result) {
-			this.metricsTracker.recordEscalation(subtask.assignee);
-			return {
-				success: false,
-				changes: [],
-				summary: 'Max retries exceeded — escalating to developer.',
-				tokenUsage: { inputTokens: 0, outputTokens: 0, cachedTokens: 0, naiveInputTokens: 0 },
-			};
-		}
-
-		return result;
+			return result;
+		} finally { subscription?.dispose(); }
 	}
 
 	/**

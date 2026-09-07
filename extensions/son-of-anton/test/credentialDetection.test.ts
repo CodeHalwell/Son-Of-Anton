@@ -5,13 +5,16 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import {
-	detectCredentials,
+	detectCredentials as detectCredentialsWithDiscovery,
 	hasAnyProvider,
 	SECRET_KEYS,
 	type CredentialState,
 } from 'son-of-anton-core/credentials/credentialDetection';
 import type { CredentialBroker } from 'son-of-anton-core/auth/CredentialBroker';
 import type { ProviderStatus } from 'son-of-anton-core/auth/types';
+
+const detectCredentials = (...args: Parameters<typeof detectCredentialsWithDiscovery>) =>
+	detectCredentialsWithDiscovery(args[0], args[1], args[2], { isCodexAvailable: () => false });
 
 // ── Fakes ─────────────────────────────────────────────────────────────────────
 

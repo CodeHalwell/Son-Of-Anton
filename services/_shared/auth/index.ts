@@ -179,3 +179,5 @@ export function serviceAuthHeaders(token?: string): Record<string, string> {
 	const resolved = resolveToken(token);
 	return resolved ? { Authorization: `Bearer ${resolved}` } : {};
 }
+
+export { WorkspacePathError, workspacePath, readWorkspaceFile, writeWorkspaceFile, removeWorkspaceFile } from './workspaceFs';

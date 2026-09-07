@@ -15,6 +15,12 @@ import { counter, gauge, histogram, expressMetricsMiddleware, prometheusHandler 
 import { expressTracingMiddleware, extractOrCreateTraceContext, addTraceHeaders } from '../_lib/tracing/dist/index.js';
 import { createAuthMiddleware } from '../_shared/auth/dist/index.js';
 import type { UsageObserver } from './providers/types.js';
+import { passthroughCollectUsage } from './streamingMetrics.js';
+import { writeResponse } from './responseWriter.js';
+import { createProviderRegistry } from './providers/registry.js';
+import { FailoverChain } from './failover/failoverChain.js';
+import type { BrokerLike } from './providers/anthropic-oauth.js';
+import { normalizeMessages, normalizeTools } from './messageContract.js';
 
 function loadConfig(): ModelRoutesConfig {
 	const configPath = process.env.MODEL_ROUTES_CONFIG
@@ -94,16 +100,15 @@ function resolveProvidersForRole(
 	}
 
 	// Legacy fallback: use ModelRouter to resolve the primary route.
-	const route = router.resolveRoute(context);
-	return [{ provider: route.provider, model: route.model, config: route.providerConfig }];
+	return router.resolveFallbackChain(context).map(target => ({ ...target, config: router.resolveProvider(target.provider) }));
 }
 
 function buildRequestHeaders(config: ProviderConfig): Record<string, string> {
 	const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+	if (config.format === 'anthropic') { headers['anthropic-version'] = '2023-06-01'; }
 	if (config.apiKey) {
 		if (config.format === 'anthropic') {
 			headers['x-api-key'] = config.apiKey;
-			headers['anthropic-version'] = '2023-06-01';
 		} else {
 			headers['Authorization'] = `Bearer ${config.apiKey}`;
 		}
@@ -112,9 +117,10 @@ function buildRequestHeaders(config: ProviderConfig): Record<string, string> {
 }
 
 function buildEndpoint(config: ProviderConfig): string {
+	const baseUrl = config.baseUrl.replace(/\/+$/, '').replace(/\/v1$/, '');
 	return config.format === 'anthropic'
-		? `${config.baseUrl}/v1/messages`
-		: `${config.baseUrl}/v1/chat/completions`;
+		? `${baseUrl}/v1/messages`
+		: `${baseUrl}/v1/chat/completions`;
 }
 
 const llmRequestTotal = counter('llm_requests_total', 'Total LLM requests by provider, model, agent role, and outcome');
@@ -141,11 +147,12 @@ function createPrometheusUsageObserver(): UsageObserver {
 	};
 }
 
-export function createServer() {
-	const config = loadConfig();
-	let failoverConfig = loadFailoverConfig();
+export function createServer(options: { config?: ModelRoutesConfig; failover?: FailoverConfig; broker?: BrokerLike; timeoutMs?: number } = {}) {
+	const config = options.config ?? loadConfig();
+	let failoverConfig = options.failover ?? loadFailoverConfig();
 	const router = new ModelRouter(config);
 	const metrics = new MetricsCollector();
+	const adapterFor = createProviderRegistry(router, options.broker);
 	const app = express();
 
 	app.use(express.json({ limit: '10mb' }));
@@ -167,224 +174,147 @@ export function createServer() {
 		res.json({ status: 'ok', service: 'model-router' });
 	});
 
-	// Main routing endpoint
-	app.post('/v1/messages', async (req, res) => {
-		const context: RoutingContext = {
-			agentRole: (req.headers['x-agent-role'] as string) ?? 'default',
-			taskType: req.headers['x-task-type'] as string | undefined,
-			taskId: req.headers['x-task-id'] as string | undefined,
-		};
+	app.get('/ready', async (_req, res) => {
+		const ids = new Set(Object.keys(router.getConfig().providers));
+		for (const role of Object.values(failoverConfig)) { for (const target of [role.primary, ...(role.fallback ?? [])]) { if (target) { ids.add(target.provider); } } }
+		const providers = await Promise.all([...ids].map(async id => {
+			try { return { id, configured: await adapterFor(id).isAvailable() }; }
+			catch { return { id, configured: false }; }
+		}));
+		const ready = providers.some(provider => provider.configured);
+		res.status(ready ? 200 : 503).json({ status: ready ? 'configured' : 'unconfigured', providers, liveConnectivityChecked: false });
+	});
 
+	// Main routing endpoint retains its existing provider SSE wire format.
+	const handleMessages: express.RequestHandler = async (req, res) => {
+		const normalizedStream = req.path === '/v1/agent-events';
+		if (normalizedStream && req.body?.stream !== true) { res.status(400).json({ error: '/v1/agent-events requires stream: true' }); return; }
+		const context: RoutingContext = { agentRole: req.get('x-agent-role') ?? 'default', taskType: req.get('x-task-type'), taskId: req.get('x-task-id') };
 		const traceCtx = extractOrCreateTraceContext(req);
-		const isStreaming = req.body.stream === true;
+		const isStreaming = req.body?.stream === true;
+		const messages = req.body?.messages;
+		const maxTokens = req.body?.max_tokens ?? 4096;
+		if (!Array.isArray(messages) || !messages.length || !messages.every(message => message && typeof message.role === 'string' && (typeof message.content === 'string' || Array.isArray(message.content) || (message.content === null && Array.isArray(message.tool_calls)))) || !Number.isInteger(maxTokens) || maxTokens < 1 || maxTokens > 1_000_000 || (req.body.system !== undefined && typeof req.body.system !== 'string')) {
+			res.status(400).json({ error: 'Expected messages and a positive integer max_tokens (at most 1000000).' });
+			return;
+		}
+		let tools;
+		try { normalizeMessages(messages); tools = normalizeTools(req.body.tools); }
+		catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : 'Invalid request' }); return; }
 		const startTime = Date.now();
-		const messages = req.body.messages ?? [];
-		const systemPrompt = req.body.system;
-		const maxTokens = req.body.max_tokens ?? 4096;
-
-		// Abort upstream provider connections when the client disconnects (e.g.
-		// user clicks Cancel). Without this the provider fetch runs to completion,
-		// burning tokens and keeping the connection alive unnecessarily.
+		const requestId = randomUUID();
 		const reqAbort = new AbortController();
-		// Only abort when the response is still in-flight — if the response
-		// already ended normally, ignore the close event.
-		res.on('close', () => { if (!res.writableEnded) { reqAbort.abort(); } });
-
-		const providers = resolveProvidersForRole(context.agentRole, context, router, failoverConfig);
-
-		let lastError: Error | null = null;
-		let lastProvider = providers[0]?.provider ?? 'unknown';
-		let lastModel = providers[0]?.model ?? 'unknown';
-
-		for (const { provider, model, config: providerConfig } of providers) {
-			lastProvider = provider;
-			lastModel = model;
-
-			try {
-				if (reqAbort.signal.aborted) {
-					return;
+		let timedOut = false;
+		const configuredTimeout = Number(options.timeoutMs ?? process.env.MODEL_ROUTER_TIMEOUT_MS ?? 120000);
+		const timeoutMs = Number.isFinite(configuredTimeout) ? Math.max(10, Math.min(configuredTimeout, 600000)) : 120000;
+		const timer = setTimeout(() => { timedOut = true; reqAbort.abort(); }, timeoutMs);
+		const close = (): void => { if (!res.writableEnded) { reqAbort.abort(); } };
+		res.once('close', close);
+		let lastError: Error | undefined;
+		let provider = 'unresolved';
+		let model = 'unresolved';
+		let inputIncludesCache = true;
+		let success = false;
+		let outcome = 'error';
+		let usage = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 };
+		try {
+			if (normalizedStream) {
+				const role = failoverConfig[context.agentRole] ?? failoverConfig['*'];
+				const targets = role?.primary ? [role.primary, ...(role.fallback ?? [])] : router.resolveFallbackChain(context);
+				const chain = new FailoverChain(targets.map(target => ({ model: target.model, adapter: adapterFor(target.provider) })));
+				res.setHeader('Content-Type', 'text/event-stream');
+				res.setHeader('Cache-Control', 'no-cache');
+				res.setHeader('X-Accel-Buffering', 'no');
+				let stopped = false;
+				for await (const event of chain.send({ requestId, model: targets[0].model, messages: normalizeMessages(messages), system: req.body.system, maxTokens, tools, agentRole: context.agentRole }, reqAbort.signal)) {
+					if (event.type === 'message_start') { provider = event.provider; model = event.model; inputIncludesCache = provider !== 'anthropic-oauth' && router.getConfig().providers[provider]?.format !== 'anthropic'; }
+					if (event.type === 'usage') {
+						usage.inputTokens = Math.max(usage.inputTokens, event.inputTokens);
+						usage.outputTokens = Math.max(usage.outputTokens, event.outputTokens);
+						usage.cacheReadInputTokens = Math.max(usage.cacheReadInputTokens, event.cacheReadInputTokens ?? 0);
+						usage.cacheCreationInputTokens = Math.max(usage.cacheCreationInputTokens, event.cacheCreationInputTokens ?? 0);
+					}
+					if (event.type === 'error') { lastError = new Error(event.message); }
+					if (event.type === 'message_stop') { stopped = true; if (event.stopReason === 'error' && !lastError) { lastError = new Error('Provider stream failed'); } }
+					await writeResponse(res, 'data: ' + JSON.stringify(event) + '\n\n', reqAbort.signal);
 				}
+				reqAbort.signal.throwIfAborted();
+				success = stopped && !lastError;
+				outcome = success ? 'success' : 'error';
+				res.end();
+				return;
+			}
 
-				const translatedBody = providerConfig.format === 'anthropic'
-					? toAnthropicFormat(messages, systemPrompt, maxTokens, model, isStreaming)
-					: toOpenAIFormat(messages, systemPrompt, maxTokens, model, isStreaming);
-
-				const headers = addTraceHeaders(buildRequestHeaders(providerConfig), traceCtx);
-				const endpoint = buildEndpoint(providerConfig);
-
-				const fetchResponse = await fetch(endpoint, {
-					method: 'POST',
-					headers,
-					body: JSON.stringify(translatedBody),
-					signal: reqAbort.signal,
-				});
-
-				if (!fetchResponse.ok) {
-					const errorBody = await fetchResponse.text();
-					// 5xx = server error; 429 = rate-limited — both warrant trying the next provider.
-					const retryable = fetchResponse.status >= 500 || fetchResponse.status === 429;
-					lastError = new Error(`Provider ${provider} returned ${fetchResponse.status}: ${errorBody}`);
-					if (!retryable) {
-						// Client error — do not try fallbacks
+			const candidates = resolveProvidersForRole(context.agentRole, context, router, failoverConfig);
+			for (const candidate of candidates) {
+				provider = candidate.provider;
+				model = candidate.model;
+				const providerConfig = candidate.config;
+				inputIncludesCache = providerConfig.format !== 'anthropic';
+				try {
+					reqAbort.signal.throwIfAborted();
+					const body = providerConfig.format === 'anthropic'
+						? toAnthropicFormat(messages, req.body.system, maxTokens, model, isStreaming, tools)
+						: toOpenAIFormat(messages, req.body.system, maxTokens, model, isStreaming, tools);
+					const response = await fetch(buildEndpoint(providerConfig), { method: 'POST', headers: addTraceHeaders(buildRequestHeaders(providerConfig), traceCtx), body: JSON.stringify(body), signal: reqAbort.signal });
+					if (!response.ok) {
+						await response.body?.cancel();
+						lastError = new Error('Provider ' + provider + ' returned HTTP ' + response.status);
+						if (response.status === 429 || response.status >= 500) { continue; }
 						break;
 					}
-					// Server error or rate-limit — try next provider
-					continue;
-				}
-
-				if (isStreaming) {
-					if (!res.headersSent) {
+					if (isStreaming) {
+						if (!response.body) { throw new Error('Provider returned no response stream'); }
 						res.setHeader('Content-Type', 'text/event-stream');
 						res.setHeader('Cache-Control', 'no-cache');
-						res.setHeader('Connection', 'keep-alive');
+						res.setHeader('X-Accel-Buffering', 'no');
+						const reader = response.body.getReader();
+						async function* chunks(): AsyncIterable<Buffer> {
+							try {
+								while (true) { const chunk = await reader.read(); if (chunk.done) { break; } yield Buffer.from(chunk.value); }
+							} finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+						}
+						for await (const chunk of passthroughCollectUsage(chunks(), value => { usage = { ...value }; })) {
+							await writeResponse(res, chunk, reqAbort.signal);
+						}
+						reqAbort.signal.throwIfAborted();
+						res.end();
+					} else {
+						const raw = await response.json() as Record<string, unknown>;
+						const unified = providerConfig.format === 'anthropic' ? fromAnthropicResponse(raw) : fromOpenAIResponse(raw);
+						usage = { inputTokens: unified.inputTokens, outputTokens: unified.outputTokens, cacheReadInputTokens: unified.cachedTokens, cacheCreationInputTokens: unified.cacheCreationTokens };
+						res.json(unified);
 					}
-
-					try {
-						const body = fetchResponse.body as unknown as AsyncIterable<Buffer> | null;
-						if (body) {
-							for await (const chunk of body) {
-								if (reqAbort.signal.aborted) {
-									break;
-								}
-								res.write(chunk);
-							}
-						}
-						if (!reqAbort.signal.aborted) {
-							res.end();
-						}
-						return;
-					} catch (streamErr) {
-						const err = streamErr as Error;
-						if (err.name === 'AbortError') {
-							// Client cancelled mid-stream. Emit final events if the
-							// socket is still open (e.g. server-initiated abort), then
-							// bail — never retry after a client cancellation.
-							if (!reqAbort.signal.aborted && !res.writableEnded) {
-								try {
-									res.write(`data: ${JSON.stringify({ type: 'message_stop', stopReason: 'error' })}\n\n`);
-									res.write(`data: ${JSON.stringify({ type: 'error', code: 'cancelled', message: 'Request cancelled', retryable: false })}\n\n`);
-									res.end();
-								} catch {
-									// socket already closed — nothing to write
-								}
-							}
-							return;
-						}
-						lastError = err;
-						console.error(`Stream from ${provider} failed mid-flight:`, lastError.message);
-						// Continue to next provider if headers have not been sent yet,
-						// or if the connection is still writable.
-						if (res.headersSent && !res.writableEnded) {
-							continue;
-						}
-						// Response already ended — cannot recover.
-						return;
-					}
-				}
-
-				// Non-streaming response
-				const responseBody = await fetchResponse.json() as Record<string, unknown>;
-				const unified = providerConfig.format === 'anthropic'
-					? fromAnthropicResponse(responseBody)
-					: fromOpenAIResponse(responseBody);
-
-				const latencyMs = Date.now() - startTime;
-				const cost = calculateCost(model, unified.inputTokens, unified.outputTokens, unified.cachedTokens);
-
-				metrics.record({
-					id: randomUUID(),
-					timestamp: Date.now(),
-					provider,
-					model,
-					agentRole: context.agentRole,
-					taskType: context.taskType ?? '',
-					taskId: context.taskId ?? '',
-					inputTokens: unified.inputTokens,
-					outputTokens: unified.outputTokens,
-					cachedTokens: unified.cachedTokens,
-					cacheCreationTokens: unified.cacheCreationTokens ?? 0,
-					latencyMs,
-					cost,
-					success: true,
-				});
-
-				const successLabels = { provider, model, agent_role: context.agentRole, outcome: 'success' };
-				llmRequestTotal.inc(successLabels);
-				llmRequestDuration.observe(latencyMs, successLabels);
-				const tokenLabels = { provider, model, agent_role: context.agentRole };
-				if (unified.inputTokens > 0) { llmInputTokens.inc(tokenLabels, unified.inputTokens); }
-				if (unified.outputTokens > 0) { llmOutputTokens.inc(tokenLabels, unified.outputTokens); }
-				if (unified.cachedTokens > 0) {
-					llmCacheReadTokens.inc(tokenLabels, unified.cachedTokens);
-					const total = unified.inputTokens + unified.cachedTokens;
-					if (total > 0) { llmCacheHitRate.set(unified.cachedTokens / total, tokenLabels); }
-				}
-				if ((unified.cacheCreationTokens ?? 0) > 0) { llmCacheCreationTokens.inc(tokenLabels, unified.cacheCreationTokens!); }
-
-				res.json(unified);
-				return;
-
-			} catch (err) {
-				// Client disconnected before the provider responded — bail immediately.
-				// Never retry with other providers for a cancelled request.
-				if ((err as Error).name === 'AbortError') {
+					success = true;
+					outcome = 'success';
 					return;
+				} catch (error) {
+					lastError = error instanceof Error ? error : new Error('Provider request failed');
+					// Once bytes are visible, replay could duplicate text or tool actions.
+					if (res.headersSent || reqAbort.signal.aborted || lastError.name === 'AbortError') { break; }
 				}
-				lastError = err as Error;
-				console.error(`Provider ${provider} failed:`, lastError.message);
-				const errLatencyMs = Date.now() - startTime;
-				metrics.record({
-					id: randomUUID(),
-					timestamp: Date.now(),
-					provider,
-					model,
-					agentRole: context.agentRole,
-					taskType: context.taskType ?? '',
-					taskId: context.taskId ?? '',
-					inputTokens: 0,
-					outputTokens: 0,
-					cachedTokens: 0,
-					cacheCreationTokens: 0,
-					latencyMs: errLatencyMs,
-					cost: 0,
-					success: false,
-					error: lastError.message,
-				});
-				const errLabels = { provider, model, agent_role: context.agentRole, outcome: 'error' };
-				llmRequestTotal.inc(errLabels);
-				llmRequestDuration.observe(errLatencyMs, errLabels);
-				// Network / connection error — try next provider
 			}
+		} catch (error) { lastError = error instanceof Error ? error : new Error('Routing failed'); }
+		finally {
+			clearTimeout(timer);
+			res.off('close', close);
+			if (reqAbort.signal.aborted) { outcome = timedOut ? 'timeout' : 'cancelled'; }
+			const latencyMs = Date.now() - startTime;
+			metrics.record({ id: requestId, timestamp: Date.now(), provider, model, agentRole: context.agentRole, taskType: context.taskType ?? '', taskId: context.taskId ?? '', inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cachedTokens: usage.cacheReadInputTokens, cacheCreationTokens: usage.cacheCreationInputTokens, latencyMs, cost: calculateCost(model, usage.inputTokens + (inputIncludesCache ? 0 : usage.cacheReadInputTokens + usage.cacheCreationInputTokens), usage.outputTokens, usage.cacheReadInputTokens, usage.cacheCreationInputTokens), success, error: success ? undefined : lastError?.message });
+			const labels = { provider, model, agent_role: context.agentRole, outcome };
+			llmRequestTotal.inc(labels);
+			llmRequestDuration.observe(latencyMs, labels);
+			createPrometheusUsageObserver().recordUsage({ provider, model, agentRole: context.agentRole, ...usage });
 		}
-
-		// All providers exhausted — attribute the failure to the last attempted provider.
-		const latencyMs = Date.now() - startTime;
-		console.error('All providers failed. Last error:', lastError?.message);
-
-		metrics.record({
-			id: randomUUID(),
-			timestamp: Date.now(),
-			provider: lastProvider,
-			model: lastModel,
-			agentRole: context.agentRole,
-			taskType: context.taskType ?? '',
-			taskId: context.taskId ?? '',
-			inputTokens: 0,
-			outputTokens: 0,
-			cachedTokens: 0,
-			cacheCreationTokens: 0,
-			latencyMs,
-			cost: 0,
-			success: false,
-			error: lastError?.message,
-		});
-
-		const exhaustedLabels = { provider: lastProvider, model: lastModel, agent_role: context.agentRole, outcome: 'all_failed' };
-		llmRequestTotal.inc(exhaustedLabels);
-		llmRequestDuration.observe(latencyMs, exhaustedLabels);
-
-		res.status(502).json({ error: lastError?.message ?? 'All providers failed' });
-	});
+		if (res.destroyed || res.writableEnded) { return; }
+		const code = timedOut ? 'timeout' : lastError?.name === 'AbortError' ? 'cancelled' : 'provider_error';
+		const message = timedOut ? 'Provider request timed out' : lastError?.message ?? 'All providers failed';
+		if (res.headersSent) {
+			res.end('data: ' + JSON.stringify({ type: 'error', code, message, retryable: false }) + '\n\ndata: ' + JSON.stringify({ type: 'message_stop', stopReason: 'error' }) + '\n\n');
+		} else { res.status(timedOut ? 504 : 502).json({ error: message }); }
+	};
+	app.post('/v1/messages', handleMessages);
+	app.post('/v1/agent-events', handleMessages);
 
 	// Prometheus metrics endpoint
 	app.get('/metrics', prometheusHandler() as any);

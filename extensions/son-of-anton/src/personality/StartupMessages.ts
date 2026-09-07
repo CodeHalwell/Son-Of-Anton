@@ -14,18 +14,16 @@ import { isPersonalityEnabled } from './personalityConfig';
  * keeps the legacy status-bar one-liner behaviour for backward
  * compatibility.
  *
- * On first launch the channel is auto-revealed; on subsequent launches the
- * banner is logged silently so the user is not pulled out of their flow.
+ * The banner is logged silently so the workspace and chat keep their space.
  */
 export class StartupMessages {
 	private static readonly DISPLAY_DURATION_MS = 8000;
-	private static readonly FIRST_LAUNCH_KEY = 'sota.personality.startupBannerShown';
 	private static channel: vscode.OutputChannel | undefined;
 
 	/**
 	 * Displays the startup messages. `context` is optional so existing
 	 * callers (and tests) that only have an `extensionUri` keep working;
-	 * when omitted the auto-reveal-on-first-launch logic is skipped.
+	 * when present it owns the output channel lifetime.
 	 */
 	static async show(
 		extensionUri: vscode.Uri,
@@ -35,7 +33,14 @@ export class StartupMessages {
 			return;
 		}
 
-		await this.logBanner(context);
+		const channel = this.getChannel();
+		if (context) {
+			context.subscriptions.push({ dispose: () => {
+				channel.dispose();
+				if (this.channel === channel) { this.channel = undefined; }
+			} });
+		}
+		this.logBanner();
 
 		const messages = await this.loadMessages(extensionUri);
 		if (messages.length === 0) {
@@ -65,7 +70,7 @@ export class StartupMessages {
 		return this.channel;
 	}
 
-	private static async logBanner(context?: vscode.ExtensionContext): Promise<void> {
+	private static logBanner(): void {
 		const channel = this.getChannel();
 		const quote = getStartupQuote();
 
@@ -80,10 +85,6 @@ export class StartupMessages {
 		}
 		channel.appendLine('');
 
-		if (context && !context.globalState.get<boolean>(this.FIRST_LAUNCH_KEY)) {
-			channel.show(true);
-			await context.globalState.update(this.FIRST_LAUNCH_KEY, true);
-		}
 	}
 
 	private static async loadMessages(extensionUri: vscode.Uri): Promise<string[]> {

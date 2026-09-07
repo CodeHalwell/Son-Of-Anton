@@ -1,138 +1,31 @@
-// Copyright (c) Son of Anton Contributors. All rights reserved.
-// Licensed under the MIT License.
-
-import { describe, test } from 'node:test';
+/* Copyright (c) Microsoft Corporation. Licensed under the MIT License. */
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFile, mkdir, rm } from 'fs/promises';
-import path from 'path';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { AgentRegistry } from '../src/registry/agentRegistry';
+const entry = { id: 'fixture', name: 'Fixture', transport: 'stdio', command: process.execPath, args: [], capabilities: ['analysis'], costTier: 'local', env: { SYNTHETIC_SECRET: 'never-describe-this' } };
 
-const TEST_DIR = path.join(__dirname, '.test-config');
-
-describe('AgentRegistry', () => {
-	test('loads agents from a valid config file', async () => {
-		await mkdir(TEST_DIR, { recursive: true });
-		const configPath = path.join(TEST_DIR, 'acp-agents.json');
-
-		await writeFile(configPath, JSON.stringify({
-			agents: [
-				{
-					id: 'test-agent',
-					name: 'Test Agent',
-					transport: 'stdio',
-					command: 'echo',
-					args: ['hello'],
-					capabilities: ['code-generation', 'analysis'],
-					contextWindow: 128000,
-					costTier: 'free',
-				},
-				{
-					id: 'http-agent',
-					name: 'HTTP Agent',
-					transport: 'http',
-					url: 'http://localhost:4200',
-					capabilities: ['security-review'],
-					costTier: 'local',
-				},
-			],
-		}));
-
-		const registry = new AgentRegistry(configPath);
-		await registry.load();
-
-		const descriptors = registry.listDescriptors();
-		assert.deepStrictEqual(descriptors, [
-			{
-				id: 'test-agent',
-				name: 'Test Agent',
-				transport: 'stdio',
-				capabilities: ['code-generation', 'analysis'],
-				contextWindow: 128000,
-				costTier: 'free',
-			},
-			{
-				id: 'http-agent',
-				name: 'HTTP Agent',
-				transport: 'http',
-				capabilities: ['security-review'],
-				contextWindow: undefined,
-				costTier: 'local',
-			},
-		]);
-
-		assert.ok(registry.has('test-agent'));
-		assert.ok(registry.has('http-agent'));
-		assert.ok(!registry.has('nonexistent'));
-
-		const entry = registry.getEntry('test-agent');
-		assert.equal(entry?.command, 'echo');
-		assert.deepStrictEqual(entry?.args, ['hello']);
-
-		await rm(TEST_DIR, { recursive: true, force: true });
-	});
-
-	test('handles missing config file gracefully', async () => {
-		const registry = new AgentRegistry('/nonexistent/path/acp-agents.json');
-		await registry.load(); // Should not throw
-
-		assert.deepStrictEqual(registry.listDescriptors(), []);
-	});
-
-	test('validates stdio agent requires command', async () => {
-		await mkdir(TEST_DIR, { recursive: true });
-		const configPath = path.join(TEST_DIR, 'bad-config.json');
-
-		await writeFile(configPath, JSON.stringify({
-			agents: [{
-				id: 'bad-agent',
-				name: 'Bad Agent',
-				transport: 'stdio',
-				capabilities: [],
-				costTier: 'free',
-			}],
-		}));
-
-		const registry = new AgentRegistry(configPath);
-		await assert.rejects(() => registry.load(), /stdio transport requires a "command"/);
-
-		await rm(TEST_DIR, { recursive: true, force: true });
-	});
-
-	test('validates http agent requires url', async () => {
-		await mkdir(TEST_DIR, { recursive: true });
-		const configPath = path.join(TEST_DIR, 'bad-http.json');
-
-		await writeFile(configPath, JSON.stringify({
-			agents: [{
-				id: 'bad-http',
-				name: 'Bad HTTP',
-				transport: 'http',
-				capabilities: [],
-				costTier: 'free',
-			}],
-		}));
-
-		const registry = new AgentRegistry(configPath);
-		await assert.rejects(() => registry.load(), /http transport requires a "url"/);
-
-		await rm(TEST_DIR, { recursive: true, force: true });
-	});
-
-	test('entryToCapabilities returns static capabilities', () => {
-		const caps = AgentRegistry.entryToCapabilities({
-			id: 'test',
-			name: 'Test',
-			transport: 'stdio',
-			command: 'test',
-			capabilities: ['code-generation', 'testing'],
-			costTier: 'free',
-		});
-
-		assert.deepStrictEqual(caps, {
-			agentId: 'test',
-			capabilities: ['code-generation', 'testing'],
-			supportsPause: false,
-			supportsResume: false,
-		});
-	});
+test('registry exposes descriptors without commands or environment secrets and prevents external mutation', async t => {
+	const dir = await mkdtemp(path.join(os.tmpdir(), 'acp-registry-')); t.after(() => rm(dir, { recursive: true, force: true }));
+	const config = path.join(dir, 'agents.json'); await writeFile(config, JSON.stringify({ agents: [entry] }));
+	const registry = new AgentRegistry(config); await registry.load();
+	const descriptions = registry.listDescriptors(); descriptions[0].capabilities.push('testing');
+	registry.getEntry('fixture')!.env!.SYNTHETIC_SECRET = 'mutated';
+	assert.deepEqual([registry.listDescriptors()[0].capabilities, registry.getEntry('fixture')?.env?.SYNTHETIC_SECRET], [['analysis'], 'never-describe-this']);
+	assert.equal(JSON.stringify(descriptions).includes('never-describe-this'), false);
+});
+test('invalid registry reloads preserve the entire previous valid configuration', async t => {
+	const dir = await mkdtemp(path.join(os.tmpdir(), 'acp-registry-')); t.after(() => rm(dir, { recursive: true, force: true }));
+	const config = path.join(dir, 'agents.json'); const registry = new AgentRegistry(config);
+	await writeFile(config, JSON.stringify({ agents: [entry] })); await registry.load();
+	for (const agents of [[entry, { ...entry, id: 'bad', command: '' }], [entry, entry], [{ ...entry, transport: 'http', url: 'http://localhost' }]]) {
+		await writeFile(config, JSON.stringify({ agents })); await assert.rejects(registry.load());
+		assert.deepEqual(registry.listDescriptors().map(agent => agent.id), ['fixture']);
+	}
+});
+test('missing configuration is explicitly empty', async () => {
+	const registry = new AgentRegistry('/nonexistent/sota-acp/agents.json'); await registry.load();
+	assert.deepEqual(registry.listDescriptors(), []);
 });

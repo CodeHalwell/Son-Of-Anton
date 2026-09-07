@@ -1,3 +1,4 @@
+import { WorkspacePathError } from '../_shared/auth/dist/workspaceFs.js';
 // Son of Anton — Indexer HTTP Server
 // Exposes health, stats, and control endpoints for the indexer service.
 
@@ -121,7 +122,9 @@ export class IndexerServer {
 
 		// POST /reindex/:path — reindex a specific file
 		if (method === 'POST' && url.pathname.startsWith('/reindex/')) {
-			const filePath = decodeURIComponent(url.pathname.substring('/reindex/'.length));
+			let filePath: string;
+			try { filePath = decodeURIComponent(url.pathname.substring('/reindex/'.length)); }
+			catch { res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid encoded path' })); return; }
 			const fullPath = filePath.startsWith('/')
 				? filePath
 				: `${this.config.project.path}/${filePath}`;
@@ -135,7 +138,7 @@ export class IndexerServer {
 					updated,
 				}));
 			} catch (err) {
-				res.writeHead(500, { 'Content-Type': 'application/json' });
+				res.writeHead(err instanceof WorkspacePathError ? 400 : 500, { 'Content-Type': 'application/json' });
 				res.end(JSON.stringify({
 					error: 'Failed to index file',
 					file: filePath,

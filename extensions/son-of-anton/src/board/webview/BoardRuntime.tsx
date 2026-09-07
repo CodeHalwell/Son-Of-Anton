@@ -1,65 +1,8 @@
-/*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
- *--------------------------------------------------------------------------------------------*/
-/**
- * @fileoverview Runtime adapter for the Task Board chat panel.
- *
- * CopilotKit's `<CopilotKit>` provider expects a `runtimeUrl` pointing at a
- * hosted runtime that handles the LLM calls. We don't have a server — the
- * board lives entirely in a VS Code webview. Two choices:
- *
- *   1. Use the official runtime (heavy: requires a server-side proxy).
- *   2. Use only the action / readable hooks for agent metadata, drive chat
- *      ourselves via a postMessage round-trip with `LlmClient` in the host.
- *
- * We took (2). The provider mounts with a no-op `runtimeUrl` so the
- * action/readable context is available for `useCopilotAction` /
- * `useCopilotReadable` to register against. The chat UI in `BoardChat.tsx`
- * uses our own minimal `requestStream` helper which sends a
- * `chat-runtime` message to the host, then awaits a stream of
- * `chat-runtime-chunk` replies — INCLUDING `tool-call` events that the
- * webview routes back through CopilotKit's registered handlers.
- *
- * Tier 2.5 wires the loop end-to-end: the webview now ships a `tools`
- * array on the request, the host passes it into `LlmClient.streamRequest`,
- * and any `tool-call` event the model emits comes back through the same
- * channel and is dispatched against the action registry.
- */
-
-import { CopilotKit } from '@copilotkit/react-core';
-import type { ReactNode } from 'react';
+/* Copyright (c) Microsoft Corporation. Licensed under the MIT License. */
 import type { ChatToolDefinition } from './protocol';
+import { postToHost } from './vscode';
 
-interface BoardRuntimeProps {
-	readonly children: ReactNode;
-}
-
-/**
- * The dummy runtime URL is never fetched — `BoardChat.tsx` intercepts all
- * LLM traffic and routes it through postMessage to the host. CopilotKit
- * only checks that *some* runtime config is present so its action /
- * readable hooks have a context.
- */
-const NOOP_RUNTIME_URL = 'vscode-webview://noop';
-
-export function BoardRuntime({ children }: BoardRuntimeProps): JSX.Element {
-	return (
-		<CopilotKit
-			runtimeUrl={NOOP_RUNTIME_URL}
-			showDevConsole={false}
-		>
-			{children}
-		</CopilotKit>
-	);
-}
-
-/**
- * Tool-call event surfaced to the chat UI when the model invokes one of
- * the registered actions. `id` correlates the call with any future
- * follow-up (deferred); today the handler runs synchronously and the
- * model's next assistant turn is fully detached.
- */
+/** A streamed board action routed to the extension host. */
 export interface ChatToolCall {
 	readonly id: string;
 	readonly name: string;
@@ -85,6 +28,7 @@ export function requestStream(
 	tools?: ReadonlyArray<ChatToolDefinition>,
 ): { cancel: () => void } {
 	const requestId = makeRequestId();
+	let finished = false;
 	const handler = (ev: MessageEvent): void => {
 		const data = ev.data as {
 			type?: string;
@@ -115,24 +59,25 @@ export function requestStream(
 				input: event.input && typeof event.input === 'object' ? event.input : {},
 			});
 		} else if (event.type === 'complete') {
+			finished = true;
+			window.removeEventListener('message', handler);
 			callbacks.onComplete(event.fullText ?? '');
-			window.removeEventListener('message', handler);
 		} else if (event.type === 'error') {
-			callbacks.onError(event.error ?? 'Unknown error');
+			finished = true;
 			window.removeEventListener('message', handler);
+			callbacks.onError(event.error ?? 'Unknown error');
 		}
 	};
 	window.addEventListener('message', handler);
 
-	// Lazy-import vscode wrapper to keep this module independent of postToHost
-	// for testability (the wrapper would log warnings outside of a webview).
-	import('./vscode').then(mod => {
-		mod.postToHost({ type: 'chat-runtime', requestId, model, messages, tools });
-	});
+	postToHost({ type: 'chat-runtime', requestId, model, messages, tools });
 
 	return {
 		cancel: (): void => {
+			if (finished) { return; }
+			finished = true;
 			window.removeEventListener('message', handler);
+			postToHost({ type: 'cancel-chat', requestId });
 		},
 	};
 }

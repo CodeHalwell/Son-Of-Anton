@@ -21,9 +21,9 @@ pub struct LocalEmbedder {
 
 impl LocalEmbedder {
     pub fn new() -> Result<Self, CodeGraphError> {
-        let model = fastembed::TextEmbedding::try_new(
-            fastembed::InitOptions::new(fastembed::EmbeddingModel::BGESmallENV15),
-        )
+        let model = fastembed::TextEmbedding::try_new(fastembed::InitOptions::new(
+            fastembed::EmbeddingModel::BGESmallENV15,
+        ))
         .map_err(|e| CodeGraphError::Parse(format!("fastembed init: {e}")))?;
         Ok(Self {
             model: Arc::new(parking_lot::Mutex::new(model)),
@@ -66,7 +66,10 @@ pub struct ProviderEmbedder {
 impl ProviderEmbedder {
     pub fn new(endpoint: String, model: String, dims: usize, api_key: Option<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("HTTP client configuration"),
             endpoint,
             model,
             api_key,
@@ -88,6 +91,7 @@ struct EmbedResponse {
 
 #[derive(serde::Deserialize)]
 struct EmbedItem {
+    index: Option<usize>,
     embedding: Vec<f32>,
 }
 
@@ -110,7 +114,29 @@ impl Embedder for ProviderEmbedder {
             .json::<EmbedResponse>()
             .await
             .map_err(|e| CodeGraphError::Parse(format!("json: {e}")))?;
-        Ok(resp.data.into_iter().map(|i| i.embedding).collect())
+        let mut data = resp.data;
+        if data.iter().any(|item| item.index.is_some()) {
+            data.sort_by_key(|item| item.index);
+            if data
+                .iter()
+                .enumerate()
+                .any(|(i, item)| item.index != Some(i))
+            {
+                return Err(CodeGraphError::Parse(
+                    "invalid embedding response indices".into(),
+                ));
+            }
+        }
+        if data.len() != texts.len()
+            || data.iter().any(|item| {
+                item.embedding.len() != self.dims || item.embedding.iter().any(|v| !v.is_finite())
+            })
+        {
+            return Err(CodeGraphError::Parse(
+                "invalid embedding response shape".into(),
+            ));
+        }
+        Ok(data.into_iter().map(|i| i.embedding).collect())
     }
 
     fn dimensions(&self) -> usize {
@@ -150,10 +176,8 @@ pub struct VectorIndex {
 impl VectorIndex {
     /// Build an HNSW index from `(symbol_id, embedding)` pairs.
     pub fn build(items: Vec<(SymbolId, Vec<f32>)>) -> Self {
-        let (points, values): (Vec<_>, Vec<_>) = items
-            .into_iter()
-            .map(|(id, v)| (EmbVec(v), id.0))
-            .unzip();
+        let (points, values): (Vec<_>, Vec<_>) =
+            items.into_iter().map(|(id, v)| (EmbVec(v), id.0)).unzip();
         let map = Builder::default().build(points, values);
         Self { map }
     }
@@ -243,8 +267,7 @@ mod tests {
             .await;
 
         let url = format!("{}/v1/embeddings", server.uri());
-        let embedder =
-            ProviderEmbedder::new(url, "test-model".into(), 3, Some("sk-test".into()));
+        let embedder = ProviderEmbedder::new(url, "test-model".into(), 3, Some("sk-test".into()));
         let out = embedder
             .embed(&["hello".to_string(), "world".to_string()])
             .await

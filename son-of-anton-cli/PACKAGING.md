@@ -84,9 +84,7 @@ For each target the pipeline runs:
     + notarisation; see [Signing](#signing) below). On Windows,
     signing is likewise gated on `SOTA_WINDOWS_*` env vars and runs
     from the same hook. Skipped wholesale on Linux.
-10. **Smoke** — `./dist-bundle/<binary> --version` must exit 0. Only
-    runs when the build host matches the target; cross-builds skip
-    this and rely on the consumer-machine validation in CI.
+10. **Smoke** — copy into a clean temporary installation with spaces in its path and a separate cache. Verify version/help, CJS/ESM trampoline arguments, actual bundled Claude/Codex `--version` launches, ACP initialization/session creation, and relocation to a different executable path. Only runs when the build host matches the target. Pull-request CI builds and checks macOS arm64, Linux x64 and Windows x64 without publishing a release.
 
 ## What is bundled
 
@@ -100,22 +98,21 @@ For each target the pipeline runs:
 - **Stage 2 additions**: the upstream `@anthropic-ai/claude-code` and
   `@openai/codex` CLIs with their **target-platform** optional-dep
   binaries, as a `vendor.tgz` SEA asset. Extracted at first run into
-  `~/.sota/cache/<sota-version>/`; subsequent runs reuse the extracted
+  `~/.sota/cache/<sota-version>-<executable-identity>/`; subsequent runs reuse the extracted
   tree.
 
 ## Vendor extraction at runtime
 
-On first invocation for a given `sota` version, the SEA entrypoint:
+The cache identity includes the executable's path, size and modification time, so moving or replacing a binary does not reuse launchers pointing at an old installation. `SOTA_CACHE_DIR` can select a different absolute cache root. On first invocation, the SEA entrypoint:
 
-1.  Looks for `~/.sota/cache/<sota-version>/.extracted`; if present,
+1.  Looks for `<cache-root>/<version>-<identity>/.extracted`; if present,
     short-circuits.
 2.  Otherwise extracts the `vendor.tgz` asset via the system `tar`
     binary (available on macOS, Linux, and Windows 10+) into a sibling
-    temp directory, then atomically renames into the final cache path
-    so concurrent `sota` invocations don't race on a half-written tree.
+    temporary directory on the destination filesystem.
 3.  Rewrites the `__SOTA_BIN__` placeholder in every shim under
     `vendor/node_modules/.bin/` with `process.execPath` (the absolute
-    path of the running SEA binary).
+    path of the running SEA binary), with platform-appropriate escaping. Publishes the fully patched tree and sentinel by atomic rename only after extraction succeeds; concurrent invocations cannot see a half-written cache.
 4.  Prepends `<cache>/node_modules/.bin/` to `process.env.PATH`. The
     existing `isClaudeCodeAvailable` / `isCodexAvailable` probes (in
     `son-of-anton-core/src/llm/{claudeCodeRunner,codexRunner}.ts`) walk
@@ -125,7 +122,7 @@ On first invocation for a given `sota` version, the SEA entrypoint:
 The cache directory layout:
 
 ```
-~/.sota/cache/0.1.0/
+~/.sota/cache/0.1.0-<identity>/
 ├── .extracted                                # sentinel ISO timestamp
 └── node_modules/
     ├── .bin/
@@ -323,16 +320,13 @@ The SEA flow:
    artefact names produced by the release workflow (`sota-macos-arm64`,
    `sota-linux-x64`, `sota-windows-x64.exe`).
 2. Calls `GET /repos/<owner>/<repo>/releases` and picks the most recent
-   non-draft release tagged `sota-v*`.
+   non-draft, non-prerelease release tagged `sota-v*`.
 3. Downloads `SHA256SUMS.txt` from the release and reads the expected
    digest for the artefact. **A release without `SHA256SUMS.txt` is
    refused.**
 4. Streams the artefact to a temp file while computing SHA256, then
    compares against the expected digest.
-5. Atomically swaps the running binary:
-   - `rename(<runningBinary>, <runningBinary>.old)`
-   - `rename(<tempBinary>, <runningBinary>)`
-   - `chmod +x <runningBinary>` (POSIX)
+5. Copies the download to an exclusive staging file beside the installed executable, verifies its checksum again and sets its executable mode before replacement. Renames the old binary to a unique `.old` backup, then renames the staged file into place. A failed second rename rolls back the first. Staging on the destination volume avoids cross-device rename failures. Backups remain available until the user removes them.
 
    The OS keeps the still-running process pointed at the now-renamed
    `.old` file via its open file descriptor, so the current invocation
@@ -343,9 +337,7 @@ The SEA flow:
 On Windows, file handles to running executables prevent some rename
 operations. The current implementation lets the OS surface the error
 ("Access is denied" or `EBUSY`) when it can't perform the swap; the
-user is expected to re-run from a different shell window or after
-closing other `sota` processes. This is documented in the post-update
-output and in `update.ts` itself.
+installed binary is preserved. Close running processes and use an external installer if the operating system prevents self-replacement. The update tests cover locked targets and failed swaps; they do not claim Windows allows replacing every running executable.
 
 ### Dry-run
 

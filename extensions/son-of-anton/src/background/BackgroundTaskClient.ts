@@ -81,6 +81,10 @@ export class BackgroundTaskClient {
 	private readonly pollingIntervalMs: number;
 	/** Per-request timeout so a hung service can't wedge a fetch forever. */
 	private readonly requestTimeoutMs: number;
+	private polling = false;
+	private disposed = false;
+	private listError: string | undefined;
+	get lastListError(): string | undefined { return this.listError; }
 	private pollingTimer: ReturnType<typeof setInterval> | null = null;
 
 	private readonly onDidUpdateTaskEmitter = new vscode.EventEmitter<BackgroundTask>();
@@ -108,7 +112,10 @@ export class BackgroundTaskClient {
 		const controller = new AbortController();
 		const timer = setTimeout(() => controller.abort(), this.requestTimeoutMs);
 		try {
-			return await fetch(url, { ...init, signal: controller.signal });
+			const token = process.env.BACKGROUND_TASK_API_TOKEN?.trim();
+			const headers = new Headers(token ? { Authorization: `Bearer ${token}` } : undefined);
+			new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
+			return await fetch(url, { ...init, headers, redirect: 'error', signal: controller.signal });
 		} finally {
 			clearTimeout(timer);
 		}
@@ -139,7 +146,7 @@ export class BackgroundTaskClient {
 	 */
 	async getTask(taskId: string): Promise<BackgroundTask | null> {
 		try {
-			const response = await this.fetchWithTimeout(`${this.baseUrl}/tasks/${taskId}`);
+			const response = await this.fetchWithTimeout(`${this.baseUrl}/tasks/${encodeURIComponent(taskId)}`);
 			if (!response.ok) {
 				return null;
 			}
@@ -156,11 +163,13 @@ export class BackgroundTaskClient {
 		const query = filter ? `?filter=${filter}` : '';
 		try {
 			const response = await this.fetchWithTimeout(`${this.baseUrl}/tasks${query}`);
-			if (!response.ok) {
-				return [];
-			}
-			return await response.json() as BackgroundTask[];
-		} catch {
+			if (!response.ok) { throw new Error(vscode.l10n.t('Background service returned HTTP {0}.', response.status)); }
+			const tasks = await response.json();
+			if (!Array.isArray(tasks)) { throw new Error(vscode.l10n.t('Background service returned an invalid task list.')); }
+			this.listError = undefined;
+			return tasks as BackgroundTask[];
+		} catch (error) {
+			this.listError = error instanceof Error ? error.message : vscode.l10n.t('Background service unavailable.');
 			return [];
 		}
 	}
@@ -170,9 +179,10 @@ export class BackgroundTaskClient {
 	 */
 	async cancelTask(taskId: string): Promise<boolean> {
 		try {
-			const response = await this.fetchWithTimeout(`${this.baseUrl}/tasks/${taskId}/cancel`, {
+			const response = await this.fetchWithTimeout(`${this.baseUrl}/tasks/${encodeURIComponent(taskId)}/cancel`, {
 				method: 'POST',
 			});
+			if (!response.ok) { return false; }
 			const result = await response.json() as { cancelled: boolean };
 			return result.cancelled;
 		} catch {
@@ -185,7 +195,7 @@ export class BackgroundTaskClient {
 	 */
 	async getTaskResults(taskId: string): Promise<Record<string, string>> {
 		try {
-			const response = await this.fetchWithTimeout(`${this.baseUrl}/tasks/${taskId}/results`);
+			const response = await this.fetchWithTimeout(`${this.baseUrl}/tasks/${encodeURIComponent(taskId)}/results`);
 			if (!response.ok) {
 				return {};
 			}
@@ -248,7 +258,11 @@ export class BackgroundTaskClient {
 		}
 
 		this.pollingTimer = setInterval(async () => {
-			const tasks = await this.listTasks('active');
+			if (this.polling || this.disposed) { return; }
+			this.polling = true;
+			const tasks = await this.listTasks();
+			this.polling = false;
+			if (this.listError || this.disposed) { return; }
 
 			if (tasks.length === 0) {
 				this.stopPolling();
@@ -269,6 +283,7 @@ export class BackgroundTaskClient {
 
 				this.trackedTasks.set(task.id, task.status);
 			}
+			if (!tasks.some(task => task.status === 'running' || task.status === 'pending')) { this.stopPolling(); }
 		}, this.pollingIntervalMs);
 	}
 
@@ -280,6 +295,7 @@ export class BackgroundTaskClient {
 	}
 
 	dispose(): void {
+		this.disposed = true;
 		this.stopPolling();
 		this.onDidUpdateTaskEmitter.dispose();
 		this.onDidCompleteTaskEmitter.dispose();

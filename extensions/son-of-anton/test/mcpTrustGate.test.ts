@@ -62,6 +62,16 @@ const flush = () => new Promise<void>(res => setTimeout(res, 5));
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
 suite('McpTrustGate', () => {
+	test('remote approvals bind endpoint, transport and headers without exposing secrets', () => {
+		const remote = { name: 'remote', url: 'https://example.test/mcp', headers: { Authorization: 'private-fixture', Accept: 'application/json' } };
+		const fingerprint = mcpServerFingerprint(remote);
+		assert.strictEqual(fingerprint, mcpServerFingerprint({ ...remote, headers: { Accept: 'application/json', Authorization: 'private-fixture' } }));
+		for (const changed of [{ ...remote, url: 'https://other.test/mcp' }, { ...remote, transport: 'sse' }, { ...remote, headers: { Authorization: 'changed' } }]) {
+			assert.notStrictEqual(fingerprint, mcpServerFingerprint(changed));
+		}
+		assert.doesNotMatch(fingerprint!, /private-fixture/);
+	});
+
 	test('mcpServerName extracts a trimmed name or undefined for malformed entries', () => {
 		assert.deepStrictEqual(
 			[mcpServerName({ name: ' srv ' }), mcpServerName({ command: 'x' }), mcpServerName(null), mcpServerName('str')],

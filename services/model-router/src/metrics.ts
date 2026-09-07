@@ -15,21 +15,21 @@ export function calculateCost(
 	model: string,
 	inputTokens: number,
 	outputTokens: number,
-	cachedTokens: number
+	cachedTokens: number,
+	cacheCreationTokens = 0
 ): number {
 	const pricing = PRICING[model];
 	if (!pricing) {
 		return 0;
 	}
 
-	const nonCachedInput = Math.max(0, inputTokens - cachedTokens);
+	const nonCachedInput = Math.max(0, inputTokens - cachedTokens - cacheCreationTokens);
 	const inputCost = (nonCachedInput / 1_000_000) * pricing.inputPerMillion;
 	const outputCost = (outputTokens / 1_000_000) * pricing.outputPerMillion;
-	const cacheCost = pricing.cacheReadPerMillion
-		? (cachedTokens / 1_000_000) * pricing.cacheReadPerMillion
-		: 0;
+	const cacheCost = (cachedTokens / 1_000_000) * (pricing.cacheReadPerMillion ?? pricing.inputPerMillion);
 
-	return inputCost + outputCost + cacheCost;
+	const cacheWriteCost = (cacheCreationTokens / 1_000_000) * (pricing.cacheWritePerMillion ?? pricing.inputPerMillion);
+	return inputCost + outputCost + cacheCost + cacheWriteCost;
 }
 
 export class MetricsCollector {
