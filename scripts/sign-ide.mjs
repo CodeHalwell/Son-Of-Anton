@@ -39,8 +39,11 @@ if (process.platform === 'darwin') {
 			await sign({ app: target, identity: process.env.MACOS_SIGNING_IDENTITY, keychain, platform: 'darwin', preAutoEntitlements: false, preEmbedProvisioningProfile: false, optionsForFile: file => ({ hardenedRuntime: true, entitlements: path.join(root, 'build/azure-pipelines/darwin', file.includes('Helper (GPU)') ? 'helper-gpu-entitlements.plist' : file.includes('Helper (Renderer)') ? 'helper-renderer-entitlements.plist' : file.includes('Helper (Plugin)') ? 'helper-plugin-entitlements.plist' : 'app-entitlements.plist') }) });
 			run('codesign', ['--verify', '--deep', '--strict', target]);
 		} finally {
-			run('security', ['list-keychains', '-d', 'user', '-s', ...original]);
-			try { run('security', ['delete-keychain', keychain]); } finally { await rm(directory, { recursive: true, force: true }); }
+			try { run('security', ['list-keychains', '-d', 'user', '-s', ...original]); }
+			finally {
+				try { run('security', ['delete-keychain', keychain]); }
+				finally { await rm(directory, { recursive: true, force: true }); }
+			}
 		}
 	}
 	const notaryKeys = ['MACOS_NOTARY_KEY_BASE64', 'MACOS_NOTARY_KEY_ID', 'MACOS_NOTARY_KEY_ISSUER'];

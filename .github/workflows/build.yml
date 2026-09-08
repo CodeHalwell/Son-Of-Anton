@@ -445,9 +445,16 @@ jobs:
           test -f "../Son of Anton-linux-x64/resources/app/extensions/son-of-anton/runtime/codegraph/node_modules/@son-of-anton/codegraph-napi/engine.node"
           SOTA_RUNTIME_SOURCE="$PWD/../Son of Anton-linux-x64/resources/app/extensions/son-of-anton/runtime/codegraph" npm run test:sota:offline
 
+      - name: Archive desktop distribution with executable permissions
+        run: |
+          mkdir -p .build/electron-artifact
+          tar -czf .build/electron-artifact/son-of-anton-linux-x64.tar.gz -C .. "Son of Anton-linux-x64"
+
       - name: Upload build artefact
         uses: actions/upload-artifact@v4
         with:
           name: son-of-anton-linux-x64
-          path: ../Son of Anton-linux-x64/
+          path: .build/electron-artifact/son-of-anton-linux-x64.tar.gz
+          if-no-files-found: error
+          compression-level: 0
           retention-days: 7

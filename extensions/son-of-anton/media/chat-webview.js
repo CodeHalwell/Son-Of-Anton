@@ -8005,7 +8005,17 @@
 				const description = document.createElement('p'); description.className = 'integration-description'; description.textContent = entry.description; description.title = entry.description;
 				const status = document.createElement('p'); status.textContent = entry.state === 'ready' ? uiText('integrationReady') : entry.reason || (entry.configured ? entry.state || uiText('integrationConfigured') : uiText('integrationAvailable'));
 				const actions = document.createElement('div'); actions.className = 'integration-actions';
-				const button = (label, action) => { const element = document.createElement('button'); element.type = 'button'; element.textContent = uiText(label); element.dataset.integrationAction = entry.id + ':' + (action === 'open' ? 'open' : 'connection'); element.addEventListener('click', () => { element.disabled = true; requestIntegrations(action, entry.id); }); actions.appendChild(element); };
+				const button = (label, action) => {
+					const element = document.createElement('button'); element.type = 'button'; element.textContent = uiText(label);
+					element.dataset.integrationAction = entry.id + ':' + (action === 'open' ? 'open' : 'connection');
+					element.addEventListener('click', () => {
+						if (element.getAttribute('aria-disabled') === 'true') { return; }
+						// Native disabled buttons lose focus in some Chromium builds.
+						// Preserve keyboard position while preventing duplicate requests.
+						element.setAttribute('aria-disabled', 'true'); requestIntegrations(action, entry.id);
+					});
+					actions.appendChild(element);
+				};
 				button('integrationOpen', 'open');
 				if (entry.kind === 'mcp' && (entry.enabled || entry.configured)) { button(entry.configured ? 'integrationDisconnect' : 'integrationConnect', entry.configured ? 'disconnect' : 'connect'); }
 				card.append(title, source, description, status, actions); list.appendChild(card);

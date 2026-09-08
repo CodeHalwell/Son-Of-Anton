@@ -6106,7 +6106,7 @@ body.vscode-light { color-scheme: light; }
 	border: 1px solid var(--sota-border); border-radius: 6px; padding: 6px 10px; cursor: pointer;
 }
 .integration-actions button:hover, #integrationRefresh:hover, #integrationMore:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground)); }
-.integration-actions button:disabled, #integrationRefresh:disabled { opacity: 0.55; cursor: progress; }
+.integration-actions button:disabled, .integration-actions button[aria-disabled="true"], #integrationRefresh:disabled { opacity: 0.55; cursor: progress; }
 .integration-toolbar :focus-visible, .integration-actions button:focus-visible, .integration-warnings summary:focus-visible, #integrationMore:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
 .integration-description { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; color: var(--vscode-descriptionForeground); line-height: 1.5; }
 .integration-warnings { padding: 10px; border: 1px solid var(--sota-border); border-radius: 6px; overflow-wrap: anywhere; }

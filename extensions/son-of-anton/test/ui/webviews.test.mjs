@@ -654,6 +654,9 @@ test('integrations: search, filtering, pagination, connection updates and error 
 	await page.locator('#integrationKind').selectOption('mcp');
 	await page.getByRole('button', { name: 'Connect', exact: true }).click();
 	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'systemIntegrations', integrationAction: 'connect', integrationId: 'mcp-1' });
+	const pendingRequests = await page.evaluate(() => sentMessages.length);
+	await page.getByRole('button', { name: 'Connect', exact: true }).dispatchEvent('click');
+	assert.equal(await page.evaluate(() => sentMessages.length), pendingRequests);
 	state.entries[55].configured = true; state.entries[55].state = 'ready';
 	await post(page, { type: 'systemIntegrationsState', state });
 	assert.match(await page.locator('.integration-card').textContent(), /Connected/);
