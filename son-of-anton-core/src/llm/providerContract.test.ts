@@ -2,6 +2,7 @@
 import { test } from 'node:test';
 import * as assert from 'node:assert/strict';
 import { BedrockRuntimeClient, type InvokeModelWithResponseStreamCommand } from '@aws-sdk/client-bedrock-runtime';
+import { discoveredModelId, registerDiscoveredModels } from './DiscoveredModels';
 import { LlmClient, supportsAgenticToolLoop, type ModelId } from './LlmClient';
 import { BaseAgent } from '../agents/BaseAgent';
 import { AgentManager } from '../agents/AgentManager';
@@ -38,13 +39,18 @@ function frames(protocol: 'anthropic' | 'openai' | 'google', turn: number): obje
 	return [{ choices: [{ delta: turn === 1 ? { tool_calls: [{ index: 0, id: 'call-1', function: { name: 'read_fixture', arguments: input } }] } : { content: 'Finished' }, finish_reason: turn === 1 ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 100, completion_tokens: 10 } }];
 }
 
+const additionalModels = (['xai', 'moonshot', 'zai', 'minimax'] as const).map(provider => {
+	const id = discoveredModelId(provider, `${provider}-coding-fixture`);
+	registerDiscoveredModels([{ id, provider, model: `${provider}-coding-fixture`, label: provider, tools: true, images: 'unknown', chat: true, fetchedAt: 1 }]);
+	return id;
+});
 const models: ModelId[] = ['sonnet', 'gpt-4o', 'foundry-gpt-4o', 'bedrock-claude-sonnet-4', 'gemini-2-5-pro', 'openrouter-gpt-5', 'ollama-llama-3-1', 'lmstudio-loaded', 'deepseek-v3', 'mistral-large', 'groq-llama-3-3-70b', 'cerebras-llama-3-3-70b', 'together-qwen-2-5-coder', 'fireworks-deepseek-v3'];
 
-for (const model of models) {
+for (const model of [...models, ...additionalModels]) {
 	test(`${model}: shared agent executes a two-turn tool contract with correct usage`, async t => {
 		const bodies: Array<Record<string, unknown>> = [];
 		const protocol = model === 'sonnet' || model.startsWith('bedrock') ? 'anthropic' : model.startsWith('gemini') ? 'google' : 'openai';
-		const reply = (body: Record<string, unknown>) => { bodies.push(body); return frames(protocol, bodies.length); };
+		const reply = (body: Record<string, unknown>) => { bodies.push(body); const response = frames(protocol, bodies.length); if (model.startsWith('catalog:moonshot:') && bodies.length === 1) { (response[0] as { choices: Array<{ delta: { reasoning_content?: string } }> }).choices[0].delta.reasoning_content = 'Fixture provider reasoning'; } return response; };
 		t.mock.method(globalThis, 'fetch', async (_url: string | URL | Request, init?: RequestInit) => {
 			const response = reply(JSON.parse(String(init?.body)));
 			return new Response(response.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream' } });
@@ -72,6 +78,7 @@ for (const model of models) {
 			assert.match(JSON.stringify(bodies[1].contents), /fixture-signature/);
 			assert.match(JSON.stringify(bodies[1].contents), /functionResponse/);
 		}
+		if (model.startsWith('catalog:moonshot:')) { assert.match(JSON.stringify(bodies[1].messages), /reasoning_content.*Fixture provider reasoning/); }
 		assert.equal(supportsAgenticToolLoop(model), true);
 	});
 }
@@ -91,4 +98,27 @@ test('subscription text transports reject host tool requests before launching th
 		for await (const event of llm.streamRequest({ model, systemPrompt: 'Fixture', messages: [{ role: 'user', content: 'Read fixture' }], tools: [{ name: 'read_fixture', description: 'Read fixture', inputSchema: { type: 'object', properties: {} } }] })) { events.push(event); }
 		assert.ok(events.some(event => event.type === 'error' && /text transport cannot execute host tools/.test(event.error)));
 	}
+});
+
+
+test('native specialist Plan turns preserve images while exposing no executable tools', async t => {
+	const requests: Array<Record<string, unknown>> = [];
+	t.mock.method(globalThis, 'fetch', async (_url: string | URL | Request, init?: RequestInit) => {
+		requests.push(JSON.parse(String(init?.body)));
+		return new Response(frames('openai', 2).map(frame => `data: ${JSON.stringify(frame)}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream' } });
+	});
+	const config: ConfigStore = { get: <T>(key: string, fallback?: T): T => (key === 'personality.enabled' ? false : fallback) as T };
+	const secrets: SecretStore = { get: async () => 'synthetic-fixture-key', store: async () => {}, delete: async () => {} };
+	const llm = new LlmClient(secrets, config);
+	const mcp = new McpClient({ readServersSetting: () => [], getWorkspaceRoot: () => undefined, onSettingChange: () => ({ dispose() {} }) });
+	t.after(() => mcp.dispose());
+	const forbidden = async (): Promise<never> => { throw new Error('Plan must not call host tools'); };
+	const agent = new FixtureAgent({ handle: 'anton-code', displayName: 'Fixture', description: 'Fixture', defaultModel: 'gpt-4o', maxRetries: 0, slashCommands: [] }, llm, mcp, new AgentManager(llm), new MetricsTracker(), new ProjectMemory(), undefined, config, undefined, { workspaceRoot: undefined, readFile: forbidden, readDir: forbidden, searchTextInWorkspace: forbidden, writeFile: forbidden, runCommand: forbidden });
+	const cancel = { isCancellationRequested: false, onCancellationRequested: () => ({ dispose() {} }) };
+	const response = await agent.runAgenticTurn('Explain this image', () => {}, cancel, { mode: 'plan', images: [{ mimeType: 'image/png', data: 'aGVsbG8=' }] });
+	assert.deepEqual([response, requests.length, requests[0].tools], ['Finished', 1, undefined]);
+	assert.match(JSON.stringify(requests[0].messages), /data:image\/png;base64,aGVsbG8=/);
+	assert.match(JSON.stringify(requests[0].messages), /Plan mode/);
+	await assert.rejects(agent.runAgenticTurn('Unsupported image', () => {}, cancel, { mode: 'plan', modelOverride: 'deepseek-v3', images: [{ mimeType: 'image/png', data: 'aGVsbG8=' }] }), /does not support image attachments/);
+	assert.equal(requests.length, 1);
 });

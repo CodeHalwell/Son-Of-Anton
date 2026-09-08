@@ -59,7 +59,7 @@ export class CodeGeneratorAgent extends BaseAgent {
 			// runToolLoop learns to take parts directly, this join collapses.
 			const systemPromptParts = this.buildSystemPromptParts(this.getRoleDescription());
 			const systemPrompt = systemPromptParts.map(p => p.text).join('\n\n---\n\n');
-			const initialMessages: LlmMessage[] = [{ role: 'user', content: userMessage }];
+			const initialMessages: LlmMessage[] = [{ role: 'user', content: this.turnContent(userMessage, { images: context.images, modelOverride: this.resolveModel(context.orchestratorModelHint) }) }];
 			// Inherit the shared default tool surface from `BaseAgent` so the
 			// agentic chat-turn path and the specialist `execute` path stay
 			// converged on a single source of truth.
@@ -70,6 +70,7 @@ export class CodeGeneratorAgent extends BaseAgent {
 			const result = await this.runToolLoop({
 				taskId: task.id,
 				signal: context.signal,
+				maxToolCalls: context.maxToolCalls,
 				model: this.resolveModel(context.orchestratorModelHint),
 				systemPrompt,
 				systemPromptParts,
@@ -175,6 +176,7 @@ export class CodeGeneratorAgent extends BaseAgent {
 			systemPrompt,
 			userMessage,
 			context.onToken,
+			{ images: context.images, signal: context.signal },
 		);
 		tokenUsage.naiveInputTokens = this.estimateNaiveTokens(context.scopeFiles);
 		const changes = this.parseFileChanges(text);

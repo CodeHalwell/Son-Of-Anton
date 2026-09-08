@@ -73,6 +73,23 @@ export class OrchestratorAgent extends BaseAgent {
 		return this.activePlan;
 	}
 
+	/** Update an idle, unapproved plan only after a host preview of the same complete task set. */
+	updatePlanDependencies(conversationId: string, taskId: string, dependencies: readonly string[], expectedTaskIds: readonly string[]): void {
+		const plan = this.activePlan;
+		if (!plan || plan.conversationId !== conversationId || plan.approved || plan.subtasks.some(task => task.status !== 'pending')) { throw new Error('Only the owning conversation’s pending, unapproved plan can be edited.'); }
+		if (JSON.stringify(plan.subtasks.map(task => task.id).sort()) !== JSON.stringify([...expectedTaskIds].sort())) { throw new Error('Execution plan changed. Refresh the board before editing dependencies.'); }
+		const target = plan.subtasks.find(task => task.id === taskId); if (!target) { throw new Error('Task is not in the active execution plan.'); }
+		const graph = new Map(plan.subtasks.map(task => [task.id, task.id === taskId ? [...dependencies] : task.dependencies]));
+		const visiting = new Set<string>(); const visited = new Set<string>();
+		const visit = (id: string): void => {
+			if (visiting.has(id)) { throw new Error('Dependency edits would create a cycle.'); } if (visited.has(id)) { return; }
+			const links = graph.get(id); if (!links || new Set(links).size !== links.length) { throw new Error('Invalid or missing dependency.'); }
+			visiting.add(id); for (const dependency of links) { visit(dependency); } visiting.delete(id); visited.add(id);
+		};
+		for (const id of graph.keys()) { visit(id); }
+		target.dependencies = [...dependencies];
+	}
+
 	protected getRoleDescription(): string {
 		// H10 — base prompt loaded from `prompts/anton-orchestrator.prompt.md`
 		// with the live specialist roster substituted into `{{SPECIALISTS}}`
@@ -94,6 +111,13 @@ export class OrchestratorAgent extends BaseAgent {
 		token: CancellationLike,
 		structuredEmit?: (event: AgentEvent) => void,
 	): Promise<void> {
+		const controller = new AbortController();
+		const cancel = token.onCancellationRequested(() => controller.abort());
+		if (token.isCancellationRequested) { controller.abort(); }
+		const duration = request.maxRuntimeMs ?? (request.command === 'approve' ? this.activePlan?.maxRuntimeMs : undefined) ?? this.config.perTurnTimeoutMs ?? 300_000;
+		const deadline = setTimeout(() => controller.abort(new Error('Orchestrator runtime budget reached')), Number.isFinite(duration) ? Math.max(1, Math.min(3_600_000, duration)) : 300_000);
+		const boundedToken: CancellationLike = { get isCancellationRequested() { return controller.signal.aborted; }, onCancellationRequested: listener => { controller.signal.addEventListener('abort', listener); return { dispose: () => controller.signal.removeEventListener('abort', listener) }; } };
+		token = boundedToken; request = { ...request, signal: controller.signal };
 		const task = this.agentManager.createTask('Orchestrator', truncateForTaskTitle(request.prompt));
 		this.agentManager.startTask(task.id);
 
@@ -137,7 +161,7 @@ export class OrchestratorAgent extends BaseAgent {
 				preferredCharacters: ['Gilfoyle'],
 				fallbackPicker: () => getApocalypticQuote(),
 			});
-		}
+		} finally { clearTimeout(deadline); cancel.dispose(); }
 	}
 
 	/**
@@ -188,6 +212,8 @@ export class OrchestratorAgent extends BaseAgent {
 			planModel,
 			systemPrompt,
 			planPrompt,
+			undefined,
+			{ images: request.images, signal: request.signal },
 		);
 
 		if (token.isCancellationRequested) {
@@ -201,6 +227,10 @@ export class OrchestratorAgent extends BaseAgent {
 		// dispatched specialists as `orchestratorModelHint`.
 		plan.orchestratorModel = request.modelOverride;
 		plan.workspaceContextSnapshot = request.workspaceContextSnapshot;
+		plan.images = request.images;
+		plan.maxToolCalls = request.maxToolCalls;
+		plan.maxRuntimeMs = request.maxRuntimeMs;
+		plan.conversationId = request.conversationId;
 		this.activePlan = plan;
 
 		structuredEmit?.({
@@ -293,7 +323,7 @@ export class OrchestratorAgent extends BaseAgent {
 			stream.markdown(token);
 		};
 		try {
-			await this.callLlm(taskId, turnModel, systemPrompt, request.prompt, onToken);
+			await this.callLlm(taskId, turnModel, systemPrompt, request.prompt, onToken, { images: request.images, signal: request.signal });
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
 			if (!token.isCancellationRequested) {
@@ -733,6 +763,10 @@ export class OrchestratorAgent extends BaseAgent {
 					: undefined,
 				orchestratorModelHint: this.activePlan?.orchestratorModel,
 				workspaceContextSnapshot: this.activePlan?.workspaceContextSnapshot,
+				images: this.activePlan?.images,
+				conversationId: this.activePlan?.conversationId,
+				maxToolCalls: this.activePlan?.maxToolCalls,
+				maxRuntimeMs: this.activePlan?.maxRuntimeMs,
 			};
 
 			// Per-turn timeout (H9). Race the specialist's execute() against a
@@ -741,7 +775,8 @@ export class OrchestratorAgent extends BaseAgent {
 			// by re-running. The losing branch is fenced with a `settled` flag
 			// so a late-resolving execute() can't smuggle a stale result back
 			// into the orchestrator.
-			const perTurnTimeoutMs = this.config.perTurnTimeoutMs ?? 5 * 60 * 1000;
+			const requestedTimeout = this.activePlan?.maxRuntimeMs ?? this.config.perTurnTimeoutMs ?? 5 * 60 * 1000;
+			const perTurnTimeoutMs = Number.isFinite(requestedTimeout) ? Math.max(1, Math.min(3_600_000, requestedTimeout)) : 300_000;
 
 			// Execute with retry loop
 			let result: SubtaskResult | undefined;
@@ -798,6 +833,7 @@ export class OrchestratorAgent extends BaseAgent {
 				controller.signal.throwIfAborted();
 				if (this.reviewAgent && result.success) {
 					const reviewResult = await this.reviewAgent.execute({
+						...context,
 						instruction: `Review changes from @${subtask.assignee}: ${subtask.instruction}`,
 						signal: controller.signal,
 						scopeFiles: result.changes.map(c => c.filePath),

@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 
-async function fixture(t, mutate = () => {}) {
+async function fixture(t, mutate = () => {}, mutateAll = () => {}) {
 	const root = await mkdtemp(path.join(tmpdir(), 'sota-release-test-'));
 	t.after(() => rm(root, { recursive: true, force: true }));
 	await mkdir(path.join(root, 'scripts')); await mkdir(path.join(root, 'docs'));
@@ -25,13 +25,14 @@ async function fixture(t, mutate = () => {}) {
 			const name = `son-of-anton-1.2.3-${target}${suffix}`, bytes = Buffer.from(name);
 			await writeFile(path.join(folder, name), bytes); files.push({ name, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') });
 		}
-		const manifest = { target, ideVersion: '1.2.3', commit: 'fixture-commit', files };
+		const manifest = { target, ideVersion: '1.2.3', commit: 'fixture-commit', signing: target.startsWith('darwin') ? 'developer-id-notarized' : target.startsWith('win32') ? 'authenticode' : 'unsigned', files };
+		await mutateAll(manifest);
 		const report = { success: true, target, ideVersion: '1.2.3', commit: 'fixture-commit' };
 		if (target === 'linux-x64') { await mutate({ manifest, report, folder }); }
 		await writeFile(path.join(folder, 'manifest.json'), JSON.stringify(manifest));
 		await writeFile(path.join(folder, 'installation-report.json'), JSON.stringify(report));
 	}
-	return { root, run: () => spawnSync(process.execPath, [path.join(root, 'scripts/stage-ide-release.mjs')], { env: { ...process.env, GITHUB_SHA: 'fixture-commit' }, encoding: 'utf8' }) };
+	return { root, run: (env = {}) => spawnSync(process.execPath, [path.join(root, 'scripts/stage-ide-release.mjs')], { env: { ...process.env, GITHUB_SHA: 'fixture-commit', ...env }, encoding: 'utf8' }) };
 }
 
 test('release staging verifies all eight installers and refuses stale output', async t => {
@@ -49,3 +50,13 @@ for (const [name, mutate] of [
 ]) {
 	test(`release staging rejects ${name}`, async t => { const { run } = await fixture(t, mutate); assert.notEqual(run().status, 0); });
 }
+
+
+test('stable staging requires every native signing gate and records the channel', async t => {
+	const signed = await fixture(t);
+	assert.equal(signed.run({ SOTA_RELEASE_CHANNEL: 'stable' }).status, 0);
+	const manifest = JSON.parse(await readFile(path.join(signed.root, '.build/publish-ide/build-manifest.json'), 'utf8'));
+	assert.equal(manifest.channel, 'stable');
+	const unsigned = await fixture(t, () => {}, build => { if (build.target === 'darwin-arm64') { build.signing = 'developer-id'; } });
+	assert.notEqual(unsigned.run({ SOTA_RELEASE_CHANNEL: 'stable' }).status, 0);
+});

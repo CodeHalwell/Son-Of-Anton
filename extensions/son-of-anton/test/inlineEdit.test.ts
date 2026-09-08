@@ -8,7 +8,7 @@ import type * as VsCode from 'vscode';
 import type { LlmClient } from 'son-of-anton-core/llm/LlmClient';
 
 // Exercise the actual command lifecycle with a controlled editor and provider.
-const requireFromTest = createRequire(process.cwd() + '/test/inlineEdit.test.ts');
+const requireFromTest = createRequire(import.meta.url);
 const vscode = requireFromTest('vscode');
 const original = 'function example() {\n\treturn 1;\n}\n';
 const replacement = '\treturn 2;';
@@ -82,7 +82,7 @@ async function withEditor(options: {
 		if (options.changeDuring === 'generation') change();
 		if (options.cancel) cancel();
 		return options.response ?? replacement;
-	} } as LlmClient;
+	} } as unknown as LlmClient;
 	const { InlineEditProvider } = requireFromTest('../src/inline/InlineEdit');
 	const command = new InlineEditProvider(llm);
 	try {

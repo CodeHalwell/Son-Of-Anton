@@ -7,11 +7,11 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { CouncilService } from './CouncilService';
 import { CouncilStore } from './CouncilStore';
-import { defaultCouncilGroup, councilDossier, parseCouncilAnswer } from './prompts';
+import { defaultCouncilGroup, councilDossier, parseCouncilAnswer, verifyCouncilCitation } from './prompts';
 import { captureCouncilSnapshot } from './snapshot';
 import type { CouncilRunner, CouncilSnapshot, CouncilTurn } from './types';
 
-const snapshot: CouncilSnapshot = { workspace: '/tmp/example', head: 'a'.repeat(40), base: 'b'.repeat(40), digest: 'c'.repeat(64), capturedAt: 1, patch: '+ changed code', files: ['example.ts'], limitations: ['Diff only'] };
+const snapshot: CouncilSnapshot = { workspace: '/tmp/example', head: 'a'.repeat(40), base: 'b'.repeat(40), digest: 'c'.repeat(64), capturedAt: 1, patch: 'diff --git a/example.ts b/example.ts\n--- a/example.ts\n+++ b/example.ts\n@@ -1 +1 @@\n-old code\n+ changed code', files: ['example.ts'], limitations: ['Diff only'] };
 const answer = (id: string) => JSON.stringify({ summary: `Independent ${id}`, findings: [{ title: 'Missing guard', severity: 'medium', file: 'example.ts', line: 1, evidence: 'changed code', detail: 'The changed path accepts invalid input.' }], dissent: ['A passing test is not evidence of complete coverage.'], questions: [] });
 async function fixture(t: TestContext, run: (turn: CouncilTurn) => Promise<void>) {
 	const directory = await mkdtemp(join(tmpdir(), 'sota-council-test-')); const released: string[] = [];
@@ -121,4 +121,24 @@ test('history index avoids loading report bodies and recovers stale or damaged e
 	assert.equal((await indexed.summaries()).length, 1);
 	report.objective = 'Updated objective'; report.sequence++; await store.save(report);
 	assert.equal((await indexed.summaries())[0]?.objective, 'Updated objective');
+});
+
+
+test('Council citations require matching old/new line and contiguous hunk evidence', () => {
+	const patch = 'diff --git a/example.ts b/example.ts\n--- a/example.ts\n+++ b/example.ts\n@@ -10,2 +10,3 @@\n-removed guard\n+new guard\n+new check\n unchanged\n@@ -90 +91 @@\n-other\n+distant';
+	assert.deepEqual([
+		verifyCouncilCitation(patch, 'example.ts', 10, 'new guard\nnew check'),
+		verifyCouncilCitation(patch, 'example.ts', 10, 'removed guard', 'old'),
+		verifyCouncilCitation(patch, 'example.ts', 11, 'new guard'),
+		verifyCouncilCitation(patch, 'example.ts', 10, 'removed guard'),
+		verifyCouncilCitation(patch, 'example.ts', 12, 'unchanged\ndistant'),
+		verifyCouncilCitation(patch, 'other.ts', 10, 'new guard'),
+	], [true, true, false, false, false, false]);
+});
+
+test('fabricated excerpts are retained as failed stages and cannot satisfy quorum', async t => {
+	const { service } = await fixture(t, async turn => turn.onText(answer(turn.member.id).replace('changed code', 'fabricated evidence')));
+	const report = await service.wait(await service.start('Audit', defaultCouncilGroup(), snapshot));
+	assert.equal(report.status, 'quorum-failed');
+	assert.ok(report.stages.every(stage => stage.status === 'failed' && !stage.answer && stage.text.includes('fabricated evidence') && stage.error?.includes('does not match')));
 });

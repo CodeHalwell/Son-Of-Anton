@@ -15,6 +15,8 @@ const expected = ['darwin-arm64', 'darwin-x64', 'linux-x64', 'win32-x64'];
 const entries = (await readdir(directory)).sort();
 assert.deepEqual(entries, expected.map(target => `ide-${target}`).sort());
 const checksums = [], builds = [];
+const channel = process.env.SOTA_RELEASE_CHANNEL || 'preview';
+assert.ok(['stable', 'preview'].includes(channel), 'Invalid release channel');
 for (const target of expected) {
 	const source = path.join(directory, `ide-${target}`), manifest = JSON.parse(await readFile(path.join(source, 'manifest.json')));
 	assert.equal(manifest.target, target); assert.equal(manifest.ideVersion, version); assert.equal(manifest.commit, process.env.GITHUB_SHA);
@@ -29,9 +31,13 @@ for (const target of expected) {
 		assert.equal(createHash('sha256').update(bytes).digest('hex'), file.sha256);
 		await copyFile(path.join(source, file.name), path.join(output, file.name)); checksums.push(file);
 	}
+	if (channel === 'stable') {
+		if (target.startsWith('darwin')) { assert.equal(manifest.signing, 'developer-id-notarized', 'Stable macOS releases require notarization'); }
+		if (target.startsWith('win32')) { assert.equal(manifest.signing, 'authenticode', 'Stable Windows releases require signing'); }
+	}
 	builds.push(manifest); await copyFile(path.join(source, 'installation-report.json'), path.join(output, `installation-${target}.json`));
 }
 await writeFile(path.join(output, 'SHA256SUMS.txt'), checksums.map(file => `${file.sha256}  ${file.name}\n`).join(''));
-await writeFile(path.join(output, 'build-manifest.json'), JSON.stringify({ version: 1, ideVersion: version, commit: process.env.GITHUB_SHA, builds }, null, 2) + '\n');
+await writeFile(path.join(output, 'build-manifest.json'), JSON.stringify({ version: 1, channel, ideVersion: version, commit: process.env.GITHUB_SHA, builds }, null, 2) + '\n');
 await copyFile(path.join(root, 'docs/installation.md'), path.join(output, 'INSTALLATION.md'));
 console.log(`Verified ${checksums.length} installers from ${builds.length} native builds.`);

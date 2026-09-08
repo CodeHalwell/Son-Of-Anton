@@ -33,6 +33,11 @@ on:
         description: Create a draft GitHub release after every native install check passes
         type: boolean
         default: false
+      channel:
+        description: Stable releases require macOS notarization and Windows signing
+        type: choice
+        options: [preview, stable]
+        default: preview
       require_signing:
         description: Require Developer ID, notarization and Windows Authenticode credentials
         type: boolean
@@ -181,7 +186,7 @@ jobs:
         run: npm run gulp "vscode-$IDE_TARGET-min"
       - name: Create native installers
         env:
-          SOTA_REQUIRE_SIGNING: ${{ inputs.require_signing || false }}
+          SOTA_REQUIRE_SIGNING: ${{ inputs.require_signing || inputs.channel == 'stable' || (startsWith(github.ref, 'refs/tags/ide-v') && !contains(github.ref, '-preview') && !contains(github.ref, '-rc') && !contains(github.ref, '-beta') && !contains(github.ref, '-alpha')) }}
           MACOS_SIGNING_CERT_P12: ${{ secrets.MACOS_SIGNING_CERT_P12 }}
           MACOS_SIGNING_CERT_PASSWORD: ${{ secrets.MACOS_SIGNING_CERT_PASSWORD }}
           MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
@@ -245,6 +250,8 @@ jobs:
           overwrite: true
 
   release:
+    env:
+      SOTA_RELEASE_CHANNEL: ${{ inputs.channel || (startsWith(github.ref, 'refs/tags/ide-v') && !contains(github.ref, '-preview') && !contains(github.ref, '-rc') && !contains(github.ref, '-beta') && !contains(github.ref, '-alpha') && 'stable') || 'preview' }}
     name: Draft downloadable IDE release
     needs: build
     if: startsWith(github.ref, 'refs/tags/ide-v') || (github.event_name == 'workflow_dispatch' && inputs.draft_release)

@@ -157,6 +157,12 @@ export class McpServerConnection {
 		}
 	}
 
+	/** Send a host notification without creating a pending request. */
+	async notify(method: string, params: Record<string, unknown>): Promise<void> {
+		this.ensureReady();
+		await this.transport.send({ jsonrpc: '2.0', method, params });
+	}
+
 	async listTools(refresh = false): Promise<McpToolDescriptor[]> {
 		if (this.cachedTools && !refresh) {
 			return this.cachedTools;

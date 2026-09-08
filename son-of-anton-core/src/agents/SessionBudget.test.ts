@@ -71,6 +71,14 @@ describe('SessionBudget', () => {
 		assert.match(budget.describeExceeded() ?? '', /request cap reached \(3 \/ 3/);
 	});
 
+	test('unmetered routes remain visible and request caps still apply', () => {
+		const budget = new SessionBudget({ maxRequests: 2 });
+		budget.recordUsage({ accounting: 'unavailable', route: 'acp' });
+		budget.recordUsage({ costUsd: 0.2, accounting: 'estimated', route: 'native' });
+		assert.deepStrictEqual(budget.snapshot(), { inputTokens: 0, outputTokens: 0, cachedTokens: 0, totalTokens: 0, costUsd: 0.2, requestCount: 2, unmeteredRequests: 1, estimatedCostUsd: 0.2 });
+		assert.equal(budget.isExceeded(), true);
+	});
+
 	test('assertWithinBudget throws SpendCapExceededError only once exceeded', () => {
 		const budget = new SessionBudget({ maxRequests: 1 });
 		// Within budget: no throw, before the first recorded call.

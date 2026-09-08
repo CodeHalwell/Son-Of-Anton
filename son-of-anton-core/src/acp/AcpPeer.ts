@@ -28,7 +28,7 @@ export class AcpPeer {
 	private readonly closedController = new AbortController();
 	readonly signal = this.closedController.signal;
 
-	constructor(private readonly input: Readable, private readonly output: Writable, private readonly handlers: AcpPeerHandlers = {}, private readonly maxFrameBytes = 4 * 1024 * 1024) {
+	constructor(private readonly input: Readable, private readonly output: Writable, private readonly handlers: AcpPeerHandlers = {}, private readonly maxFrameBytes = 4 * 1024 * 1024, private readonly maxOutboundFrameBytes = maxFrameBytes) {
 		input.on('data', this.onData);
 		input.on('end', this.onEnd);
 		input.on('error', this.onError);
@@ -97,7 +97,7 @@ export class AcpPeer {
 		if (this.closed) { throw new Error('ACP connection is closed'); }
 		const frame = JSON.stringify(message) + '\n';
 		const bytes = Buffer.byteLength(frame);
-		if (bytes > this.maxFrameBytes || this.queuedBytes + bytes > this.maxFrameBytes * 2) {
+		if (bytes > this.maxOutboundFrameBytes || this.queuedBytes + bytes > this.maxOutboundFrameBytes * 2) {
 			const error = new Error('ACP output backpressure limit reached');
 			this.dispose(error); throw error;
 		}

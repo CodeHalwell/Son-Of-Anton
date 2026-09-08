@@ -23,5 +23,5 @@ if (ref.status === 0) {
 } else if (!ref.stderr.includes('404')) { throw new Error('Unable to verify the release tag'); }
 const notes = path.join(root, '.build/ide-release-notes.md');
 await writeFile(notes, `Download the installer for your operating system below. See INSTALLATION.md for installation, checksum verification, updates and recovery.\n\nBuilt from ${manifest.commit}. All four native installation jobs passed before these assets were staged.\n\n${manifest.builds.map(build => `- ${build.target}: ${build.signing}`).join('\n')}\n\nProvider sign-in is completed on first use. Model credentials are never bundled.\n`);
-const result = spawnSync('gh', ['release', 'create', tag, '--repo', repo, '--target', manifest.commit, '--title', `Son of Anton IDE ${manifest.ideVersion}`, '--draft', '--prerelease', '--notes-file', notes, ...(await readdir(output)).map(file => path.join(output, file))], { stdio: 'inherit' });
+const result = spawnSync('gh', ['release', 'create', tag, '--repo', repo, '--target', manifest.commit, '--title', `Son of Anton IDE ${manifest.ideVersion}`, '--draft', ...(manifest.channel === 'stable' ? [] : ['--prerelease']), '--notes-file', notes, ...(await readdir(output)).map(file => path.join(output, file))], { stdio: 'inherit' });
 assert.equal(result.status, 0, 'Draft release creation failed');

@@ -186,7 +186,7 @@ export function BoardChat({ assignees, conversationId }: BoardChatProps): JSX.El
 							<ul className="chat-tool-calls">
 								{m.toolCalls.map((c, j) => (
 									<li key={j} className="chat-tool-call">
-										<code>{c.name}</code>
+										<span>Proposed · </span><code>{c.name}</code>
 										<span className="chat-tool-call-args">{summarizeToolInput(c.input)}</span>
 									</li>
 								))}

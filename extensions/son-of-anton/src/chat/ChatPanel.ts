@@ -4,6 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 import * as vscode from 'vscode';
 import { getChatUiStrings } from './chatUiStrings';
+import { ChatTurnQueue } from './ChatTurnQueue';
+import { assembleTurnContext, type TurnContext } from './TurnContext';
+import type { ProviderFinder } from '../providers/ProviderFinder';
 import { globalScopedConfig } from './globalScopedConfig';
 import { LlmClient, LlmContentPart, LlmMessage, ModelId, ToolDefinition as LlmToolDefinition } from 'son-of-anton-core/llm/LlmClient';
 import { ToolRegistry, createInstrumentedWorkspaceToolContext, type ApprovalRequest } from '../tools/registry';
@@ -54,13 +57,16 @@ export type ChatMessageContentPart =
 export type ChatMessageContent = string | ReadonlyArray<ChatMessageContentPart>;
 
 export interface ChatMessage {
+	execution?: { route: 'acp' | 'native' | 'orchestrator'; outcome: 'completed' | 'cancelled' | 'failed'; latencyMs: number; inputTokens?: number; outputTokens?: number; estimatedCostUsd?: number };
+	feedback?: 'up' | 'down';
+	feedbackAt?: number;
 	role: 'user' | 'assistant' | 'system';
 	content: ChatMessageContent;
 	/** Preserve the author when a conversation contains several specialists. */
 	specialistId?: string;
 	usageUnavailable?: boolean;
 	/** Original composer references, without resolved file or terminal bodies. */
-	request?: { text: string; attachments?: string[]; mentions?: string[]; mentionsKinded?: KindedMention[]; includeWorkspaceContext: boolean; chatMode: ChatMode };
+	request?: { text: string; attachments?: string[]; mentions?: string[]; mentionsKinded?: KindedMention[]; includeWorkspaceContext: boolean; chatMode: ChatMode; excludedContext?: string[] };
 	model?: ModelId;
 	timestamp: number;
 }
@@ -88,9 +94,19 @@ type KindedMention =
 interface ChatTurn {
 	readonly controller: AbortController;
 	readonly conversationId: string;
+	failed?: boolean;
+	userMessagePersisted?: boolean;
 }
 
 interface WebviewMessage {
+	query?: string;
+	historyScope?: 'active' | 'archived' | 'trash';
+	workspaceOnly?: boolean;
+	offset?: number;
+	contextSnapshotId?: string;
+	excludedContext?: string[];
+	messageIndex?: number;
+	queueAction?: 'remove' | 'edit' | 'up' | 'down' | 'resume' | 'pause';
 	type: string;
 	integrationId?: string;
 	integrationAction?: string;
@@ -284,6 +300,7 @@ interface WorkspaceIndexEntry {
 const WORKSPACE_INDEX_FILE_LIMIT = 100;
 
 const ACTIVE_SESSIONS = new Set<ChatSession>();
+let activeProviderFinder: ProviderFinder | undefined;
 
 const VALID_CHAT_TABS: ReadonlyArray<ChatTab> = ['chat', 'tasks', 'history', 'settings', 'roster'];
 
@@ -360,6 +377,10 @@ export class ChatSession {
 	private workspaceIndexRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 	private workspaceIndex: WorkspaceIndexEntry[] = [];
 	private contextPreviewSequence = 0;
+	private readonly followupQueue = new ChatTurnQueue<WebviewMessage>();
+	private redirectedController: AbortController | undefined;
+	private previewedContext: { key: string; value: TurnContext } | undefined;
+	private historyFilter: { query: string; scope: 'active' | 'archived' | 'trash'; workspaceOnly: boolean } = { query: '', scope: 'active', workspaceOnly: false };
 	private costUpdateDebounceTimer: ReturnType<typeof setTimeout> | undefined;
 	/**
 	 * In-flight approval prompts for risky tool calls (Phase 41). Keyed by the
@@ -416,6 +437,7 @@ export class ChatSession {
 	private lastOutputTokens = 0;
 	private lastCachedTokens = 0;
 	private lastEstimatedCost = 0;
+	private lastUnmeteredRequests = 0;
 	private streamStartedAt = 0;
 
 	/**
@@ -531,6 +553,7 @@ export class ChatSession {
 		// gets restored after a window reload.
 		this.webview.postMessage({ type: 'tabChanged', tab: this.currentTab });
 		this.postBoardSnapshot();
+		this.postFollowupQueue();
 		this.postHistorySnapshot();
 		// H11 — paint the session meter at zero on first load. The
 		// accumulator is per-conversation lifetime (not persisted across
@@ -684,6 +707,7 @@ export class ChatSession {
 				.sort((a, b) => b.dollars - a.dollars);
 			this.webview.postMessage({
 				type: 'costUpdate',
+				usageUnavailable: (this.llmClient.getAccountingUsage?.().unmeteredRequests ?? 0) > 0,
 				tokens: tokens.input + tokens.output,
 				inputTokens: tokens.input,
 				outputTokens: tokens.output,
@@ -696,7 +720,12 @@ export class ChatSession {
 	private estimatedSessionCost(model: ModelId): number {
 		// The reporter aggregates the models actually used. A generic Anthropic
 		// estimate would charge subscription turns and misprice mixed-model runs.
-		return this.costReporter?.getTotalCost() ?? this.llmClient.estimateCost(model);
+		return this.llmClient.getAccountingUsage?.().estimatedCostUsd ?? this.costReporter?.getTotalCost() ?? this.llmClient.estimateCost(model);
+	}
+
+	private turnUsageUnavailable(model: ModelId): boolean {
+		return MODEL_METADATA[model]?.pricingStatus === 'unknown'
+			|| (this.llmClient.getAccountingUsage?.().unmeteredRequests ?? 0) > (this.lastUnmeteredRequests ?? 0);
 	}
 
 	/**
@@ -789,6 +818,7 @@ export class ChatSession {
 		}
 		this.disposed = true;
 		ACTIVE_SESSIONS.delete(this);
+		this.followupQueue.clear();
 		this.abortController?.abort();
 		// Clear the approval registry IF this session was the active one,
 		// so the agent-stack tool context falls back to its modal default
@@ -1242,6 +1272,7 @@ export class ChatSession {
 		this.saveConversation();
 		this.webview.postMessage({ type: 'tabChanged', tab: this.currentTab });
 		this.postBoardSnapshot();
+		this.postFollowupQueue();
 		this.postHistorySnapshot();
 		this.webview.postMessage({ type: 'conversationCleared', conversationId: this.currentConversationId, lastModel: this.currentModel });
 		// Reset the running cost meter so a fresh chat starts at $0.00. The
@@ -1267,6 +1298,12 @@ export class ChatSession {
 	 */
 	notifySystemIntegrationsChanged(): void {
 		this.webview.postMessage({ type: 'systemIntegrationsChanged' });
+	}
+
+	postProviderCatalog(includeModels = true): void {
+		if (this.disposed) { return; }
+		if (activeProviderFinder && includeModels) { void this.webview.postMessage({ type: 'providerCatalog', snapshot: activeProviderFinder.snapshot(), metadata: MODEL_METADATA }); }
+		void this.webview.postMessage({ type: 'agentCapabilities', capabilities: this.agentBridge?.getCapabilities(this.currentSpecialistId, this.currentModel) });
 	}
 
 	switchConversation(id: string): void {
@@ -1318,11 +1355,13 @@ export class ChatSession {
 		this.webview.postMessage({ type: 'modeChanged', chatMode: this.currentMode });
 		this.webview.postMessage({ type: 'tabChanged', tab: this.currentTab });
 		this.postBoardSnapshot();
+		this.postFollowupQueue();
 		this.postHistorySnapshot();
 	}
 
 	/** Replace a deleted active chat while leaving unrelated conversations and streams alone. */
 	handleConversationDeleted(id: string): void {
+		this.followupQueue.delete(id);
 		if (this.disposed) { return; }
 		if (id === this.currentConversationId) {
 			const next = this.conversationStore.getInitialConversation() ?? this.conversationStore.create();
@@ -1441,24 +1480,29 @@ export class ChatSession {
 	 * webview so the History tab can render a flat list. Mirrors the
 	 * sidebar tree's data feed without needing a separate provider.
 	 */
-	private postHistorySnapshot(): void {
+	private postHistorySnapshot(offset = 0): void {
 		if (this.disposed) {
 			return;
 		}
 		const workspaceIds = new Set(this.conversationStore.listForWorkspace().map(summary => summary.id));
-		const summaries = this.conversationStore.list().map(s => ({
+		const result = this.conversationStore.search({ ...this.historyFilter, offset, limit: 50 });
+		const summaries = result.items.map(s => ({
 			id: s.id,
 			title: s.title,
 			updatedAt: s.updatedAt,
 			messageCount: s.messageCount,
 			lastSpecialist: s.lastSpecialist,
 			workspaceName: s.workspaceName,
+			pinned: s.pinned, archived: s.archived, deletedAt: s.deletedAt, branch: s.branch,
+			searchText: this.historyFilter.query,
 			inCurrentWorkspace: workspaceIds.has(s.id),
 		}));
 		this.webview.postMessage({
 			type: 'historySnapshot',
 			activeId: this.currentConversationId,
 			conversations: summaries,
+			query: this.historyFilter.query, historyScope: this.historyFilter.scope, workspaceOnly: this.historyFilter.workspaceOnly,
+			total: result.total, nextOffset: result.nextOffset, append: offset > 0,
 		});
 	}
 
@@ -1567,16 +1611,49 @@ export class ChatSession {
 		this.webview.onDidReceiveMessage(
 			async (message: WebviewMessage) => {
 				switch (message.type) {
+					case 'searchHistory':
+						this.historyFilter = { query: typeof message.query === 'string' ? message.query.slice(0, 1000) : '', scope: message.historyScope === 'archived' || message.historyScope === 'trash' ? message.historyScope : 'active', workspaceOnly: message.workspaceOnly === true };
+						this.postHistorySnapshot(Number.isInteger(message.offset) ? Math.max(0, message.offset!) : 0);
+						break;
+					case 'historyAction': {
+						const command = ({ pin: 'sota.pinConversation', archive: 'sota.archiveConversation', restore: 'sota.restoreConversation' } as Record<string, string>)[message.command ?? ''];
+						if (command && typeof message.id === 'string') { await vscode.commands.executeCommand(command, message.id); }
+						break;
+					}
+					case 'workflowCommand':
+						if (['sota.manageConversationHistory', 'sota.manageIntegrationProfiles', 'sota.integrationChanges', 'sota.serviceDiagnostics', 'sota.checkForIdeUpdates', 'sota.exportResponseFeedback', 'sota.findProviders', 'sota.refreshProviders', 'sota.compareConversations'].includes(message.command ?? '')) { await vscode.commands.executeCommand(message.command!); }
+						break;
+					case 'queueMessage':
+					case 'redirectMessage':
+					case 'queueAction':
+						this.handleQueueMessage(message);
+						break;
+					case 'feedback': {
+						if (message.conversationId !== this.currentConversationId || !Number.isInteger(message.messageIndex)) { break; }
+						const response = this.conversation[message.messageIndex!];
+						if (response?.role !== 'assistant' || !['up', 'down', ''].includes(String(message.value))) { break; }
+						response.feedback = message.value === 'up' || message.value === 'down' ? message.value : undefined;
+						response.feedbackAt = response.feedback ? Date.now() : undefined;
+						this.saveConversation();
+						break;
+					}
+					case 'branchResponse':
+						if (message.conversationId === this.currentConversationId && Number.isInteger(message.messageIndex) && !this.abortController) {
+							await vscode.commands.executeCommand('sota.branchConversation', message.conversationId, message.messageIndex);
+						}
+						break;
 					case 'selectModel':
 						if (message.conversationId === this.currentConversationId && typeof message.model === 'string' && Object.prototype.hasOwnProperty.call(MODEL_METADATA, message.model)) {
 							this.currentModel = message.model;
 							this.saveConversation();
+							this.postProviderCatalog(false);
 						}
 						break;
 					case 'selectSpecialist':
 						if (message.conversationId === this.currentConversationId && typeof message.specialistId === 'string' && getSpecialist(message.specialistId)) {
 							this.currentSpecialistId = message.specialistId;
 							this.saveConversation();
+							this.postProviderCatalog(false);
 						}
 						break;
 					case 'browseAcpAdapters':
@@ -1589,6 +1666,8 @@ export class ChatSession {
 						await vscode.commands.executeCommand('sota.councilHistory');
 						break;
 					case 'webviewReady':
+						this.postProviderCatalog();
+						this.postFollowupQueue();
 						// Bootstrap only after the document installs its message listener.
 						this.webview.postMessage({ type: 'loadConversation', conversationId: this.currentConversationId, messages: this.conversation, lastSpecialist: this.currentSpecialistId, lastMode: this.currentMode, lastModel: this.currentModel });
 						this.webview.postMessage({ type: 'tabChanged', tab: this.currentTab });
@@ -1599,16 +1678,18 @@ export class ChatSession {
 						void this.refreshConnectionState();
 						break;
 					case 'previewWorkspaceContext': {
+						if (message.conversationId !== this.currentConversationId) { break; }
 						const conversationId = this.currentConversationId;
 						const sequence = ++this.contextPreviewSequence;
 						try {
-							const context = await this.workspaceContext?.collect();
+							const context = await this.collectTurnContext(message);
 							if (!this.disposed && conversationId === this.currentConversationId && sequence === this.contextPreviewSequence) {
-								this.webview.postMessage({ type: 'workspaceContextPreview', conversationId, markdown: context?.markdown ?? '', estimatedTokens: context?.estimatedTokens ?? 0 });
+								this.previewedContext = { key: this.contextKey(message), value: context };
+								this.webview.postMessage({ type: 'workspaceContextPreview', conversationId, requestId: message.id, ...context, markdown: context.sections.filter(section => !section.excluded).map(section => section.markdown).join('\n\n') });
 							}
 						} catch (error) {
 							if (!this.disposed && conversationId === this.currentConversationId && sequence === this.contextPreviewSequence) {
-								this.webview.postMessage({ type: 'workspaceContextPreview', conversationId, error: vscode.l10n.t('Could not read workspace context: {0}', error instanceof Error ? error.message : String(error)) });
+								this.webview.postMessage({ type: 'workspaceContextPreview', conversationId, requestId: message.id, error: vscode.l10n.t('Could not read workspace context: {0}', error instanceof Error ? error.message : String(error)) });
 							}
 						}
 						break;
@@ -1654,6 +1735,8 @@ export class ChatSession {
 						break;
 					}
 					case 'cancelRequest':
+						this.followupQueue.pause(this.currentConversationId);
+						this.postFollowupQueue();
 						this.abortController?.abort();
 						// Settle outstanding approval prompts so the tool loop
 						// doesn't block awaiting `approvalResponse` after the
@@ -2742,7 +2825,7 @@ export class ChatSession {
 		this.cancelPendingApprovals('cancel');
 		this.abortController?.abort();
 		try {
-			await this.checkpointManager.restore(checkpointId, { conversationToo });
+			await this.checkpointManager.restore(checkpointId, { conversationToo, conversationId: this.currentConversationId });
 		} catch (err) {
 			// CheckpointManager already surfaces a message via
 			// `showErrorMessage`; we just need to avoid letting the rejection
@@ -2774,7 +2857,48 @@ export class ChatSession {
 		return !this.disposed && this.abortController === turn.controller && this.currentConversationId === turn.conversationId;
 	}
 
-	private async handleSendMessage(message: WebviewMessage): Promise<void> {
+	private postFollowupQueue(): void {
+		const state = this.followupQueue.snapshot(this.currentConversationId);
+		void this.webview.postMessage({ type: 'followupQueue', conversationId: this.currentConversationId, paused: state.paused, entries: state.entries.map(entry => ({ id: entry.id, label: entry.draft.text?.trim().slice(0, 180) || vscode.l10n.t('Attached context') })) });
+	}
+
+	private dispatchNextQueued(): void {
+		if (this.disposed || this.abortController) { return; }
+		const draft = this.followupQueue.take(this.currentConversationId);
+		if (draft) {
+			void this.webview.postMessage({ type: 'dispatchQueuedDraft', conversationId: this.currentConversationId, draft });
+			void this.handleSendMessage(draft, true);
+		}
+		this.postFollowupQueue();
+	}
+
+	private handleQueueMessage(message: WebviewMessage): void {
+		if (message.conversationId !== this.currentConversationId) { return; }
+		try {
+			if (message.type === 'queueAction') {
+				if (message.queueAction === 'pause' || message.queueAction === 'resume') { this.followupQueue.pause(this.currentConversationId, message.queueAction === 'pause'); }
+				else if (message.id && (message.queueAction === 'up' || message.queueAction === 'down')) { this.followupQueue.move(this.currentConversationId, message.id, message.queueAction === 'up' ? -1 : 1); }
+				else if (message.id && (message.queueAction === 'remove' || message.queueAction === 'edit')) {
+					const draft = this.followupQueue.remove(this.currentConversationId, message.id);
+					if (draft && message.queueAction === 'edit') { void this.webview.postMessage({ type: 'editQueuedDraft', conversationId: this.currentConversationId, draft }); }
+				}
+			} else {
+				if (JSON.stringify(message).length > 12 * 1024 * 1024) { throw new Error(vscode.l10n.t('Queued message is too large. Use fewer image attachments.')); }
+				if (!message.text?.trim() && !message.attachments?.length && !message.mentions?.length && !message.mentionsKinded?.length && !message.images?.length) { return; }
+				this.followupQueue.add(this.currentConversationId, { ...message, type: 'sendMessage' }, message.type === 'redirectMessage');
+				if (message.type === 'redirectMessage') {
+					this.redirectedController = this.abortController;
+					this.followupQueue.pause(this.currentConversationId, false);
+					this.abortController?.abort(); this.cancelPendingApprovals('cancel');
+				}
+				void this.webview.postMessage({ type: 'queueAccepted', id: message.id, conversationId: this.currentConversationId, text: message.text ?? '' });
+			}
+			this.postFollowupQueue();
+			this.dispatchNextQueued();
+		} catch (error) { void this.webview.postMessage({ type: 'queueError', id: message.id, conversationId: this.currentConversationId, error: error instanceof Error ? error.message : String(error) }); }
+	}
+
+	private async handleSendMessage(message: WebviewMessage, fromQueue = false): Promise<void> {
 		if (message.conversationId && message.conversationId !== this.currentConversationId) {
 			return;
 		}
@@ -2785,13 +2909,23 @@ export class ChatSession {
 		try {
 			await this.runChatTurn(message, turn);
 		} catch (error) {
+			turn.failed = true;
 			if (this.ownsTurn(turn) && !turn.controller.signal.aborted) {
 				this.webview.postMessage({ type: 'streamError', error: error instanceof Error ? error.message : String(error) });
 			}
 		} finally {
+			const redirected = this.redirectedController === turn.controller;
+			if (redirected) { this.redirectedController = undefined; }
+			const record = fromQueue && !this.disposed ? this.conversationStore.load(turn.conversationId) : undefined;
+			if (record && !turn.userMessagePersisted && !redirected && (turn.failed || turn.controller.signal.aborted)) {
+				this.followupQueue.requeue(turn.conversationId, message); this.followupQueue.pause(turn.conversationId);
+			}
 			if (this.ownsTurn(turn)) {
 				this.webview.postMessage({ type: 'requestSettled', cancelled: turn.controller.signal.aborted });
+				this.postProviderCatalog(false);
 				this.abortController = undefined;
+				if ((turn.failed || turn.controller.signal.aborted) && !redirected) { this.followupQueue.pause(turn.conversationId); }
+				this.dispatchNextQueued();
 			}
 		}
 	}
@@ -2799,19 +2933,21 @@ export class ChatSession {
 	private async runChatTurn(message: WebviewMessage, owner: ChatTurn): Promise<void> {
 		const controller = owner.controller;
 		const current = () => this.ownsTurn(owner) && !controller.signal.aborted;
-		const post = (payload: Record<string, unknown>) => { if (this.ownsTurn(owner)) { void this.webview.postMessage(payload); } };
+		const post = (payload: Record<string, unknown>) => { if (payload.type === 'streamError' || payload.type === 'spendCapBlocked') { owner.failed = true; } if (this.ownsTurn(owner)) { void this.webview.postMessage(payload); } };
 		// Allow attachment-only messages: when the user types nothing but has
 		// attached context (e.g. just the current file), we still want to send.
 		const hasAttachments = Array.isArray(message.attachments) && message.attachments.length > 0;
 		const hasMentions = (Array.isArray(message.mentions) && message.mentions.length > 0) || (Array.isArray(message.mentionsKinded) && message.mentionsKinded.length > 0);
 		// Image attachments are validated separately so a malformed entry doesn't
 		// silently get embedded in the prompt; sanitisation lives below.
-		const incomingImages: ImageAttachmentPayload[] = Array.isArray(message.images)
-			? message.images.filter((img): img is ImageAttachmentPayload =>
-				Boolean(img) && typeof img === 'object'
-				&& typeof img.mime === 'string' && img.mime.startsWith('image/')
-				&& typeof img.base64 === 'string' && img.base64.length > 0)
-			: [];
+		const incomingImages: ImageAttachmentPayload[] = message.images ?? [];
+		if (!Array.isArray(incomingImages) || incomingImages.length > 10 || incomingImages.some(img =>
+			!img || !['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(img.mime)
+			|| typeof img.base64 !== 'string' || img.base64.length === 0 || img.base64.length % 4 !== 0
+			|| !/^[A-Za-z0-9+/]+={0,2}$/.test(img.base64))
+			|| incomingImages.reduce((total, img) => total + Buffer.byteLength(img.base64, 'base64'), 0) > 5 * 1024 * 1024) {
+			throw new Error(vscode.l10n.t('Use up to 10 PNG, JPEG, WebP or GIF images with a combined size below 5 MB. An image attachment is invalid or too large.'));
+		}
 		const hasImages = incomingImages.length > 0;
 		if (!message.text && !hasAttachments && !hasMentions && !hasImages) {
 			return;
@@ -2839,7 +2975,7 @@ export class ChatSession {
 		this.currentModel = model;
 		// Resolve the specialist for this turn, falling back to the orchestrator
 		// if the webview sent an unknown id (e.g. specialist was removed).
-		const requestedSpecialistId = message.specialistId ?? this.currentSpecialistId;
+		const requestedSpecialistId = model.startsWith('catalog:acp:') && (message.specialistId ?? this.currentSpecialistId) === 'anton' ? 'anton-code' : message.specialistId ?? this.currentSpecialistId;
 		const specialistId = getSpecialist(requestedSpecialistId) ? requestedSpecialistId : 'anton';
 		this.currentSpecialistId = specialistId;
 		// Mode arrives on every send so a chip toggle that hasn't yet been
@@ -2899,6 +3035,7 @@ export class ChatSession {
 				});
 				if (!current()) return;
 				if (!fired.allowed) {
+					owner.failed = true;
 					this.postSystemMessage('pre-prompt hook denied this prompt.');
 					return;
 				}
@@ -2917,9 +3054,11 @@ export class ChatSession {
 		// commands short-circuit before this point, so they never pay this
 		// cost. The cost itself is dominated by a single README read; the
 		// rest is in-memory state.
-		const workspaceCtx = this.workspaceContext && message.includeWorkspaceContext !== false
-			? await this.workspaceContext.collect()
-			: { markdown: '', estimatedTokens: 0 };
+		const cached = this.previewedContext;
+		const turnContext = cached && cached.key === this.contextKey(message) && message.contextSnapshotId === cached.value.id && Date.now() - cached.value.createdAt < 300_000
+			? cached.value : await this.collectTurnContext(message);
+		if (current() && this.previewedContext === cached) { this.previewedContext = undefined; }
+		const workspaceCtx = { markdown: turnContext.workspaceMarkdown, estimatedTokens: turnContext.estimatedTokens };
 		if (!current()) return;
 		const systemPrompt = workspaceCtx.markdown
 			? `${baseSystemPrompt}\n\n---\n\n${workspaceCtx.markdown}`
@@ -2932,7 +3071,7 @@ export class ChatSession {
 		// text (rewritten by a replacing hook, or the raw text otherwise);
 		// `message.text` is intentionally left untouched so the user's
 		// own bubble keeps their typed text as the visible summary.
-		const fullPrompt = await this.buildUserPrompt(promptForLlm, message.attachments, message.mentions, message.mentionsKinded);
+		const fullPrompt = [promptForLlm, turnContext.attachmentMarkdown].filter(Boolean).join('\n\n');
 		if (!current()) return;
 		const visibleSummaryText = (message.text && message.text.trim())
 			? message.text
@@ -2963,6 +3102,7 @@ export class ChatSession {
 			model,
 			specialistId,
 			request: {
+				excludedContext: message.excludedContext,
 				text: rawText,
 				attachments: message.attachments ? [...message.attachments] : undefined,
 				mentions: message.mentions ? [...message.mentions] : undefined,
@@ -3010,6 +3150,7 @@ export class ChatSession {
 
 		if (!current()) return;
 		this.conversation.push(userMessage);
+		owner.userMessagePersisted = true;
 		this.saveConversation();
 
 
@@ -3042,14 +3183,9 @@ export class ChatSession {
 		this.lastOutputTokens = usageSnapshot.output;
 		this.lastCachedTokens = usageSnapshot.cached;
 		this.lastEstimatedCost = this.estimatedSessionCost(model);
+		this.lastUnmeteredRequests = this.llmClient.getAccountingUsage?.().unmeteredRequests ?? 0;
 		this.streamStartedAt = Date.now();
 
-		// Plan mode is orchestrator-only — specialists always execute their
-		// remit. Surface a one-time hint so the user understands why the chip
-		// is decorative on non-`anton` turns; we still dispatch normally.
-		if (mode === 'plan' && specialistId !== 'anton') {
-			this.postSystemMessage('_Plan mode applies when chatting with @anton. This specialist will execute as usual._');
-		}
 
 		// Agent stack route: if the active specialist maps to a registered agent,
 		// drive the agent backend instead of the direct-LLM path. The legacy path
@@ -3061,7 +3197,7 @@ export class ChatSession {
 			// so the user's typed text stays clean — no prepending.
 			let bridgeAssistantText = '';
 			try {
-				bridgeAssistantText = await this.runViaAgentBridge(owner, specialistId, fullPrompt, model, mode, assistantConversationIndex, workspaceCtx.markdown, approveOverride, rejectOverride);
+				bridgeAssistantText = await this.runViaAgentBridge(owner, specialistId, fullPrompt, model, mode, assistantConversationIndex, workspaceCtx.markdown, approveOverride, rejectOverride, incomingImages);
 			} finally {
 				post({ type: 'requestEnded' });
 			}
@@ -3075,7 +3211,7 @@ export class ChatSession {
 		// we hit the cap. The tools-module ToolDefinition shape is structurally
 		// compatible with LlmClient's local ToolDefinition (the latter is a
 		// looser superset), so a runtime-safe cast is used at the boundary.
-		const tools = this.toolRegistry.definitions() as unknown as ReadonlyArray<LlmToolDefinition>;
+		const tools = (mode === 'plan' ? [] : this.toolRegistry.definitions()) as unknown as ReadonlyArray<LlmToolDefinition>;
 		// Single execution context per send — tool calls reuse the same handles.
 		// H14 — when a HookRunner is supplied (workspace trusted +
 		// `.son-of-anton/hooks.json` exists) the context is wrapped so
@@ -3138,9 +3274,21 @@ export class ChatSession {
 		let fullAssistantText = '';
 		let aborted = false;
 		let turn = 0;
+		let toolCalls = 0;
+		const limits = vscode.workspace.getConfiguration('sota');
+		const configuredTools = limits.get<number>('agents.maxToolCalls', 100);
+		const maxToolCalls = Number.isFinite(configuredTools) ? Math.max(0, Math.min(1000, configuredTools)) : 100;
+		const configuredRuntime = limits.get<number>('agents.maxRuntimeMs', 300_000);
+		const runtimeMs = Number.isFinite(configuredRuntime) ? Math.max(1000, Math.min(3_600_000, configuredRuntime)) : 300_000;
+		const runtimeTimer = setTimeout(() => {
+			if (!current()) { return; }
+			post({ type: 'streamError', error: vscode.l10n.t('The response reached its runtime limit. Increase the limit in Agent Settings to allow more time.') });
+			controller.abort(); this.cancelPendingApprovals('cancel');
+		}, runtimeMs);
+		runtimeTimer.unref();
 
 		try {
-			while (turn < MAX_TOOL_TURNS && current()) {
+			toolLoop: while (turn < MAX_TOOL_TURNS && current()) {
 				turn++;
 				const pendingToolCalls: Array<{ id: string; name: string; input: Record<string, unknown> }> = [];
 				let stopReason: string | undefined;
@@ -3190,6 +3338,7 @@ export class ChatSession {
 								const cost = this.estimatedSessionCost(model);
 								post({
 									type: 'messageComplete',
+									usageUnavailable: this.turnUsageUnavailable(model),
 									inputTokens: event.inputTokens,
 									outputTokens: event.outputTokens,
 									totalTokens: usage.input + usage.output,
@@ -3206,6 +3355,7 @@ export class ChatSession {
 								const turnCostDelta = Math.max(0, this.estimatedSessionCost(model) - this.lastEstimatedCost);
 								post({
 									type: 'messageMetrics',
+									usageUnavailable: this.turnUsageUnavailable(model),
 									conversationIndex: assistantConversationIndex,
 									model,
 									latencyMs: Date.now() - this.streamStartedAt,
@@ -3217,7 +3367,7 @@ export class ChatSession {
 								// H11 — fold the same per-turn deltas into the
 								// session-wide cumulative meter so the chat
 								// status bar ticks up across multiple turns.
-								this.recordSessionTurn(turnInputDelta + turnOutputDelta, turnCostDelta);
+								this.recordSessionTurn(turnInputDelta + turnOutputDelta, turnCostDelta, this.turnUsageUnavailable(model));
 							}
 						} else if (event.type === 'error') {
 							post({ type: 'streamError', error: event.error });
@@ -3243,6 +3393,11 @@ export class ChatSession {
 				if (stopReason !== 'tool_use' || pendingToolCalls.length === 0) {
 					break; // model is done
 				}
+				if (toolCalls + pendingToolCalls.length > maxToolCalls) {
+					post({ type: 'streamError', error: vscode.l10n.t('The response reached its limit of {0} tool calls. No further tools were executed.', maxToolCalls) });
+					break;
+				}
+				toolCalls += pendingToolCalls.length;
 
 				if (turn >= MAX_TOOL_TURNS) {
 					post({
@@ -3276,7 +3431,8 @@ export class ChatSession {
 				// same send (per Phase 19 spec) so we don't pay per-call setup.
 				const resultLines: string[] = ['[Tool results]'];
 				for (const call of pendingToolCalls) {
-					if (!current()) return;
+					if (mode === 'plan') { throw new Error(vscode.l10n.t('Plan mode cannot execute tools.')); }
+					if (!current()) { break toolLoop; }
 					// Phase 41: gate tools whose definition declares
 					// `riskLevel: 'requiresApproval'` (write_file, run_command)
 					// behind an inline approval card unless the user has opted
@@ -3317,7 +3473,7 @@ export class ChatSession {
 							approvalDecision = await this.waitForApproval(approvalId, controller.signal);
 						}
 
-						if (!current()) return;
+						if (!current()) { break toolLoop; }
 						if (approvalDecision.action === 'approve') {
 							result = await this.toolRegistry.execute(call.name, call.input, ctx);
 						} else if (approvalDecision.action === 'reject') {
@@ -3345,7 +3501,7 @@ export class ChatSession {
 						result = await this.toolRegistry.execute(call.name, call.input, ctx);
 					}
 
-					if (!current()) return;
+					if (!current()) { break toolLoop; }
 					const inputJson = JSON.stringify(call.input);
 					const status = result.isError ? 'error' : 'ok';
 					// Inline tool-result review: if the user edited this tool's
@@ -3526,7 +3682,7 @@ export class ChatSession {
 				assistantBuffer = '';
 			}
 		} finally {
-
+			clearTimeout(runtimeTimer);
 			// Always pair with `requestStarted` so the webview's pulse animation
 			// stops on success, error, AND user-cancellation paths.
 			post({ type: 'requestEnded' });
@@ -3538,9 +3694,12 @@ export class ChatSession {
 		// readable trace of what happened — instead of the old `<see chat
 		// history>` placeholder.
 		if (fullAssistantText) {
+			const usage = this.llmClient.getTokenUsage();
 			this.conversation.push({
 				role: 'assistant',
 				content: fullAssistantText,
+				usageUnavailable: this.turnUsageUnavailable(model),
+				execution: { route: 'native', outcome: owner.failed ? 'failed' : controller.signal.aborted ? 'cancelled' : 'completed', latencyMs: Date.now() - this.streamStartedAt, inputTokens: Math.max(0, usage.input - this.lastInputTokens), outputTokens: Math.max(0, usage.output - this.lastOutputTokens), estimatedCostUsd: MODEL_METADATA[model]?.pricingStatus === 'unknown' ? undefined : Math.max(0, this.estimatedSessionCost(model) - this.lastEstimatedCost) },
 				specialistId,
 				model,
 				timestamp: Date.now(),
@@ -3601,12 +3760,12 @@ export class ChatSession {
 	 * caller uses this to populate the `post-response` lifecycle-hook payload
 	 * so a single helper in `handleSendMessage` covers both dispatch paths.
 	 */
-	private async runViaAgentBridge(owner: ChatTurn, specialistId: string, fullPrompt: string, model: ModelId, mode: ChatMode, assistantConversationIndex: number, workspaceContextSnapshot?: string, approveOverride: boolean = false, rejectOverride: boolean = false): Promise<string> {
+	private async runViaAgentBridge(owner: ChatTurn, specialistId: string, fullPrompt: string, model: ModelId, mode: ChatMode, assistantConversationIndex: number, workspaceContextSnapshot?: string, approveOverride: boolean = false, rejectOverride: boolean = false, images: ImageAttachmentPayload[] = []): Promise<string> {
 		if (!this.agentBridge) {
 			return '';
 		}
 		const controller = owner.controller;
-		const post = (payload: Record<string, unknown>) => { if (this.ownsTurn(owner)) { void this.webview.postMessage(payload); } };
+		const post = (payload: Record<string, unknown>) => { if (payload.type === 'streamError' || payload.type === 'spendCapBlocked') { owner.failed = true; } if (this.ownsTurn(owner)) { void this.webview.postMessage(payload); } };
 		const cancellationSource = new vscode.CancellationTokenSource();
 		// Bridge AbortController -> CancellationToken so the existing Cancel
 		// button (which aborts the controller) still cancels in-flight LLM work.
@@ -3614,6 +3773,13 @@ export class ChatSession {
 		controller.signal.addEventListener('abort', cancel, { once: true });
 		if (controller.signal.aborted) cancel();
 
+		const executionOptions = {
+			mode, images: images.map(image => ({ data: image.base64, mimeType: image.mime })),
+			maxToolCalls: vscode.workspace.getConfiguration('sota').get<number>('agents.maxToolCalls', 100),
+			maxRuntimeMs: vscode.workspace.getConfiguration('sota').get<number>('agents.maxRuntimeMs', 300_000),
+			onUsage: (usage: { contextTokens?: number; contextWindow?: number; cost?: { amount: number; currency: string } }) => post({ type: 'adapterUsage', ...usage }),
+			onRecovery: (recovery: 'resumed' | 'transcript' | 'interrupted') => post({ type: 'adapterRecovery', recovery }),
+		};
 		let assembled = '';
 		let finalText: string | undefined;
 		let errorText: string | undefined;
@@ -3628,7 +3794,7 @@ export class ChatSession {
 			} else if (event.type === 'final') {
 				finalText = event.text;
 			} else if (event.type === 'error') {
-				errorText = event.message;
+				errorText = event.message; owner.failed = true;
 			}
 			// Phase 86 — task spend-cap check. Trigger once per turn from
 			// inside the bridge emit so a runaway sub-agent fan-out aborts
@@ -3665,18 +3831,15 @@ export class ChatSession {
 				// chosen provider. Without this the orchestrator silently
 				// hardcoded Opus and tried Anthropic regardless of the picker.
 				await this.agentBridge.runOrchestrator(fullPrompt, emit, cancellationSource.token, {
-					mode,
+					...executionOptions,
 					conversationId: owner.conversationId,
 					model,
 					workspaceContextSnapshot,
 					command: approveOverride ? 'approve' : rejectOverride ? 'reject' : undefined,
 				});
 			} else {
-				// Mode is orchestrator-specific — specialists always execute.
-				// We still surface a system-style hint upstream of the call so
-				// users notice the chip is non-functional for non-orchestrator
-				// turns; see handleSendMessage's pre-dispatch hint.
-				await this.agentBridge.runSpecialist(specialistId as AgentHandle, fullPrompt, emit, cancellationSource.token, model, workspaceContextSnapshot, owner.conversationId);
+				// The selected mode and multimodal payload follow every specialist route.
+				await this.agentBridge.runSpecialist(specialistId as AgentHandle, fullPrompt, emit, cancellationSource.token, model, workspaceContextSnapshot, owner.conversationId, executionOptions);
 			}
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
@@ -3689,16 +3852,17 @@ export class ChatSession {
 		if (!this.ownsTurn(owner)) return '';
 		if (errorText) {
 			post({ type: 'streamError', error: errorText });
-			return '';
+			// Retain any useful partial answer and mark its measured outcome below.
 		}
 
 		// Token usage telemetry is currently captured per-LLM-call inside the
 		// agent stack; we publish the cumulative LlmClient counters here so the
 		// status bar at the bottom of the chat reflects the full session.
-		const unmetered = this.agentBridge?.isAcpAgent?.(specialistId) ?? false;
+		const acpRoute = model.startsWith('catalog:acp:') || (this.agentBridge?.getCapabilities?.(specialistId, model).transport === 'acp') || (!model.startsWith('catalog:') && (this.agentBridge?.isAcpAgent?.(specialistId) ?? false));
+		const unmetered = acpRoute || this.turnUsageUnavailable(model);
 		const usage = this.llmClient.getTokenUsage();
 		const cost = this.estimatedSessionCost(model);
-		if (!controller.signal.aborted) post({
+		if (!controller.signal.aborted && !owner.failed) post({
 			type: 'messageComplete',
 			usageUnavailable: unmetered,
 			inputTokens: usage.input,
@@ -3735,6 +3899,7 @@ export class ChatSession {
 			this.conversation.push({
 				role: 'assistant',
 				content: persisted,
+				execution: { route: acpRoute ? 'acp' : specialistId === 'anton' ? 'orchestrator' : 'native', outcome: owner.failed ? 'failed' : controller.signal.aborted ? 'cancelled' : 'completed', latencyMs: Date.now() - this.streamStartedAt, inputTokens: unmetered ? undefined : turnInputDelta, outputTokens: unmetered ? undefined : turnOutputDelta, estimatedCostUsd: unmetered || MODEL_METADATA[model]?.pricingStatus === 'unknown' ? undefined : turnCostDelta },
 				usageUnavailable: unmetered,
 				specialistId,
 				model,
@@ -3881,6 +4046,26 @@ export class ChatSession {
 			}
 		}
 		return parts;
+	}
+
+	private contextKey(message: WebviewMessage): string {
+		return JSON.stringify([this.currentConversationId, message.includeWorkspaceContext !== false, message.attachments ?? [], message.mentionsKinded ?? message.mentions ?? [], message.excludedContext ?? []]);
+	}
+
+	private collectTurnContext(message: WebviewMessage): Promise<TurnContext> {
+		const sources: Array<{ id: string; label: string; resolve: () => Promise<string> }> = [];
+		if (message.includeWorkspaceContext !== false && this.workspaceContext) {
+			sources.push({ id: 'workspace', label: vscode.l10n.t('Workspace, Instructions and Active Editor'), resolve: async () => (await this.workspaceContext!.collect()).markdown });
+		}
+		for (const id of [...new Set(message.attachments ?? [])]) {
+			sources.push({ id: `attachment:${id}`, label: id, resolve: () => this.buildUserPrompt('', [id]) });
+		}
+		if (message.mentionsKinded?.length) {
+			message.mentionsKinded.forEach((mention, index) => sources.push({ id: `mention:${index}`, label: mention.kind === 'url' ? mention.url ?? 'URL' : mention.kind === 'file' || mention.kind === 'folder' ? mention.path ?? mention.kind : mention.kind, resolve: () => this.resolveKindedMentions([mention]) }));
+		} else if (message.mentions?.length) {
+			sources.push({ id: 'mentions', label: vscode.l10n.t('Referenced Paths'), resolve: async () => this.buildMentionBlock(message.mentions!) });
+		}
+		return assembleTurnContext(sources, message.excludedContext);
 	}
 
 	private async buildUserPrompt(text: string, attachments?: string[], mentions?: string[], mentionsKinded?: KindedMention[]): Promise<string> {
@@ -4383,6 +4568,7 @@ export class ChatSession {
 		// inline script) so this template literal stays a manageable size.
 		// Loaded via `nonce` + the webview's cspSource so both CSP forms
 		// admit it — see the CSP `script-src` directive below.
+		const workflowsJsUri = this.webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'dist', 'chat-workflows.js'));
 		const webviewJsUri = this.webview.asWebviewUri(
 			vscode.Uri.joinPath(this.extensionUri, 'media', 'chat-webview.js')
 		);
@@ -4693,6 +4879,9 @@ export class ChatSession {
 						<span>New conversation</span>
 					</button>
 				</div>
+				<button type="button" class="history-pane-new" data-workflow-command="sota.manageConversationHistory" data-ui-text="manageHistory"></button>
+				<button type="button" class="history-pane-new" data-workflow-command="sota.exportResponseFeedback" data-ui-text="exportFeedback"></button>
+				<select id="historyView" data-ui-label="historyView"><option value="active" data-ui-text="activeHistory"></option><option value="archived" data-ui-text="archivedHistory"></option><option value="trash" data-ui-text="trashHistory"></option></select>
 				<button type="button" id="councilHistoryBtn" class="history-pane-new" data-ui-text="councilHistory"></button>
 				<label class="history-search"><input type="search" id="historySearch" data-ui-label="searchConversations" data-ui-placeholder="searchConversations" autocomplete="off" /></label>
 				<div class="history-scope" role="group" data-ui-label="historyScope">
@@ -4710,6 +4899,10 @@ export class ChatSession {
 		</div>
 
 		<div class="chat-pane" id="pane-settings" data-pane="settings" role="tabpanel" hidden>
+			<details class="provider-discovery"><summary data-ui-text="providerDiscovery"></summary>
+				<div class="workflow-tools"><button type="button" data-workflow-command="sota.findProviders" data-ui-text="findProviders"></button><button type="button" data-workflow-command="sota.refreshProviders" data-ui-text="refreshProviders"></button><button type="button" data-workflow-command="sota.serviceDiagnostics" data-ui-text="serviceDiagnostics"></button></div>
+				<div id="providerDiscoveryStatus" role="status" data-ui-text="discoveryLoading"></div>
+			</details>
 			<div class="chat-settings-view chat-settings-view-tabbed" id="chatSettingsView" data-active-subtab="api">
 				<aside class="settings-subtab-nav" role="tablist" aria-label="Settings sections">
 					<button id="settingsTab-api" class="settings-subtab" data-subtab="api" role="tab" aria-selected="true" aria-controls="settingsSubtab-api">
@@ -4942,7 +5135,7 @@ export class ChatSession {
 						<button class="settings-link-button" type="button" data-action="open-settings-json" data-setting-id="sota.mcp.servers">Edit in settings.json</button>
 					</section>
 
-					<section class="settings-section settings-subtab-pane" id="settingsSubtab-integrations" data-subtab-pane="integrations" role="tabpanel" hidden aria-labelledby="settingsTab-integrations">
+					<section class="settings-section settings-subtab-pane" id="settingsSubtab-integrations" data-subtab-pane="integrations" role="tabpanel" hidden aria-labelledby="settingsTab-integrations"><div class="workflow-tools"><button type="button" data-workflow-command="sota.manageIntegrationProfiles" data-ui-text="integrationProfiles"></button><button type="button" data-workflow-command="sota.integrationChanges" data-ui-text="integrationChanges"></button></div>
 						<h4 data-ui-text="integrations"></h4>
 						<p class="settings-section-blurb" data-ui-text="integrationsHelp"></p>
 						<div class="integration-toolbar">
@@ -4971,7 +5164,7 @@ export class ChatSession {
 						</label>
 					</section>
 
-					<section class="settings-section settings-subtab-pane" id="settingsSubtab-about" data-subtab-pane="about" role="tabpanel" hidden aria-labelledby="settingsTab-about">
+					<section class="settings-section settings-subtab-pane" id="settingsSubtab-about" data-subtab-pane="about" role="tabpanel" hidden aria-labelledby="settingsTab-about"><div class="workflow-tools"><button type="button" data-workflow-command="sota.checkForIdeUpdates" data-ui-text="checkUpdates"></button></div>
 						<div class="settings-section-head">
 							<svg class="settings-section-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M8 11V7M8 5h.01"/></svg>
 							<h4>About</h4>
@@ -5004,7 +5197,7 @@ export class ChatSession {
 				<label class="workspace-context-toggle"><input type="checkbox" id="includeWorkspaceContext" checked /><span data-ui-text="includeWorkspaceContext"></span></label>
 				<p data-ui-text="contextExplanation"></p>
 				<button type="button" id="refreshContext" data-ui-text="refreshPreview"></button>
-				<pre id="workspaceContextPreview" tabindex="0" data-ui-label="workspaceContext"></pre>
+				<div id="workspaceContextPreview" tabindex="0" data-ui-label="workspaceContext"></div>
 			</div>
 		</details>
 		<div class="composer">
@@ -5019,6 +5212,8 @@ export class ChatSession {
 				<span class="draft-status" id="draftStatus" hidden></span>
 				<div class="prompt-restore-notice" id="promptRestoreNotice" role="status" hidden><span data-ui-text="promptRestored"></span><button type="button" id="undoPromptRestore" data-ui-text="undoPromptRestore"></button></div>
 				<div class="composer-shell">
+					<div id="agentCapabilitySummary" class="agent-capability-summary" role="status"></div>
+					<div id="followupQueue" class="followup-queue" aria-label="Queued Follow-ups" hidden></div>
 					<textarea class="composer-input" aria-label="Message Anton" id="messageInput" placeholder="Ask Anton anything…" rows="3"></textarea>
 					<div class="composer-toolbar">
 						<button class="toolbar-chip" id="attachBtn" title="Add context" aria-label="Add context">
@@ -5065,6 +5260,8 @@ export class ChatSession {
 							<button class="popover-item" role="menuitem" data-budget="24000"><span class="item-check"></span>24K</button>
 						</div>
 						<div class="toolbar-spacer"></div>
+						<button type="button" id="queueMessageBtn" class="toolbar-chip" data-ui-text="queueMessage" hidden></button>
+						<button type="button" id="redirectMessageBtn" class="toolbar-chip" data-ui-text="redirectMessage" hidden></button>
 						<button class="send-button is-empty" id="sendBtn" title="Send (Enter)" aria-label="Send">
 							<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V3M3 8l5-5 5 5"/></svg>
 						</button>
@@ -5074,7 +5271,7 @@ export class ChatSession {
 		</div>
 
 		<div class="composer-mode-note" id="composerModeNote" hidden role="status">
-			Plan mode: Anton will draft a plan but won't run any tools.
+			Plan mode: the selected agent reviews without changing files. Unsupported agents report a capability error.
 		</div>
 
 		<div class="status-bar">
@@ -5249,6 +5446,7 @@ export class ChatSession {
 	<script type="application/json" id="chatUiStrings" nonce="${nonce}">${uiStringsJson}</script>
 	<script type="application/json" id="modelMetadataData" nonce="${nonce}">${modelMetadataJson}</script>
 
+	<script nonce="${nonce}" src="${workflowsJsUri}"></script>
 	<script nonce="${nonce}" src="${webviewJsUri}"></script>
 </body>
 </html>`;
@@ -5381,6 +5579,7 @@ export class ChatPanel {
 				retainContextWhenHidden: true,
 				localResourceRoots: [
 					vscode.Uri.joinPath(context.extensionUri, 'media'),
+					vscode.Uri.joinPath(context.extensionUri, 'dist'),
 				],
 			},
 		);
@@ -5402,6 +5601,11 @@ export class ChatPanel {
 	 */
 	static notifySystemIntegrationsChanged(): void {
 		for (const session of ACTIVE_SESSIONS) { session.notifySystemIntegrationsChanged(); }
+	}
+
+	static setProviderFinder(finder: ProviderFinder | undefined): void {
+		activeProviderFinder = finder;
+		for (const session of ACTIVE_SESSIONS) { session.postProviderCatalog(); }
 	}
 
 	static clearConversation(): void {

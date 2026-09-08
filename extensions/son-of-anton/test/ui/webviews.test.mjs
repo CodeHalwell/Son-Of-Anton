@@ -65,13 +65,13 @@ async function openSurface(t, surface, width = 1440, initialState, suppliedHtml,
 		html = source.slice(source.indexOf('return /* html */`<!DOCTYPE html>')).split('`')[1];
 		const labelsSource = await readFile(path.join(extension, 'src/chat/chatUiStrings.ts'), 'utf8');
 		const labels = Object.fromEntries([...labelsSource.matchAll(/(\w+): vscode\.l10n\.t\('([^']*)'\)/g)].map(match => [match[1], match[2]]));
-		const values = { conversationId: 'initial-conversation', uiStringsJson: JSON.stringify(labels), 'this.webview.cspSource': 'https://sota.test', nonce: 'ui-fixture', cssUri: 'https://sota.test/chat.css', webviewJsUri: 'https://sota.test/chat-webview.js', defaultModel: 'sonnet', initialTab: 'chat', specialistRolesJson: JSON.stringify(specialists), personasJson: JSON.stringify(PERSONAS), rosterJson: JSON.stringify(getRoster()), slashCommandsJson: '[]', modelMetadataJson: JSON.stringify(MODEL_METADATA) };
+		const values = { conversationId: 'initial-conversation', uiStringsJson: JSON.stringify(labels), 'this.webview.cspSource': 'https://sota.test', nonce: 'ui-fixture', cssUri: 'https://sota.test/chat.css', workflowsJsUri: 'https://sota.test/chat-workflows.js', webviewJsUri: 'https://sota.test/chat-webview.js', defaultModel: 'sonnet', initialTab: 'chat', specialistRolesJson: JSON.stringify(specialists), personasJson: JSON.stringify(PERSONAS), rosterJson: JSON.stringify(getRoster()), slashCommandsJson: '[]', modelMetadataJson: JSON.stringify(MODEL_METADATA) };
 		html = html.replace(/\$\{([^}]+)\}/g, (_, name) => { assert.ok(name in values, name); return values[name]; });
 	} else { html = '<!doctype html><html lang="en"><head><meta charset="utf-8"></head><body><div id="root"></div><script src="https://sota.test/board.js"></script></body></html>'; }
 	await context.route('**/*', async route => {
 		const url = new URL(route.request().url());
 		if (url.origin !== 'https://sota.test') { await route.abort(); return; }
-		const asset = { '/chat.css': 'media/chat.css', '/chat-webview.js': 'media/chat-webview.js', '/board.js': 'dist/board.js', '/council.js': 'media/council.js', '/council.css': 'media/council.css' }[url.pathname];
+		const asset = { '/chat.css': 'media/chat.css', '/chat-webview.js': 'media/chat-webview.js', '/chat-workflows.js': 'dist/chat-workflows.js', '/board.js': 'dist/board.js', '/council.js': 'media/council.js', '/council.css': 'media/council.css' }[url.pathname];
 		await route.fulfill({ status: 200, contentType: asset ? (asset.endsWith('.css') ? 'text/css' : 'text/javascript') : 'text/html', body: asset ? await readFile(path.join(extension, asset)) : html });
 	});
 	await page.goto('https://sota.test/');
@@ -1011,4 +1011,164 @@ test('Council task review, cancellation and retry route through the native host'
 	await post(page, { ...fixture, snapshot: { ...fixture.snapshot, tasks: [{ ...fixture.snapshot.tasks[5], state: 'in-progress', id: 'council:fixture', proposalId: 'retained' }] } }); await frames(page);
 	await page.getByRole('button', { name: 'Cancel Task' }).click();
 	assert.deepEqual((await page.evaluate(() => window.sentMessages)).filter(message => ['review-proposal', 'rerun', 'cancel-task'].includes(message.type)), [{ type: 'review-proposal', taskId: 'council:fixture', conversationId: fixture.conversationId }, { type: 'rerun', taskId: 'council:fixture', conversationId: fixture.conversationId }, { type: 'cancel-task', taskId: 'council:fixture', conversationId: fixture.conversationId }]);
+});
+
+test('board dependency planner validates cycles and previews a scoped scheduling change', async t => {
+	const page = await openSurface(t, 'board', 1200);
+	const tasks = [
+		{ ...fixture.snapshot.tasks[1], id: 'foundation', instruction: 'Build foundation', dependencies: [], state: 'ready' },
+		{ ...fixture.snapshot.tasks[1], id: 'interface', instruction: 'Build interface', dependencies: ['foundation'], state: 'backlog' },
+		{ ...fixture.snapshot.tasks[1], id: 'tests', instruction: 'Add tests', dependencies: ['foundation'], state: 'backlog' },
+	];
+	await post(page, { ...fixture, snapshot: { ...fixture.snapshot, tasks } }); await frames(page);
+	await page.getByRole('button', { name: 'Dependencies', exact: true }).click();
+	await page.getByRole('checkbox', { name: /Build interface/ }).check();
+	assert.match(await page.getByRole('alert').textContent(), /cycle/);
+	assert.equal(await page.getByRole('button', { name: 'Apply Dependencies' }).isDisabled(), true);
+	await page.getByRole('combobox', { name: 'Task to edit dependencies' }).selectOption('tests');
+	await page.getByRole('checkbox', { name: /Build interface/ }).check();
+	assert.equal(await page.getByRole('heading', { name: 'Wave 3', exact: true }).count(), 1);
+	await page.getByRole('button', { name: 'Apply Dependencies' }).click();
+	const message = await page.evaluate(() => sentMessages.find(message => message.type === 'set-dependencies'));
+	assert.deepEqual({ id: message.taskId, dependencies: message.dependencies, conversation: message.conversationId }, { id: 'tests', dependencies: ['foundation', 'interface'], conversation: fixture.conversationId });
+	assert.ok(message.expectedRevision.includes('foundation'));
+});
+
+test('bounded timeline evicts both ends while preserving response drafts, votes and checkpoints', async t => {
+	const page = await openSurface(t, 'chat', 420);
+	const messages = Array.from({ length: 1000 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `Message ${index}`, timestamp: index + 1, ...(index % 2 ? {} : { request: { text: `Prompt ${index}`, attachments: ['terminal-output'], includeWorkspaceContext: false } }) }));
+	await post(page, { type: 'loadConversation', conversationId: 'windowed', messages }); await frames(page);
+	await post(page, { type: 'checkpointsLoaded', checkpoints: [{ checkpointId: 'older-checkpoint', turnIndex: 0, capturedAt: Date.now(), summary: 'Before first turn' }] });
+	const first = page.locator('.msg[data-conversation-index="0"]');
+	while (await first.count() === 0) {
+		await page.getByRole('button', { name: /Show Earlier Messages/ }).click(); await frames(page);
+		assert.ok(await page.locator('.msg').count() <= 300);
+	}
+	assert.equal(await page.locator('.checkpoint-stripe[data-checkpoint-id="older-checkpoint"]').count(), 1);
+	const response = page.locator('.msg[data-conversation-index="1"]');
+	await response.getByRole('button', { name: 'Mark Response as Helpful', exact: true }).click();
+	await page.getByRole('button', { name: 'Jump to Latest Messages', exact: true }).click(); await frames(page);
+	assert.equal(await first.count(), 0);
+	assert.equal(await page.locator('.msg').first().getAttribute('data-conversation-index'), '700');
+	while (await first.count() === 0) { await page.getByRole('button', { name: /Show Earlier Messages/ }).click(); await frames(page); }
+	assert.equal(await response.getByRole('button', { name: 'Mark Response as Helpful', exact: true }).getAttribute('aria-pressed'), 'true');
+	await response.getByRole('button', { name: 'Reuse Prompt', exact: true }).click();
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Prompt 0');
+	assert.match(await page.locator('#contextChips').innerText(), /Terminal output/);
+	assert.equal(await page.locator('#includeWorkspaceContext').isChecked(), false);
+	await page.locator('.checkpoint-stripe[data-checkpoint-id="older-checkpoint"] button').click();
+	await page.getByRole('menuitem', { name: 'Compare with current', exact: true }).click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'checkpointCompare', checkpointId: 'older-checkpoint' });
+	await page.getByRole('button', { name: /Show Newer Messages/ }).click(); await frames(page);
+	assert.equal(await page.locator('.msg').first().getAttribute('data-conversation-index'), '100');
+	assert.equal(await page.locator('.msg').count(), 300);
+	assert.equal(await page.locator('.msg').evaluateAll(nodes => new Set(nodes.map(node => node.dataset.conversationIndex)).size), 300);
+	await assertNoPageOverflow(page);
+});
+
+test('bounded timeline pins a streaming turn and restores its original Markdown after eviction', async t => {
+	const page = await openSurface(t, 'chat', 420);
+	const messages = Array.from({ length: 800 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `Message ${index}`, timestamp: index + 1 }));
+	await post(page, { type: 'loadConversation', conversationId: 'live-window', messages }); await frames(page);
+	await page.locator('#messageInput').fill('Keep the active response'); await page.locator('#sendBtn').click();
+	await post(page, { type: 'streamToken', token: '## Live result\n\n```ts\nconst answer = 42;' }); await frames(page);
+	const live = page.locator('.msg[data-conversation-index="801"]');
+	await live.evaluate(node => { window.liveTimelineNode = node; });
+	for (let pageNumber = 0; pageNumber < 5; pageNumber++) {
+		await page.getByRole('button', { name: /Show Earlier Messages/ }).click(); await frames(page);
+		assert.ok(await page.locator('.msg').count() <= 300);
+		assert.equal(await live.evaluate(node => node === window.liveTimelineNode), true);
+		assert.equal(await page.locator('.msg[data-conversation-index="800"]').count(), 1);
+	}
+	await post(page, { type: 'streamToken', token: '\n```\n\n**Finished**.' }); await frames(page);
+	assert.equal(await live.locator('pre code').textContent(), 'const answer = 42;');
+	assert.equal(await live.locator('strong').textContent(), 'Finished');
+	await post(page, { type: 'messageComplete', totalTokens: 20 }); await frames(page);
+	assert.equal(await live.count(), 0, 'A completed response leaves the pinned set while reading old messages');
+	await page.getByRole('button', { name: 'Jump to Latest Messages', exact: true }).click(); await frames(page);
+	assert.equal(await live.locator('pre code').textContent(), 'const answer = 42;');
+	assert.equal(await live.locator('strong').textContent(), 'Finished');
+	await live.getByRole('button', { name: 'Reuse Prompt', exact: true }).click();
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Keep the active response');
+	assert.ok(await page.locator('.msg').count() <= 300);
+	await post(page, { type: 'conversationCleared', conversationId: 'clean' }); await frames(page);
+	assert.equal(await page.locator('.msg').count(), 0);
+	assert.equal(await page.locator('.timeline-navigation').count(), 0);
+	await page.locator('#messageInput').fill('New conversation'); await page.locator('#sendBtn').click(); await frames(page);
+	assert.equal(await page.locator('.msg-user').getAttribute('data-conversation-index'), '0');
+});
+
+test('provider discovery searches the complete catalog and distinguishes catalog access from inference verification', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const models = Array.from({ length: 180 }, (_, index) => ({ id: `fixture/model-${index}`, model: `model-${index}`, label: `Fixture Model ${index}`, chat: true }));
+	await post(page, { type: 'providerCatalog', snapshot: { updatedAt: Date.now(), software: [{ name: 'Fixture CLI', installed: true, auth: 'file-present', configFiles: ['/fixture/config.json'] }], providers: [
+		{ id: 'fixture', name: 'Fixture Cloud', credentialSource: 'environment', catalogStatus: 'available', inferenceStatus: 'not-verified', models },
+		{ id: 'offline', name: 'Local Offline', credentialSource: 'none', catalogStatus: 'unreachable', inferenceStatus: 'not-verified', models: [], error: 'Local service is not running.' },
+	] } });
+	await page.locator('#modelChip').click();
+	assert.equal(await page.locator('[data-model][data-discovered]').count(), 100);
+	await page.locator('#modelSearch').fill('Fixture Model 179');
+	assert.equal(await page.locator('[data-model][data-discovered]:visible').count(), 1);
+	await page.locator('#modelSearch').press('Enter');
+	assert.match(await page.locator('#modelChip').innerText(), /Fixture Model 179/);
+	await page.getByRole('tab', { name: 'Settings tab', exact: true }).click();
+	await page.locator('.provider-discovery summary').first().click();
+	const status = await page.locator('#providerDiscoveryStatus').innerText();
+	assert.match(status, /Fixture Cloud[\s\S]*available[\s\S]*180[\s\S]*not verified/);
+	assert.match(status, /Local Offline[\s\S]*unreachable[\s\S]*Local service is not running/);
+	await page.getByText('Detected Coding Tools', { exact: true }).click();
+	assert.match(await page.locator('#providerDiscoveryStatus').innerText(), /Fixture CLI[\s\S]*Installed/);
+	assert.doesNotMatch(await page.locator('#providerDiscoveryStatus').innerText(), /\/fixture\/config.json/);
+	await assertNoPageOverflow(page); await screenshot(page, 'provider-discovery-sidebar');
+});
+
+test('queued draft acknowledgements correlate request ids without erasing a newer composer draft', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	await page.locator('#messageInput').fill('Start the current task'); await page.locator('#sendBtn').click();
+	await post(page, { type: 'streamToken', token: 'I am reviewing the implementation.' });
+	await page.locator('#messageInput').fill('First follow-up'); await page.locator('#queueMessageBtn').click();
+	await page.locator('#messageInput').fill('Second follow-up'); await page.locator('#queueMessageBtn').click();
+	const queued = await page.evaluate(() => sentMessages.filter(message => message.type === 'queueMessage'));
+	assert.equal(queued.length, 2); assert.notEqual(queued[0].id, queued[1].id);
+	await post(page, { type: 'queueAccepted', conversationId: 'initial-conversation', id: queued[0].id });
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Second follow-up');
+	await post(page, { type: 'queueAccepted', conversationId: 'initial-conversation', id: queued[1].id });
+	assert.equal(await page.locator('#messageInput').inputValue(), '');
+	await post(page, { type: 'followupQueue', conversationId: 'initial-conversation', paused: false, entries: [{ id: 'first', label: 'First follow-up' }, { id: 'second', label: 'Second follow-up' }] });
+	await page.locator('#messageInput').fill('Keep this unsent draft');
+	await post(page, { type: 'queueAccepted', conversationId: 'initial-conversation', id: queued[1].id });
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Keep this unsent draft');
+	await assertNoPageOverflow(page); await screenshot(page, 'followup-queue-sidebar');
+	await post(page, { type: 'requestSettled', cancelled: false });
+	await post(page, { type: 'dispatchQueuedDraft', conversationId: 'initial-conversation', draft: queued[0] });
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Keep this unsent draft');
+	assert.equal(await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').length), 1, 'Host-dispatched drafts only render in the webview');
+	assert.equal(await page.locator('.msg-user').last().innerText(), 'First follow-up');
+});
+
+test('context source exclusions are scoped to the draft and stale preview responses cannot replace current sources', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	await page.locator('#workspaceContextDetails summary').click();
+	await page.waitForFunction(() => sentMessages.some(message => message.type === 'previewWorkspaceContext'));
+	const request = await page.evaluate(() => sentMessages.filter(message => message.type === 'previewWorkspaceContext').at(-1));
+	const sections = [
+		{ id: 'active-file', label: 'Active File', estimatedTokens: 42, excluded: false, markdown: 'src/editor.ts\nconst answer = 42;' },
+		{ id: 'diagnostics', label: 'Problems', estimatedTokens: 10, excluded: false, markdown: 'No current diagnostics.' },
+	];
+	await post(page, { type: 'workspaceContextPreview', conversationId: 'initial-conversation', requestId: request.id, id: 'snapshot-1', sections, markdown: 'Current context', estimatedTokens: 52 });
+	await page.getByRole('checkbox', { name: 'Include Active File', exact: true }).click();
+	const excluded = await page.evaluate(() => sentMessages.filter(message => message.type === 'previewWorkspaceContext').at(-1));
+	assert.deepEqual(excluded.excludedContext, ['active-file']);
+	await post(page, { type: 'workspaceContextPreview', conversationId: 'initial-conversation', requestId: request.id, id: 'stale', markdown: 'STALE PREVIEW' });
+	assert.doesNotMatch(await page.locator('#workspaceContextPreview').innerText(), /STALE/);
+	await post(page, { type: 'workspaceContextPreview', conversationId: 'initial-conversation', requestId: excluded.id, id: 'snapshot-2', sections: sections.map(section => ({ ...section, excluded: section.id === 'active-file' })), markdown: 'No current diagnostics.', estimatedTokens: 10 });
+	await page.locator('#workspaceContextPreview details').first().locator('summary').focus(); await page.keyboard.press('Enter');
+	await page.locator('#messageInput').fill('Review without the active file');
+	await assertNoPageOverflow(page); await screenshot(page, 'context-sources-sidebar');
+	await page.locator('#sendBtn').click();
+	const sent = await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').at(-1));
+	assert.deepEqual(sent.excludedContext, ['active-file']); assert.equal(sent.contextSnapshotId, 'snapshot-2');
+	await post(page, { type: 'loadConversation', conversationId: 'different-context', messages: [] });
+	await page.locator('#messageInput').fill('Fresh workspace context'); await page.locator('#sendBtn').click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').at(-1).excludedContext), []);
 });

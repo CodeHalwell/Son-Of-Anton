@@ -4,6 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as os from 'node:os';
+import { FileSnapshotStore, type FileSnapshot } from './FileSnapshotStore';
 import { randomUUID, createHash } from 'node:crypto';
 import { GitSnapshotStore, type GitSnapshot } from './GitSnapshotStore';
 import { TypedEventEmitter, type Event } from '../eventEmitter';
@@ -51,6 +53,7 @@ export interface Checkpoint {
 	readonly id: string;
 	/** Conversation that owns this checkpoint. */
 	readonly conversationId: string;
+	readonly branchConversationIds?: readonly string[];
 	/** 0-based ordinal of the turn within the conversation. */
 	readonly turnIndex: number;
 	/** Milliseconds since epoch. Used for the relative-time tooltip. */
@@ -67,6 +70,7 @@ export interface Checkpoint {
 	readonly gitSha?: string;
 	/** Versioned snapshot with worktree identity and staging state. */
 	readonly snapshot?: GitSnapshot;
+	readonly fileSnapshot?: FileSnapshot;
 	/** Reference the SHA was based on at capture time (HEAD or branch). */
 	readonly baseRef?: string;
 	/** Human-readable summary (e.g. "3 files modified"). Optional, best-effort. */
@@ -80,6 +84,7 @@ export interface Checkpoint {
  */
 export interface RestoreOptions {
 	conversationToo: boolean;
+	conversationId?: string;
 }
 
 /**
@@ -87,6 +92,7 @@ export interface RestoreOptions {
  * surface modal prompts and a workspace root without depending on `vscode`.
  */
 export interface CheckpointManagerHost {
+	readonly storageRoot?: string;
 	readonly notifier: Notifier;
 	readonly config: ConfigStore;
 	readonly getWorkspaceRoot: () => string | undefined;
@@ -111,8 +117,7 @@ export class CheckpointManager implements Disposable {
 	/**
 	 * Capture a checkpoint of the current workspace state. Returns
 	 * `undefined` if the user has disabled checkpoints, no workspace folder is
-	 * open, or the capture itself failed (e.g. not a git repo and the
-	 * file-backed fallback is still a stub).
+	 * open, or capture failed. Non-Git folders use complete bounded file snapshots.
 	 */
 	async capture(conversationId: string, turnIndex: number, userMessage: string): Promise<Checkpoint | undefined> {
 		if (!this.isEnabled()) {
@@ -128,7 +133,7 @@ export class CheckpointManager implements Disposable {
 			return undefined;
 		}
 
-		await this.mutateIndex(index => this.pruneIndex([...index, checkpoint]), checkpoint.snapshot?.workspaceRoot);
+		await this.mutateIndex(index => this.pruneIndex([...index, checkpoint]), checkpoint.snapshot?.workspaceRoot ?? checkpoint.fileSnapshot?.workspaceRoot);
 		this._onDidChange.fire();
 		return checkpoint;
 	}
@@ -136,7 +141,7 @@ export class CheckpointManager implements Disposable {
 	/** Return the checkpoints belonging to a single conversation, oldest first. */
 	list(conversationId: string): ReadonlyArray<Checkpoint> {
 		return this.readIndex()
-			.filter(cp => cp.conversationId === conversationId)
+			.filter(cp => cp.conversationId === conversationId || cp.branchConversationIds?.includes(conversationId))
 			.sort((a, b) => a.capturedAt - b.capturedAt);
 	}
 
@@ -163,7 +168,11 @@ export class CheckpointManager implements Disposable {
 			return;
 		}
 
+		if (options.conversationId && options.conversationId !== checkpoint.conversationId && !checkpoint.branchConversationIds?.includes(options.conversationId)) { throw new Error('Checkpoint is not associated with this conversation.'); }
 		const root = this.getWorkspaceRoot();
+		if (root && checkpoint.kind === 'fs' && checkpoint.fileSnapshot) {
+			await this.restoreFiles(checkpoint, root, options); return;
+		}
 		if (!root || !checkpoint.snapshot) {
 			throw new Error('This legacy checkpoint has no verified worktree snapshot. Capture a new checkpoint before making changes.');
 		}
@@ -180,8 +189,8 @@ export class CheckpointManager implements Disposable {
 			return;
 		}
 		await this.mutateIndex(index => this.pruneIndex([...index, {
-			id: randomUUID(), conversationId: checkpoint.conversationId,
-			turnIndex: this.conversationStore.load(checkpoint.conversationId)?.messages.length ?? checkpoint.turnIndex,
+			id: randomUUID(), conversationId: options.conversationId ?? checkpoint.conversationId,
+			turnIndex: this.conversationStore.load(options.conversationId ?? checkpoint.conversationId)?.messages.length ?? checkpoint.turnIndex,
 			capturedAt: Date.now(), userMessage: 'Recovery point before checkpoint restore',
 			kind: 'git', gitSha: recovery.commit, baseRef: recovery.head,
 			snapshot: recovery, summary: 'Recovery point before restore',
@@ -190,7 +199,7 @@ export class CheckpointManager implements Disposable {
 		this.host.notifier.info('Workspace restored. The previous state is available as a recovery checkpoint.');
 
 		if (options.conversationToo) {
-			this.rewindConversation(checkpoint);
+			this.rewindConversation(checkpoint, options.conversationId);
 		}
 	}
 
@@ -199,7 +208,14 @@ export class CheckpointManager implements Disposable {
 	 * conversation is deleted so we don't keep dangling index entries.
 	 */
 	async deleteFor(conversationId: string): Promise<void> {
-		await this.mutateIndex(index => index.filter(cp => cp.conversationId !== conversationId));
+		await this.mutateIndex(index => index.map(cp => ({ ...cp, branchConversationIds: cp.branchConversationIds?.filter(id => id !== conversationId) })).filter(cp => cp.conversationId !== conversationId || !!cp.branchConversationIds?.length));
+		this._onDidChange.fire();
+	}
+
+	/** Explicit links keep a branch's checkpoint alive even if its parent is deleted. */
+	async attachToBranch(checkpointId: string, branchId: string): Promise<void> {
+		if (!this.conversationStore.load(branchId) || !this.get(checkpointId)) { throw new Error('Branch or checkpoint is unavailable.'); }
+		await this.mutateIndex(index => index.map(cp => cp.id === checkpointId ? { ...cp, branchConversationIds: [...new Set([...(cp.branchConversationIds ?? []), branchId])] } : cp));
 		this._onDidChange.fire();
 	}
 
@@ -258,9 +274,12 @@ export class CheckpointManager implements Disposable {
 		userMessage: string,
 	): Promise<Checkpoint | undefined> {
 		if (!this.isGitRepo(workspaceRoot)) {
-			// File-backed fallback would land here. For now we silently skip
-			// — capturing a checkpoint must never block the chat send loop.
-			return undefined;
+			try {
+				const fileSnapshot = await new FileSnapshotStore(workspaceRoot, this.fileStorageRoot()).capture();
+				return { id: randomUUID(), conversationId, turnIndex, capturedAt: Date.now(), userMessage: userMessage.slice(0, 200), kind: 'fs', fileSnapshot, summary: 'Files up to 50 MiB / 10,000 entries; VCS internals, node_modules, .venv and __pycache__ excluded; symlinks unsupported' };
+			} catch (error) {
+				this.host.notifier.warn(`Checkpoint was not captured: ${error instanceof Error ? error.message : String(error)}`); return undefined;
+			}
 		}
 
 		try {
@@ -277,20 +296,39 @@ export class CheckpointManager implements Disposable {
 		}
 	}
 
+	private fileStorageRoot(): string { return this.host.storageRoot ?? path.join(os.homedir(), '.son-of-anton', 'file-checkpoints'); }
+
+	private async restoreFiles(checkpoint: Checkpoint, root: string, options: RestoreOptions): Promise<void> {
+		const recovery = await new FileSnapshotStore(root, this.fileStorageRoot()).restore(checkpoint.fileSnapshot!, async files => {
+			const preview = files.slice(0, 20).map(file => `  ${file}`).join('\n');
+			const confirmed = await this.host.confirmRestore(`Restore ${files.length} changed paths? A recovery checkpoint will retain the current files. Dependencies and VCS internals are excluded.\n${preview}${files.length > 20 ? '\n  …' : ''}${options.conversationToo ? '\nThe conversation will also be rewound.' : ''}`);
+			if (this.getWorkspaceRoot() !== root) { throw new Error('Workspace changed while confirming restore.'); }
+			return confirmed;
+		});
+		if (!recovery) { return; }
+		await this.mutateIndex(index => this.pruneIndex([...index, {
+			id: randomUUID(), conversationId: options.conversationId ?? checkpoint.conversationId, turnIndex: this.conversationStore.load(options.conversationId ?? checkpoint.conversationId)?.messages.length ?? checkpoint.turnIndex,
+			capturedAt: Date.now(), userMessage: 'Recovery point before checkpoint restore', kind: 'fs', fileSnapshot: recovery, summary: 'Recovery point before restore',
+		}]), root);
+		this._onDidChange.fire(); this.host.notifier.info('Workspace restored. The previous state is available as a recovery checkpoint.');
+		if (options.conversationToo) { this.rewindConversation(checkpoint, options.conversationId); }
+	}
+
 	/**
 	 * Truncate the conversation back to the state immediately before the
 	 * captured turn. The checkpoint records `turnIndex` as the message count
 	 * at capture time, so slicing to `turnIndex` drops the user message that
 	 * triggered the turn AND every assistant/tool message that followed.
 	 */
-	private rewindConversation(checkpoint: Checkpoint): void {
-		const record = this.conversationStore.load(checkpoint.conversationId);
+	private rewindConversation(checkpoint: Checkpoint, conversationId = checkpoint.conversationId): void {
+		if (conversationId !== checkpoint.conversationId && !checkpoint.branchConversationIds?.includes(conversationId)) { throw new Error('Checkpoint is not associated with this conversation.'); }
+		const record = this.conversationStore.load(conversationId);
 		if (!record) {
 			return;
 		}
 		const trimmed = record.messages.slice(0, checkpoint.turnIndex);
 		this.conversationStore.update(
-			checkpoint.conversationId,
+			conversationId,
 			trimmed,
 			record.summary.lastSpecialist,
 		);
@@ -316,6 +354,11 @@ export class CheckpointManager implements Disposable {
 			const next = update([...previous]);
 			await this.globalState.update(key, next);
 			for (const removed of previous.filter(item => !next.some(retained => retained.id === item.id))) {
+				if (removed.fileSnapshot) {
+					await new FileSnapshotStore(removed.fileSnapshot.workspaceRoot, removed.fileSnapshot.storageRoot).release(removed.fileSnapshot).catch(error => {
+						this.host.notifier.warn(`Could not release an expired file checkpoint: ${String(error)}`);
+					});
+				}
 				if (removed.snapshot) {
 					await new GitSnapshotStore(removed.snapshot.workspaceRoot).release(removed.snapshot).catch(error => {
 						this.host.notifier.warn(`Could not release an expired checkpoint: ${String(error)}`);
@@ -328,14 +371,8 @@ export class CheckpointManager implements Disposable {
 	}
 
 	private pruneIndex(index: Checkpoint[]): Checkpoint[] {
-		const max = this.getMaxCount();
-		if (index.length <= max) {
-			return index;
-		}
-		const sorted = [...index].sort((a, b) => a.capturedAt - b.capturedAt);
-		// Drop the oldest entries first so recent checkpoints (the ones the
-		// user is most likely to roll back to) are preserved.
-		return sorted.slice(sorted.length - max);
+		const retained = index.filter(checkpoint => checkpoint.branchConversationIds?.length);
+		return [...retained, ...index.filter(checkpoint => !checkpoint.branchConversationIds?.length).sort((a, b) => b.capturedAt - a.capturedAt).slice(0, this.getMaxCount())];
 	}
 
 }

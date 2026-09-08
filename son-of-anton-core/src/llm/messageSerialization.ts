@@ -11,6 +11,7 @@ type OpenAIContent = { type: 'text'; text: string } | { type: 'image_url'; image
 interface OpenAIMessage {
 	role: 'user' | 'assistant' | 'tool';
 	content: string | OpenAIContent[] | null;
+	reasoning_content?: string;
 	tool_call_id?: string;
 	tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }>;
 }
@@ -19,7 +20,7 @@ interface OpenAIMessage {
 export function serializeOpenAIMessages(messages: readonly LlmMessage[], supportsImages: boolean): OpenAIMessage[] {
 	const output: OpenAIMessage[] = [];
 	for (const message of messages) {
-		if (typeof message.content === 'string') { output.push({ role: message.role, content: message.content }); continue; }
+		if (typeof message.content === 'string') { output.push({ role: message.role, content: message.content, ...(message.role === 'assistant' && message.reasoningContent ? { reasoning_content: message.reasoningContent } : {}) }); continue; }
 		const content: OpenAIContent[] = [];
 		const calls: NonNullable<OpenAIMessage['tool_calls']> = [];
 		for (const part of applyImageCapability(message.content, supportsImages)) {
@@ -36,7 +37,7 @@ export function serializeOpenAIMessages(messages: readonly LlmMessage[], support
 					break;
 			}
 		}
-		if (content.length || calls.length) { output.push({ role: message.role, content: content.length ? content : null, ...(calls.length ? { tool_calls: calls } : {}) }); }
+		if (content.length || calls.length) { output.push({ role: message.role, content: content.length ? content : null, ...(message.role === 'assistant' && message.reasoningContent ? { reasoning_content: message.reasoningContent } : {}), ...(calls.length ? { tool_calls: calls } : {}) }); }
 	}
 	return output;
 }

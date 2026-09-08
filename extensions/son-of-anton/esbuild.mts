@@ -5,6 +5,7 @@
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import type { Plugin } from 'esbuild';
+import esbuild from 'esbuild';
 import { run } from '../esbuild-extension-common.mts';
 
 const srcDir = path.join(import.meta.dirname, 'src');
@@ -86,6 +87,9 @@ async function buildAll(): Promise<void> {
 	// `esbuild-extension-common` would mean threading too many overrides.
 	const board = await import('./esbuild.board.mts');
 	await board.build();
+	const chatBuild = await esbuild.context({ entryPoints: [path.join(srcDir, 'chat', 'webview', 'workflows.ts')], outfile: path.join(outDir, 'chat-workflows.js'), bundle: true, platform: 'browser', format: 'iife', globalName: 'SotaWorkflows', target: 'es2022', sourcemap: true });
+	if (process.argv.includes('--watch')) { await chatBuild.watch(); }
+	else { try { await chatBuild.rebuild(); } finally { await chatBuild.dispose(); } }
 }
 
 buildAll().catch(err => {

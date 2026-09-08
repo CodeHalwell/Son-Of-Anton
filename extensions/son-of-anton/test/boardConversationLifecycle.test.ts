@@ -22,7 +22,7 @@ suite('Board conversation lifecycle', () => {
 		const panel = Object.assign(Object.create(TaskBoardPanel.prototype), {
 			currentConversationId: 'first', closed: false, activeChatStreams: new Map(), pendingReruns: new Set(),
 			panel: { webview: { postMessage: (message: typeof messages[number]) => { messages.push(message); } } },
-			model: { getSnapshot: () => undefined }, conversationStore: { list: () => [] }, handlers,
+			model: { getSnapshot: () => undefined }, conversationStore: { list: () => [], load: () => undefined }, handlers,
 		}) as {
 			handleMessage(message: object): void;
 			switchConversation(id: string | undefined): void;

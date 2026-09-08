@@ -4,8 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 import { strict as assert } from 'node:assert';
 import * as vscode from 'vscode';
+import { ChatTurnQueue } from '../src/chat/ChatTurnQueue';
 import { ChatSession, type ChatMessage } from '../src/chat/ChatPanel';
-import type { ModelId } from 'son-of-anton-core/llm/LlmClient';
+import type { LlmStreamEvent, ModelId } from 'son-of-anton-core/llm/LlmClient';
 import type { AgentEvent } from '../src/chat/agentEvents';
 
 function deferred() {
@@ -42,12 +43,14 @@ function createSession() {
 		update: (id: string, content: ChatMessage[], _specialist: string, _mode: string, _tab: string, model: ModelId) => { conversations.set(id, [...content]); models.set(id, model); },
 		list: () => Array.from(conversations, ([id, content]) => ({ id, title: id, updatedAt: 1, messageCount: content.length })),
 		listForWorkspace() { return this.list(); },
+		search() { return { items: this.list(), total: conversations.size }; },
 		getInitialConversation: () => { const id = conversations.keys().next().value; return id ? { summary: { id }, messages: conversations.get(id) ?? [] } : undefined; },
 		load: (id: string) => conversations.has(id) ? ({ summary: { id, lastModel: models.get(id) }, messages: conversations.get(id) ?? [] }) : undefined,
 		create: () => { conversations.set('fresh', []); return { summary: { id: 'fresh' }, messages: [] }; },
 	};
 	const session = Object.assign(Object.create(ChatSession.prototype), {
 		currentConversationId: 'first', conversation: [], currentSpecialistId: 'anton', currentMode: 'act', currentModel: 'sonnet', currentTab: 'chat', turnsRun: 0,
+		postProviderCatalog() {}, postFollowupQueue() {}, followupQueue: new ChatTurnQueue(), contextPreviewSequence: 0, historyFilter: { query: '', scope: 'active', workspaceOnly: false },
 		disposables: [], pendingApprovals: new Map(), emittedUiBlockIds: new Set(), pendingUiBlockResponses: new Set(),
 		conversationStore: store, sessionTotalCost: 0, sessionTotalTokens: 0, sessionTurnCount: 0,
 		webview: { onDidReceiveMessage: (listener: typeof receive) => { receive = listener; return { dispose() {} }; }, postMessage: (message: typeof messages[number]) => { messages.push(message); return Promise.resolve(true); } },
@@ -71,7 +74,65 @@ function createSession() {
 	return { session, messages, conversations, models, receive: (message: Parameters<typeof receive>[0]) => receive(message), send };
 }
 
+async function withNativeSession(
+	limits: Record<string, number>,
+	stream: (signal: AbortSignal) => AsyncGenerator<LlmStreamEvent>,
+	run: (fixture: ReturnType<typeof createSession> & { requests: AbortSignal[]; executed: string[]; pendingApprovals: Map<string, object> }) => Promise<void>,
+): Promise<void> {
+	const originalConfiguration = vscode.workspace.getConfiguration;
+	Object.assign(vscode.workspace, { getConfiguration: () => ({ get: (key: string, fallback: object) => limits[key] ?? fallback }) });
+	const fixture = createSession(); const requests: AbortSignal[] = []; const executed: string[] = []; const pendingApprovals = new Map<string, object>();
+	Object.assign(fixture.session, {
+		agentBridge: undefined, pendingApprovals, editedToolResults: new Map(),
+		llmClient: { getTokenUsage: () => ({ input: 10, output: 5, cached: 0 }), estimateCost: () => 0.01, streamRequest: (request: { signal: AbortSignal }) => { requests.push(request.signal); return stream(request.signal); } },
+		toolRegistry: {
+			definitions: () => [],
+			get: (name: string) => ({ definition: { category: name === 'write_file' ? 'write' : 'read', riskLevel: name === 'write_file' ? 'requiresApproval' : 'safe' } }),
+			execute: async (name: string) => { executed.push(name); return { content: 'Tool result' }; },
+		},
+	});
+	try { await run({ ...fixture, requests, executed, pendingApprovals }); }
+	finally { fixture.session.abortInFlight(); Object.assign(vscode.workspace, { getConfiguration: originalConfiguration }); }
+}
+
+async function* requestNativeTool(name: string): AsyncGenerator<LlmStreamEvent> {
+	yield { type: 'token', token: 'Investigation before the tool' };
+	yield { type: 'tool-call', id: 'requested-tool', name, input: { path: 'example.ts', content: 'New content' } };
+	yield { type: 'complete', fullText: 'Investigation before the tool', stopReason: 'tool_use', inputTokens: 10, outputTokens: 5, cachedTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 };
+}
+
 suite('Chat turn ownership', () => {
+	test('native zero-tool budget rejects provider-requested tools before execution or approval', async () => {
+		await withNativeSession({ 'agents.maxToolCalls': 0 }, () => requestNativeTool('write_file'), async fixture => {
+			await fixture.session.handleSendMessage({ text: 'Request a write', includeWorkspaceContext: false });
+			const response = fixture.conversations.get('first')?.at(-1);
+			assert.deepEqual({ requests: fixture.requests.length, executed: fixture.executed, approval: fixture.messages.some(message => message.type === 'approvalRequest'), completed: fixture.messages.some(message => message.type === 'messageComplete'), outcome: response?.execution?.outcome, route: response?.execution?.route }, { requests: 1, executed: [], approval: false, completed: false, outcome: 'failed', route: 'native' });
+			assert.match(String(fixture.messages.find(message => message.type === 'streamError')?.error), /limit of 0 tool calls/);
+		});
+	});
+
+	test('native runtime budget aborts the provider stream and persists a failed partial response', async () => {
+		await withNativeSession({ 'agents.maxRuntimeMs': 1000 }, async function* (signal) {
+			yield { type: 'token', token: 'Useful partial answer' };
+			await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }));
+			yield { type: 'token', token: ' late output' };
+		}, async fixture => {
+			await fixture.session.handleSendMessage({ text: 'Slow response', includeWorkspaceContext: false });
+			const response = fixture.conversations.get('first')?.at(-1);
+			assert.deepEqual({ aborted: fixture.requests[0]?.aborted, content: response?.content, outcome: response?.execution?.outcome, settled: fixture.messages.filter(message => message.type === 'requestSettled'), currentController: fixture.session.abortController, completed: fixture.messages.some(message => message.type === 'messageComplete') }, { aborted: true, content: 'Useful partial answer', outcome: 'failed', settled: [{ type: 'requestSettled', cancelled: true }], currentController: undefined, completed: false });
+			assert.match(String(fixture.messages.find(message => message.type === 'streamError')?.error), /runtime limit/);
+		});
+	});
+
+	test('native runtime budget releases a pending approval without running the requested tool', async () => {
+		await withNativeSession({ 'agents.maxRuntimeMs': 1000 }, () => requestNativeTool('write_file'), async fixture => {
+			await fixture.session.handleSendMessage({ text: 'Wait for approval', includeWorkspaceContext: false });
+			const response = fixture.conversations.get('first')?.at(-1);
+			assert.deepEqual({ content: response?.content, outcome: response?.execution?.outcome }, { content: 'Investigation before the tool', outcome: 'failed' });
+			assert.deepEqual({ requests: fixture.requests.length, aborted: fixture.requests[0]?.aborted, approvalRequested: fixture.messages.some(message => message.type === 'approvalRequest'), pendingApprovals: fixture.pendingApprovals.size, executed: fixture.executed, settled: fixture.messages.filter(message => message.type === 'requestSettled'), currentController: fixture.session.abortController }, { requests: 1, aborted: true, approvalRequested: true, pendingApprovals: 0, executed: [], settled: [{ type: 'requestSettled', cancelled: true }], currentController: undefined });
+			assert.match(String(fixture.messages.find(message => message.type === 'streamError')?.error), /runtime limit/);
+		});
+	});
 	test('deleting an unrelated conversation leaves the current stream running', async () => {
 		const f = createSession(); const request = f.send('Keep working'); await request.ready;
 		const controller = f.session.abortController;
@@ -205,7 +266,7 @@ suite('Chat turn ownership', () => {
 		await fixture.session.handleSendMessage(input);
 		input.attachments.push('current-file'); input.mentionsKinded[0].path = 'changed.ts';
 		const saved = fixture.conversations.get('first')?.[0];
-		assert.deepEqual({ request: saved?.request, model: saved?.model, specialist: saved?.specialistId }, { request: { text: 'Explain the failure', attachments: ['terminal-output'], mentions: undefined, mentionsKinded: [{ kind: 'file', path: 'src/main.ts' }], includeWorkspaceContext: false, chatMode: 'plan' }, model: 'haiku', specialist: 'anton' });
+		assert.deepEqual({ request: saved?.request, model: saved?.model, specialist: saved?.specialistId }, { request: { excludedContext: undefined, text: 'Explain the failure', attachments: ['terminal-output'], mentions: undefined, mentionsKinded: [{ kind: 'file', path: 'src/main.ts' }], includeWorkspaceContext: false, chatMode: 'plan' }, model: 'haiku', specialist: 'anton' });
 	});
 
 	test('specialist selection persists immediately and stale composer preference changes are ignored', async () => {

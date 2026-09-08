@@ -73,7 +73,7 @@ export class CouncilService {
 					dirty = true;
 				} }), cancelled]);
 				turnController.signal.throwIfAborted();
-				result.answer = parseCouncilAnswer(result.text, report.snapshot.files); result.status = 'completed';
+				result.answer = parseCouncilAnswer(result.text, report.snapshot.files, report.snapshot.patch); result.status = 'completed';
 			} catch (error) { result.status = controller.signal.aborted ? 'cancelled' : 'failed'; result.error = error instanceof Error ? error.message : String(error); }
 			finally {
 				clearTimeout(timeout); removeAbort(); controller.signal.removeEventListener('abort', abort);

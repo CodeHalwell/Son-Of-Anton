@@ -11,6 +11,10 @@ export class RoutedAgent extends BaseAgent {
 	override getAcpInstructions(): string { return this.native.getAcpInstructions(); }
 	override interpretAcpResult(result: SubtaskResult): SubtaskResult { return this.native.interpretAcpResult(result); }
 
+	override getExecutionCapabilities(model: ModelId = this.defaultModel) {
+		return (this.route(model) ?? this.native).getExecutionCapabilities(model);
+	}
+
 	override async execute(context: AgentContext): Promise<SubtaskResult> {
 		try { return await (this.route(this.resolveModel(context.orchestratorModelHint)) ?? this.native).execute(context); }
 		catch (error) { return { success: false, changes: [], summary: error instanceof Error ? error.message : 'Specialist routing failed', tokenUsage: { inputTokens: 0, outputTokens: 0, cachedTokens: 0, naiveInputTokens: 0, accounting: 'unavailable' } }; }

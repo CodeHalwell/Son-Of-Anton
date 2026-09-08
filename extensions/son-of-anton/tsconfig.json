@@ -20,6 +20,7 @@
 		"../types/lib.textEncoder.d.ts"
 	],
 	"exclude": [
-		"src/board/webview/**/*"
+		"src/board/webview/**/*",
+		"src/chat/webview/**/*"
 	]
 }

@@ -123,6 +123,7 @@ export interface ChatRuntimeRequestMessage {
 
 export type WebviewToHostMessage = (
 	| { readonly type: 'review-proposal' | 'cancel-task'; readonly taskId: string }
+	| { readonly type: 'set-dependencies'; readonly taskId: string; readonly dependencies: string[]; readonly expectedRevision: string }
 	| DispatchMessage
 	| ReassignMessage
 	| RerunMessage
@@ -144,6 +145,7 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
 	switch (message.type) {
 		case 'refresh': case 'open-chat': case 'review-council': return true;
 		case 'review-proposal': case 'cancel-task': case 'dispatch': case 'rerun': case 'reveal': return text('taskId');
+		case 'set-dependencies': return text('taskId') && text('expectedRevision') && String(message.expectedRevision).length <= 1_000_000 && Array.isArray(message.dependencies) && message.dependencies.length <= 1000 && message.dependencies.every(id => typeof id === 'string' && id.length > 0 && id.length <= 500);
 		case 'reassign': return text('taskId') && text('newAssignee');
 		case 'cancel-chat': return text('requestId');
 		case 'board-action':

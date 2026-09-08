@@ -36,6 +36,7 @@ export class TestWriterAgent extends BaseAgent {
 				systemPrompt,
 				userMessage,
 				context.onToken,
+				{ images: context.images, signal: context.signal },
 			);
 
 			tokenUsage.naiveInputTokens = context.scopeFiles.length * 5000;

@@ -5,7 +5,8 @@
 
 import * as vscode from 'vscode';
 import { AgentStack } from 'son-of-anton-core/agents/AgentStackFactory';
-import { AcpAgent } from 'son-of-anton-core/agents/AcpAgent';
+import type { ChatTurnOptions } from 'son-of-anton-core/agents/BaseAgent';
+import type { AcpCapabilities } from 'son-of-anton-core/acp/protocol';
 import { AgentHandle } from 'son-of-anton-core/agents/types';
 import type { ModelId } from 'son-of-anton-core/llm/LlmClient';
 import { AgentEvent } from './agentEvents';
@@ -20,6 +21,9 @@ import { TrustedFolders } from '../security/TrustedFolders';
  * follows the normal plan-then-execute path.
  */
 export interface RunOrchestratorOptions {
+	readonly maxToolCalls?: number;
+	readonly maxRuntimeMs?: number;
+	readonly images?: ChatTurnOptions['images'];
 	readonly mode?: ChatMode;
 	/**
 	 * Active conversation id. Forwarded into `onDidEmitEvent` so non-chat
@@ -98,7 +102,17 @@ export class AgentBridge {
 
 	/** ACP adapters do not guarantee token or billing reports to the host. */
 	isAcpAgent(specialistId: string): boolean {
-		return this.stack.specialists.get(specialistId as AgentHandle) instanceof AcpAgent;
+		return this.getCapabilities(specialistId).transport === 'acp';
+	}
+
+	/** Reports negotiated capabilities without starting a process or reading provider credentials. */
+	getCapabilities(specialistId: string, model?: ModelId): AcpCapabilities {
+		try {
+			const agent = specialistId === 'anton' ? this.stack.orchestrator : this.stack.specialists.get(specialistId as AgentHandle);
+			return agent?.getExecutionCapabilities(model) ?? { transport: 'native', images: 'unknown', plan: 'unknown', resume: 'unknown', metering: 'unavailable' };
+		} catch (error) {
+			return { transport: 'acp', images: 'unknown', plan: 'unknown', resume: 'unknown', metering: 'unavailable', error: error instanceof Error ? error.message : String(error) };
+		}
 	}
 
 	constructor(
@@ -225,6 +239,8 @@ export class AgentBridge {
 			opts?.workspaceContextSnapshot,
 			opts?.conversationId,
 			true, // emit follow-up suggestions for IDE — the webview strips the sentinel
+			opts?.images,
+			{ maxToolCalls: opts?.maxToolCalls, maxRuntimeMs: opts?.maxRuntimeMs },
 		);
 		const chatContext = createShimChatContext();
 
@@ -292,6 +308,12 @@ export class AgentBridge {
 		return this.stack.orchestrator.getActivePlan();
 	}
 
+	async forgetConversation(id: string): Promise<void> { await this.stack.acpRuntime?.forgetConversation(id); }
+
+	updatePlanDependencies(conversationId: string, taskId: string, dependencies: readonly string[], expectedTaskIds: readonly string[]): void {
+		this.stack.orchestrator.updatePlanDependencies(conversationId, taskId, dependencies, expectedTaskIds);
+	}
+
 	/** An isolated task gets fresh agent state and tools rooted in its retained worktree. */
 	async runIsolatedSpecialist(root: string, handle: AgentHandle, prompt: string, emit: (event: AgentEvent) => void, token: vscode.CancellationToken): Promise<void> {
 		if (!await this.ensureWorkspaceTrust()) { throw new Error('Workspace trust is required'); }
@@ -316,6 +338,7 @@ export class AgentBridge {
 		model?: ModelId,
 		workspaceContextSnapshot?: string,
 		conversationId?: string,
+		options?: Pick<ChatTurnOptions, 'mode' | 'images' | 'maxToolCalls' | 'maxRuntimeMs' | 'onUsage' | 'onRecovery'>,
 	): Promise<void> {
 		const agent = this.stack.specialists.get(handle);
 		if (!agent) {
@@ -335,6 +358,7 @@ export class AgentBridge {
 				},
 				cancellation,
 				{
+					...options,
 					modelOverride: model,
 					workspaceContextSnapshot,
 					emitFollowupSuggestions: true,
@@ -435,9 +459,13 @@ function createShimChatRequest(
 	workspaceContextSnapshot?: string,
 	conversationId?: string,
 	emitFollowupSuggestions?: boolean,
+	images?: ChatTurnOptions['images'],
+	budgets?: Pick<ChatTurnOptions, 'maxToolCalls' | 'maxRuntimeMs'>,
 ): vscode.ChatRequest {
 	const request = {
 		prompt: userMessage,
+		...budgets,
+		images,
 		command,
 		references: [] as readonly vscode.ChatPromptReference[],
 		toolReferences: [] as readonly vscode.ChatLanguageModelToolReference[],

@@ -242,6 +242,7 @@ export class ModerniserAgent extends BaseAgent {
 			systemPrompt,
 			phasePrompt,
 			context.onToken,
+			{ images: context.images, signal: context.signal },
 		);
 
 		return {

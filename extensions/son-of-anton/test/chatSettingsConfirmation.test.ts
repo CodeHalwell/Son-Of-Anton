@@ -28,7 +28,7 @@ suite('Native settings confirmations', () => {
 			vscode.workspace.getConfiguration = (() => ({
 				get: (key: string) => key === 'mcp.servers' ? servers : undefined,
 				update: async (key: string, value: typeof servers) => { updates.push(key); if (key === 'mcp.servers') { remaining = value; } },
-			})) as typeof vscode.workspace.getConfiguration;
+			})) as unknown as typeof vscode.workspace.getConfiguration;
 			const session = Object.assign(Object.create(ChatSession.prototype), {
 				webview: { postMessage: () => Promise.resolve(true) },
 				postSettingsState: () => {}, postMcpServersState: async () => {},

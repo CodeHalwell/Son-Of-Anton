@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -11,6 +15,8 @@ import {
   EngineSession,
 } from './engine.js';
 import { TOOLS } from './tools.js';
+import { z } from 'zod';
+import { EditorOverlay, dependencyImpact } from './editorOverlay.js';
 
 interface CliArgs {
   db: string;
@@ -101,6 +107,8 @@ async function dispatch(
   engine: CodegraphEngine,
   name: string,
   args: Record<string, unknown>,
+  overlay: EditorOverlay,
+  semanticReady: boolean,
 ): Promise<unknown> {
   switch (name) {
     case 'semantic_search': {
@@ -108,14 +116,14 @@ async function dispatch(
       const limit = optionalNumber(args, 'limit', 10);
       if (args.scope !== undefined && (!Array.isArray(args.scope) || !args.scope.every(value => typeof value === 'string'))) { throw new ToolInputError('scope must be an array of paths'); }
       const scope = args.scope as string[] | undefined;
-      return await engine.semanticSearch(query, limit, scope);
+      return overlay.search(query, semanticReady ? await engine.semanticSearch(query, Math.min(100, limit + 32), scope) : [], limit, scope);
     }
     case 'file_summary':
-      return engine.fileSummary(requireString(args, 'path'));
+      return overlay.fileSummary(engine, requireString(args, 'path'));
     case 'symbol_lookup': {
       const query = requireString(args, 'query');
       const limit = optionalNumber(args, 'limit', 20);
-      return engine.symbolLookup(query, limit);
+      return overlay.symbolLookup(engine, query, limit);
     }
     case 'dependency_traversal': {
       const path = requireString(args, 'path');
@@ -125,7 +133,7 @@ async function dispatch(
     case 'impact_analysis': {
       const path = requireString(args, 'path');
       const depth = optionalNumber(args, 'depth', 3);
-      return engine.impactAnalysis(path, depth);
+      return args.details === true ? { ...dependencyImpact(engine, path, depth), unsavedDocuments: overlay.status } : engine.impactAnalysis(path, depth);
     }
     case 'find_references':
       return engine.findReferences(requireString(args, 'name'));
@@ -137,24 +145,29 @@ async function dispatch(
 async function main() {
 	const args = parseArgs(process.argv.slice(2));
 	if (args.backend !== 'embedded') { throw new Error('Use the dedicated Docker MCP gateway for the Docker backend.'); }
+	const overlay = new EditorOverlay(args.indexRoot ?? process.cwd());
 	const server = new Server({ name: 'codegraph', version: '0.1.0' }, { capabilities: { tools: { listChanged: true } } });
 	const session = new EngineSession({ dbPath: args.db, indexRoot: args.indexRoot, embedder: args.embedder }, status => {
 		console.error(`[codegraph-status] ${JSON.stringify(status)}`);
 		void server.notification({ method: 'notifications/tools/list_changed' }).catch(() => {});
 	});
+	server.setNotificationHandler(z.object({ method: z.literal('notifications/son-of-anton/editor-overlay'), params: z.object({ workspace: z.string(), revision: z.number().int().nonnegative(), documents: z.array(z.object({ path: z.string(), version: z.number().int().nonnegative(), language: z.string(), text: z.string().max(256 * 1024), outlineAvailable: z.boolean(), symbols: z.array(z.object({ name: z.string(), kind: z.string(), start: z.number().int(), end: z.number().int() })).max(1000) })).max(32) }) }), async notification => {
+		const hadDocuments = overlay.size > 0;
+		if (overlay.apply(notification.params) && hadDocuments !== (overlay.size > 0)) { await server.notification({ method: 'notifications/tools/list_changed' }); }
+	});
 	const statusTool = { name: 'codegraph_status', description: 'Read graph indexing, semantic search and watcher readiness.', inputSchema: { type: 'object' as const, properties: {} }, annotations: { readOnlyHint: true, openWorldHint: false } };
 	server.setRequestHandler(ListToolsRequestSchema, async () => ({
-		tools: [statusTool, ...(session.status.structural ? TOOLS.filter(tool => tool.name !== 'semantic_search' || session.status.semantic === 'ready').map(tool => ({ ...tool, annotations: { readOnlyHint: true, openWorldHint: false } })) : [])],
+		tools: [statusTool, ...(session.status.structural ? TOOLS.filter(tool => tool.name !== 'semantic_search' || (session.status.semantic === 'ready' || overlay.size > 0)).map(tool => ({ ...tool, annotations: { readOnlyHint: true, openWorldHint: false } })) : [])],
 	}));
 	server.setRequestHandler(CallToolRequestSchema, async req => {
 		const { name, arguments: inputs = {} } = req.params;
 		try {
 			let result: unknown;
-			if (name === 'codegraph_status') { result = session.status; }
+			if (name === 'codegraph_status') { result = { ...session.status, editorOverlay: overlay.status }; }
 			else {
 				if (!session.engine || !session.status.structural) { throw new Error(session.status.reason || 'Code graph is still indexing. Check codegraph_status.'); }
-				if (name === 'semantic_search' && session.status.semantic !== 'ready') { throw new Error(`Semantic search is ${session.status.semantic}. Configure an embedder and check codegraph_status.`); }
-				result = await dispatch(session.engine, name, inputs);
+				if (name === 'semantic_search' && session.status.semantic !== 'ready' && overlay.size === 0) { throw new Error(`Semantic search is ${session.status.semantic}. Configure an embedder and check codegraph_status.`); }
+				result = await dispatch(session.engine, name, inputs, overlay, session.status.semantic === 'ready');
 			}
 			return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
 		} catch (error) {

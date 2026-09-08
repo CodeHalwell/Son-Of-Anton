@@ -104,6 +104,6 @@ if (process.platform === 'darwin') {
 	finally { await rm(staging, { recursive: true, force: true }); }
 }
 const files = await Promise.all(assets.map(async name => { const bytes = await readFile(path.join(output, name)); return { name, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') }; }));
-await writeFile(path.join(output, 'manifest.json'), JSON.stringify({ version: 1, product: product.nameLong, ideVersion: pkg.version, commit: packagedProduct.commit, target, createdAt: new Date().toISOString(), signing: process.platform === 'darwin' ? process.env.MACOS_SIGNING_IDENTITY ? 'developer-id' : 'ad-hoc' : process.platform === 'win32' && process.env.WINDOWS_SIGNING_CERT_BASE64 ? 'authenticode' : 'unsigned', files }, null, 2) + '\n');
+await writeFile(path.join(output, 'manifest.json'), JSON.stringify({ version: 1, product: product.nameLong, ideVersion: pkg.version, commit: packagedProduct.commit, target, createdAt: new Date().toISOString(), signing: process.platform === 'darwin' ? process.env.MACOS_SIGNING_IDENTITY ? process.env.MACOS_NOTARY_KEY_BASE64 ? 'developer-id-notarized' : 'developer-id' : 'ad-hoc' : process.platform === 'win32' && process.env.WINDOWS_SIGNING_CERT_BASE64 ? 'authenticode' : 'unsigned', files }, null, 2) + '\n');
 await writeFile(path.join(output, 'SHA256SUMS.txt'), files.map(file => `${file.sha256}  ${file.name}\n`).join(''));
 console.log(`IDE installers: ${output}`);

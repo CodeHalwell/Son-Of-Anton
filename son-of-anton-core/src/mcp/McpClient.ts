@@ -176,6 +176,15 @@ export class McpClient {
 		return this.cachedListing ?? [];
 	}
 
+	/** Host-only notifications never initialize a server or expose an agent-callable tool. */
+	async notifyServer(server: string, method: string, params: Record<string, unknown>, expectedCommand?: string): Promise<boolean> {
+		if (this.disposed || !method.startsWith('notifications/son-of-anton/')) { return false; }
+		const active = this.connections.get(server);
+		if (!active || active.connection.state !== 'ready' || active.config.url || (expectedCommand && active.config.command !== expectedCommand)) { return false; }
+		await active.connection.notify(method, params);
+		return true;
+	}
+
 	async callTool(call: McpToolCall): Promise<McpToolResult> {
 		call.signal?.throwIfAborted();
 		await this.ensureInitialised();
@@ -373,7 +382,7 @@ export class McpClient {
 		if (this.disposed) { return; }
 		const active = [...this.connections.values()].map(a => ({
 			name: a.config.name,
-			signature: a.signature,
+			signature: a.connection.state === 'ready' ? a.signature : `${a.signature}:disconnected`,
 		}));
 		const delta = diffServerConfigs(active, next);
 

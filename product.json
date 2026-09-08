@@ -55,10 +55,22 @@
 		"termsStatementUrl": "",
 		"privacyStatementUrl": "",
 		"provider": {
-			"default": { "id": "", "name": "" },
-			"enterprise": { "id": "", "name": "" },
-			"google": { "id": "", "name": "" },
-			"apple": { "id": "", "name": "" }
+			"default": {
+				"id": "",
+				"name": ""
+			},
+			"enterprise": {
+				"id": "",
+				"name": ""
+			},
+			"google": {
+				"id": "",
+				"name": ""
+			},
+			"apple": {
+				"id": "",
+				"name": ""
+			}
 		},
 		"providerExtensionId": "",
 		"providerUriSetting": "",
@@ -79,5 +91,10 @@
 		"completionsEnablementSetting": "",
 		"nextEditSuggestionsSetting": ""
 	},
-	"extensionsGallery": null
+	"extensionsGallery": {
+		"serviceUrl": "https://open-vsx.org/vscode/gallery",
+		"itemUrl": "https://open-vsx.org/vscode/item",
+		"resourceUrlTemplate": "https://open-vsx.org/vscode/unpkg/{publisher}/{name}/{version}/{path}",
+		"extensionUrlTemplate": "https://open-vsx.org/vscode/gallery/{publisher}/{name}/latest"
+	}
 }

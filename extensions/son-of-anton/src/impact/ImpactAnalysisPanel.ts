@@ -15,6 +15,7 @@
  */
 
 import * as vscode from 'vscode';
+import * as path from 'node:path';
 import { randomBytes } from 'crypto';
 
 export interface ImpactNode {
@@ -22,6 +23,7 @@ export interface ImpactNode {
 	label: string;
 	filePath: string;
 	symbolName?: string;
+	line?: number;
 	type: 'direct' | 'transitive' | 'test' | 'documentation';
 	depth: number;
 	signature?: string;
@@ -36,6 +38,8 @@ export interface ImpactEdge {
 export interface ImpactAnalysisData {
 	/** Embedded graph returns file dependencies without caller depth or test coverage. */
 	fileBased?: boolean;
+	evidence?: string;
+	truncated?: boolean;
 	/** The symbol being analyzed */
 	target: {
 		name: string;
@@ -55,6 +59,7 @@ export interface ImpactAnalysisData {
 export class ImpactAnalysisPanel {
 	private static currentPanel: ImpactAnalysisPanel | undefined;
 	private readonly panel: vscode.WebviewPanel;
+	private navigation = new Map<string, number | undefined>();
 	private disposables: vscode.Disposable[] = [];
 
 	private constructor(
@@ -102,17 +107,21 @@ export class ImpactAnalysisPanel {
 	 * Update the panel with new impact analysis data.
 	 */
 	update(data: ImpactAnalysisData): void {
+		const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		data.nodes = data.nodes.map(node => ({ ...node, filePath: path.isAbsolute(node.filePath) ? node.filePath : root ? path.resolve(root, node.filePath) : '' }));
+		this.navigation = new Map(data.nodes.filter(node => node.filePath).map(node => [node.filePath, node.line]));
 		this.panel.webview.html = this.getHtml(data);
 	}
 
 	private handleMessage(message: { command: string; filePath?: string; line?: number }): void {
 		switch (message.command) {
 			case 'navigateToFile':
-				if (message.filePath) {
+				if (message.filePath && this.navigation.has(message.filePath)) {
 					const uri = vscode.Uri.file(message.filePath);
 					const options: vscode.TextDocumentShowOptions = {};
-					if (message.line) {
-						options.selection = new vscode.Range(message.line - 1, 0, message.line - 1, 0);
+					const line = this.navigation.get(message.filePath);
+					if (line) {
+						options.selection = new vscode.Range(line - 1, 0, line - 1, 0);
 					}
 					vscode.window.showTextDocument(uri, options);
 				}
@@ -279,7 +288,8 @@ export class ImpactAnalysisPanel {
 		<h2>Impact Analysis</h2>
 		<div class="target">${escapeHtml(data.target.name)} — ${escapeHtml(data.target.filePath)}</div>
 	</div>
-	${data.fileBased ? `<p>${escapeHtml(vscode.l10n.t('File dependencies within three levels. Caller depth, test coverage, and documentation links are not supplied by this backend.'))}</p>` : ''}
+	${data.evidence ? `<p>${escapeHtml(data.evidence)}</p>` : data.fileBased ? `<p>${escapeHtml(vscode.l10n.t('File dependencies within three levels. Caller depth, test coverage, and documentation links are not supplied by this backend.'))}</p>` : ''}
+	${data.truncated ? `<p>${escapeHtml(vscode.l10n.t('Results reached the traversal or time limit; additional callers may exist.'))}</p>` : ''}
 	<div class="summary">
 		<div class="summary-item">
 			<div class="summary-dot" style="background: #e74c3c"></div>

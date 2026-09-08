@@ -1,3 +1,7 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 
 /**
@@ -10,7 +14,7 @@ export const TOOLS: Tool[] = [
   {
     name: 'semantic_search',
     description:
-      'Semantic search over indexed source symbols using vector embeddings. Returns top-K matches with code snippets.',
+      'Search saved symbols using configured embeddings and unsaved editor symbols using local text matching. Each unsaved hit is labelled with its document version and retrieval method.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -73,11 +77,12 @@ export const TOOLS: Tool[] = [
   {
     name: 'impact_analysis',
     description:
-      'Reverse traversal — which files would be affected if this file changed.',
+      'Reverse traversal over persisted file dependencies. Set details to return evidence paths; unsaved dependency changes are not indexed.',
     inputSchema: {
       type: 'object',
       properties: {
         path: { type: 'string' },
+        details: { type: 'boolean', description: 'Return dependency paths and overlay freshness instead of a flat file list.' },
         depth: { type: 'number', default: 3 },
       },
       required: ['path'],

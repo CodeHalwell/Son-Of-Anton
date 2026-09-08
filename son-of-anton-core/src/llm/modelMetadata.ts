@@ -21,6 +21,8 @@ import type { ModelId } from './LlmClient';
 export type ModelCapability = 'text' | 'vision' | 'tools' | 'reasoning' | 'audio';
 
 export interface ModelInfo {
+	readonly discovered?: boolean;
+	readonly pricingStatus?: 'reported' | 'unknown';
 	readonly contextWindow: number;
 	readonly maxOutputTokens: number;
 	readonly capabilities: ReadonlyArray<ModelCapability>;

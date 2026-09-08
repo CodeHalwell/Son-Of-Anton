@@ -12,6 +12,8 @@ export interface AcpAgentDefinition {
 	env?: Record<string, string>;
 	/** Explicitly chosen from the agent's advertised authentication methods. */
 	authMethodId?: string;
+	/** Selected only from the session’s advertised model IDs. */
+	modelId?: string;
 }
 export interface AcpMcpServer {
 	name: string;
@@ -45,7 +47,37 @@ export interface AcpPermissionRequest {
 export type AcpPermissionResult = { outcome: { outcome: 'cancelled' } | { outcome: 'selected'; optionId: string } };
 export type AcpPermissionHandler = (request: AcpPermissionRequest, signal: AbortSignal) => Promise<AcpPermissionResult>;
 export type AcpStopReason = 'end_turn' | 'cancelled' | 'refusal' | 'max_tokens' | 'max_turn_requests';
+export interface AcpImage { data: string; mimeType: string }
+export interface AcpCapabilities {
+	transport: 'native' | 'acp';
+	images: boolean | 'unknown';
+	plan: boolean | 'unknown';
+	resume: boolean | 'unknown';
+	metering: 'estimated' | 'unavailable' | 'reported';
+	error?: string;
+	models?: Array<{ id: string; name: string }>;
+}
+export interface AcpUsage {
+	/** These are context occupancy values, not billed input/output token counts. */
+	contextTokens?: number;
+	contextWindow?: number;
+	/** Adapter-reported cumulative session cost. Never treated as a subscription invoice. */
+	cost?: { amount: number; currency: string };
+}
 export interface AcpPromptResult { stopReason: AcpStopReason }
+
+/** Validate before spawning an adapter; an invalid attachment must never silently disappear. */
+export function validateImages(images: readonly AcpImage[] = []): void {
+	if (images.length > 10) { throw new Error('A turn supports at most 10 images'); }
+	let bytes = 0;
+	for (const image of images) {
+		if (!/^image\/(png|jpeg|webp|gif)$/.test(image.mimeType) || !image.data || image.data.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(image.data)) {
+			throw new Error('Image attachments require valid base64 PNG, JPEG, WebP or GIF content');
+		}
+		bytes += Buffer.byteLength(image.data);
+	}
+	if (bytes > 24 * 1024 * 1024) { throw new Error('Image attachments exceed the 24 MiB encoded turn limit'); }
+}
 export class AcpError extends Error {
 	constructor(readonly code: number, message: string, readonly data?: unknown) { super(message); this.name = 'AcpError'; }
 }
@@ -64,6 +96,9 @@ export function validateAgent(value: unknown): asserts value is AcpAgentDefiniti
 	}
 	if (value.env !== undefined && (!object(value.env) || !Object.values(value.env).every(item => typeof item === 'string'))) {
 		throw new Error(`ACP agent ${value.id}: env must map names to strings`);
+	}
+	if (value.modelId !== undefined && (typeof value.modelId !== 'string' || !value.modelId.trim() || value.modelId.length > 512 || /[\u0000-\u001f\u007f]/.test(value.modelId))) {
+		throw new Error(`ACP agent ${value.id}: modelId must be a non-empty advertised model ID`);
 	}
 	if (value.authMethodId !== undefined && typeof value.authMethodId !== 'string') {
 		throw new Error(`ACP agent ${value.id}: authMethodId must be a string`);

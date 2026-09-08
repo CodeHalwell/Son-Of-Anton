@@ -12,6 +12,7 @@
 import * as vscode from 'vscode';
 import { McpClient } from 'son-of-anton-core/mcp/McpClient';
 import { ImpactAnalysisPanel, ImpactAnalysisData, ImpactNode, ImpactEdge } from './ImpactAnalysisPanel';
+import { languageImpact, fileImpactPaths } from './LanguageImpact';
 
 export function registerImpactAnalysisCommand(
 	context: vscode.ExtensionContext,
@@ -45,7 +46,8 @@ export function registerImpactAnalysisCommand(
 				return;
 			}
 
-			const filePath = vscode.workspace.asRelativePath(document.uri);
+			const filePath = document.uri.fsPath;
+			const version = document.version;
 
 			// Show progress while querying
 			await vscode.window.withProgress(
@@ -56,17 +58,22 @@ export function registerImpactAnalysisCommand(
 				},
 				async () => {
 					try {
+						const languageData = await languageImpact(document, position);
+						if (document.version !== version) { throw new Error(vscode.l10n.t('The document changed during analysis. Run impact analysis again.')); }
+						if (languageData) { ImpactAnalysisPanel.createOrShow(context.extensionUri).update(languageData); return; }
 						const tool = (await mcpClient.listTools()).find(tool => tool.server === 'code-graph' && tool.tool === 'impact_analysis');
 						const fileBased = !!tool?.inputSchema && 'properties' in tool.inputSchema && !!tool.inputSchema.properties && typeof tool.inputSchema.properties === 'object' && 'path' in tool.inputSchema.properties;
 						const result = await mcpClient.callTool({
 							server: 'code-graph',
 							tool: 'impact_analysis',
-							inputs: fileBased ? { path: filePath, depth: 3 } : { symbol: symbolName, file: filePath },
+							inputs: fileBased ? { path: filePath, depth: 3, details: true } : { symbol: symbolName, file: filePath },
 						});
 
 						if (result.isError) { throw new Error(result.content); }
 						const rawData = JSON.parse(result.content);
-						const data = transformToImpactData(symbolName, filePath, rawData);
+						const data = rawData && Array.isArray(rawData.paths) && rawData.paths.every((chain: unknown) => Array.isArray(chain) && chain.every(file => typeof file === 'string'))
+							? fileImpactPaths(filePath, rawData.paths, rawData.truncated === true)
+							: transformToImpactData(symbolName, filePath, rawData);
 
 						const panel = ImpactAnalysisPanel.createOrShow(context.extensionUri);
 						panel.update(data);
