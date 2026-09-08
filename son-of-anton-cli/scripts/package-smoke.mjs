@@ -1,11 +1,12 @@
 /* Copyright (c) Microsoft Corporation. Licensed under the MIT License. */
-import { mkdtempSync, mkdirSync, copyFileSync, renameSync, rmSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, copyFileSync, rmSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync, spawn } from 'node:child_process';
 import crossSpawn from 'cross-spawn';
 import assert from 'node:assert/strict';
+import { renameAfterExit } from './lib/file-operations.mjs';
 export async function packageSmoke(source) {
 	const directory = mkdtempSync(join(tmpdir(), 'sota-package-smoke-'));
 	try {
@@ -55,7 +56,7 @@ export async function packageSmoke(source) {
 			});
 			child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {} } }) + '\n');
 		});
-		const old = binary; binary = join(install, process.platform === 'win32' ? 'relocated.exe' : 'relocated'); renameSync(old, binary); run(['--version']);
+		const old = binary; binary = join(install, process.platform === 'win32' ? 'relocated.exe' : 'relocated'); await renameAfterExit(old, binary); run(['--version']);
 		verifyVendorLaunchers(originalCache);
 		for (const cache of readdirSync(env.SOTA_CACHE_DIR)) {
 			if (cache.startsWith('.')) { continue; }
@@ -63,6 +64,6 @@ export async function packageSmoke(source) {
 			for (const entry of readdirSync(bin)) { if (entry === 'claude' || entry === 'claude.cmd' || entry === 'codex' || entry === 'codex.cmd') { assert.ok(!readFileSync(join(bin, entry), 'utf8').includes('__SOTA_BIN__')); } }
 		}
 		process.stdout.write('Packaged install, help, CJS/ESM trampoline, bundled Claude/Codex launchers, ACP session, and relocation checks passed.\n');
-	} finally { rmSync(directory, { recursive: true, force: true }); }
+	} finally { rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); }
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) { await packageSmoke(resolve(process.argv[2])); }

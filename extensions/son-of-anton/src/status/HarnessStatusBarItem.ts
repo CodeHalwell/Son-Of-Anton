@@ -15,8 +15,8 @@ const STATUS_COMMAND = 'sota.harness.openMenu';
 /**
  * Per-handle ↔ default model mapping for the pinned-vs-default check. Must
  * stay in lockstep with `son-of-anton-core/src/agents/AgentStackFactory.ts`'s
- * AGENT_CONFIGS — a setting matching the default value is treated as "not
- * pinned" because reverting an override to the default has no effect.
+ * AGENT_CONFIGS — every non-empty model override counts as pinned,
+ * including one matching the default, because it prevents provider inheritance.
  */
 const DEFAULT_MODELS: ReadonlyArray<{ handle: string; model: string }> = [
 	{ handle: 'anton', model: 'opus' },
@@ -36,6 +36,7 @@ interface HarnessSnapshot {
 	codexConfigured: boolean;
 	claudeInstalled: boolean;
 	claudeConfigured: boolean;
+	acpSpecialists: ReadonlyArray<{ handle: string; adapter: string; configured: boolean }>;
 	pinnedSpecialists: ReadonlyArray<{ handle: string; model: string; defaultModel: string }>;
 }
 
@@ -78,7 +79,7 @@ export class HarnessStatusBarItem implements vscode.Disposable {
 		// directory probe still re-runs on every click.
 		this.disposables.push(
 			vscode.workspace.onDidChangeConfiguration(e => {
-				if (e.affectsConfiguration('sota.agents')) {
+				if (e.affectsConfiguration('sota.agents') || e.affectsConfiguration('sota.acp')) {
 					this.refreshSnapshot();
 					this.render();
 				}
@@ -90,9 +91,8 @@ export class HarnessStatusBarItem implements vscode.Disposable {
 		const home = os.homedir();
 		const codexInstalled = isCodexAvailable();
 		const claudeInstalled = isClaudeCodeAvailable();
-		// Sign-in heuristic: the official CLIs persist tokens under their
-		// home-directory dotfiles. Directory presence is a strong signal
-		// without parsing token formats.
+		// Directory presence indicates configuration only; it cannot verify
+		// whether the CLI has a valid authenticated session.
 		const codexConfigured = codexInstalled && fs.existsSync(path.join(home, '.codex'));
 		const claudeConfigured = claudeInstalled && fs.existsSync(path.join(home, '.claude'));
 
@@ -101,14 +101,22 @@ export class HarnessStatusBarItem implements vscode.Disposable {
 			.map(({ handle, model: defaultModel }) => {
 				const override = cfg.get<string>(`sota.agents.${handle}.model`);
 				const trimmed = typeof override === 'string' ? override.trim() : '';
-				if (!trimmed || trimmed === defaultModel) {
+				if (!trimmed) {
 					return undefined;
 				}
 				return { handle, model: trimmed, defaultModel };
 			})
 			.filter((entry): entry is { handle: string; model: string; defaultModel: string } => entry !== undefined);
 
+		const definitions = cfg.get<Array<{ id: string; command: string }>>('sota.acp.agents', []);
+		const acpSpecialists = DEFAULT_MODELS.filter(entry => entry.handle !== 'anton').flatMap(({ handle, model }) => {
+			const effective = cfg.get<string>(`sota.agents.${handle}.model`)?.trim() || model;
+			const adapter = cfg.get<string>(`sota.agents.${handle}.acpAgent`)?.trim() || (effective.startsWith('claude-code-') ? 'claude-acp' : '');
+			return adapter ? [{ handle, adapter, configured: Array.isArray(definitions) && definitions.some(definition => definition?.id === adapter && typeof definition.command === 'string' && Boolean(definition.command.trim())) }] : [];
+		});
+
 		this.snapshot = {
+			acpSpecialists,
 			codexInstalled,
 			codexConfigured,
 			claudeInstalled,
@@ -121,12 +129,14 @@ export class HarnessStatusBarItem implements vscode.Disposable {
 		if (!this.snapshot) {
 			return;
 		}
-		const { codexConfigured, claudeConfigured, pinnedSpecialists } = this.snapshot;
+		const { codexConfigured, claudeConfigured, pinnedSpecialists, acpSpecialists } = this.snapshot;
 		// Bullet glyphs: filled when signed in / has overrides, hollow when
 		// not. Keeps the bar readable at a glance without colour coding.
 		const codexGlyph = codexConfigured ? '●' : '○';
 		const claudeGlyph = claudeConfigured ? '●' : '○';
-		const pinSegment = pinnedSpecialists.length > 0
+		const pinSegment = acpSpecialists.length > 0
+			? vscode.l10n.t('{0} ACP routes', acpSpecialists.length)
+			: pinnedSpecialists.length > 0
 			? `${pinnedSpecialists.length} pinned`
 			: 'default models';
 		this.item.text = `$(rocket) Codex ${codexGlyph} · Claude ${claudeGlyph} · ${pinSegment}`;
@@ -136,9 +146,15 @@ export class HarnessStatusBarItem implements vscode.Disposable {
 		lines.push(`Codex CLI: ${this.describeAuth(this.snapshot.codexInstalled, codexConfigured)}`);
 		lines.push(`Claude CLI: ${this.describeAuth(this.snapshot.claudeInstalled, claudeConfigured)}`);
 		lines.push('');
-		if (pinnedSpecialists.length === 0) {
-			lines.push('All specialists using default models.');
-		} else {
+		if (acpSpecialists.length) {
+			lines.push(vscode.l10n.t('External agent routes:'));
+			for (const entry of acpSpecialists) {
+				lines.push(vscode.l10n.t('@{0} → {1}: {2}', entry.handle, entry.adapter, entry.configured ? vscode.l10n.t('configured') : vscode.l10n.t('adapter missing')));
+			}
+		}
+		if (pinnedSpecialists.length === 0 && acpSpecialists.length === 0) {
+			lines.push(vscode.l10n.t('Using default models. Claude Code turns use the configured Claude ACP adapter.'));
+		} else if (pinnedSpecialists.length) {
 			lines.push(`Pinned specialists (${pinnedSpecialists.length}):`);
 			for (const entry of pinnedSpecialists) {
 				lines.push(`  @${entry.handle} → ${entry.model} (default: ${entry.defaultModel})`);
@@ -165,10 +181,10 @@ export class HarnessStatusBarItem implements vscode.Disposable {
 		if (!this.snapshot) {
 			return;
 		}
-		const { codexInstalled, codexConfigured, claudeInstalled, claudeConfigured, pinnedSpecialists } = this.snapshot;
+		const { codexInstalled, codexConfigured, claudeInstalled, claudeConfigured, pinnedSpecialists, acpSpecialists } = this.snapshot;
 
 		interface PickItem extends vscode.QuickPickItem {
-			readonly id: 'sign-in-codex' | 'sign-in-claude' | 'open-specialists' | 'open-traces' | 'docs';
+			readonly id: 'sign-in-codex' | 'sign-in-claude' | 'open-specialists' | 'open-traces' | 'docs' | 'configure-acp';
 		}
 
 		const items: PickItem[] = [];
@@ -198,9 +214,12 @@ export class HarnessStatusBarItem implements vscode.Disposable {
 					? 'Opens a terminal and runs `claude login`'
 					: 'Opens docs.claude.com/quickstart',
 		});
+		items.push({ id: 'configure-acp', label: vscode.l10n.t('Configure Claude ACP'), description: vscode.l10n.t('Enable specialist tools with your Claude Code subscription') });
 		items.push({
 			id: 'open-specialists',
-			label: pinnedSpecialists.length > 0
+			label: acpSpecialists.length > 0
+				? vscode.l10n.t('$(person) Specialist Routing — {0} ACP Routes', acpSpecialists.length)
+				: pinnedSpecialists.length > 0
 				? `$(person) Specialist models — ${pinnedSpecialists.length} pinned`
 				: '$(person) Specialist models — all default',
 			description: 'Open Settings → search "sota.agents" for per-agent model overrides',
@@ -229,6 +248,9 @@ export class HarnessStatusBarItem implements vscode.Disposable {
 				break;
 			case 'sign-in-claude':
 				await vscode.commands.executeCommand('sota.signInClaude');
+				break;
+			case 'configure-acp':
+				await vscode.commands.executeCommand('sota.configureClaudeAcp');
 				break;
 			case 'open-specialists':
 				await vscode.commands.executeCommand('workbench.action.openSettings', 'sota.agents');

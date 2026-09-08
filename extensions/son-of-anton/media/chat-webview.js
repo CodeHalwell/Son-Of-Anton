@@ -511,8 +511,14 @@
 			draftStatus.hidden = !draft.text && !draft.attachments.length && !draft.mentions.length && !draft.images.length;
 			draftStatus.textContent = uiText(draft.images.length ? 'draftImages' : 'draftSaved');
 		}
-		function activateDraft(id) {
-			if (typeof id !== 'string' || !id || id === activeConversationId) return;
+		function activateDraft(id, savedModel) {
+			if (typeof id !== 'string' || !id) return;
+			if (id === activeConversationId) {
+				if (typeof savedModel === 'string' && Object.hasOwn(MODEL_METADATA_RAW, savedModel)) currentModel = savedModel;
+				updateModelLabel();
+				updateModelMenuChecks();
+				return;
+			}
 			persistDraft();
 			activeConversationId = id;
 			const draft = drafts.get(id);
@@ -521,7 +527,7 @@
 			mentions = Array.isArray(draft?.mentions) ? [...draft.mentions] : [];
 			imageAttachments = Array.isArray(draft?.images) ? [...draft.images] : [];
 			includeContext.checked = draft?.includeContext !== false;
-			currentModel = typeof draft?.model === 'string' ? draft.model : document.body.dataset.defaultModel || 'sonnet';
+			currentModel = [savedModel, draft?.model, document.body.dataset.defaultModel, 'sonnet'].find(model => typeof model === 'string' && Object.hasOwn(MODEL_METADATA_RAW, model));
 			historyIndex = -1;
 			historyDraft = '';
 			messageInput.style.height = 'auto';
@@ -856,7 +862,18 @@
 		const historySearch = document.getElementById('historySearch');
 		const historyShowMore = document.getElementById('historyShowMore');
 		let historyLimit = 50;
-		historySearch.addEventListener('input', () => { historyLimit = 50; renderHistoryPane(lastHistorySnapshot); });
+		const historySaved = vscode.getState()?.historyFilters;
+		let historyScope = historySaved?.scope === 'workspace' ? 'workspace' : 'all';
+		historySearch.value = typeof historySaved?.query === 'string' ? historySaved.query : '';
+		const historyClearFilters = document.getElementById('historyClearFilters');
+		function updateHistoryFilters() {
+			historyLimit = 50;
+			vscode.setState({ ...vscode.getState(), historyFilters: { query: historySearch.value, scope: historyScope } });
+			renderHistoryPane(lastHistorySnapshot);
+		}
+		historySearch.addEventListener('input', updateHistoryFilters);
+		document.querySelectorAll('[data-history-scope]').forEach(button => button.addEventListener('click', () => { historyScope = button.dataset.historyScope; updateHistoryFilters(); }));
+		historyClearFilters.addEventListener('click', () => { historyScope = 'all'; historySearch.value = ''; updateHistoryFilters(); historySearch.focus(); });
 		historyShowMore.addEventListener('click', () => { historyLimit += 50; renderHistoryPane(lastHistorySnapshot); });
 		function historyGroup(timestamp) {
 			const date = new Date();
@@ -877,7 +894,9 @@
 			heading.textContent = active?.title || uiText('newConversation');
 			heading.title = heading.textContent;
 			const query = historySearch.value.trim().toLocaleLowerCase();
-			const matches = conversations.filter(conversation => [conversation.title, conversation.lastSpecialist].filter(Boolean).join(' ').toLocaleLowerCase().includes(query)).sort((a, b) => b.updatedAt - a.updatedAt);
+			document.querySelectorAll('[data-history-scope]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.historyScope === historyScope)));
+			historyClearFilters.hidden = !query && historyScope === 'all';
+			const matches = conversations.filter(conversation => (historyScope === 'all' || conversation.inCurrentWorkspace || conversation.id === activeId) && [conversation.title, conversation.lastSpecialist, conversation.workspaceName].filter(Boolean).join(' ').toLocaleLowerCase().includes(query)).sort((a, b) => b.updatedAt - a.updatedAt);
 			document.getElementById('historyResults').textContent = uiText(matches.length === 1 ? 'conversationResult' : 'conversationResults', matches.length.toLocaleString());
 			document.getElementById('historyNoResults').hidden = !conversations.length || matches.length > 0;
 			historyShowMore.hidden = matches.length <= historyLimit;
@@ -923,7 +942,7 @@
 				metaEl.className = 'history-pane-row-meta';
 				const count = Number(conv.messageCount || 0);
 				const messageWord = count === 1 ? 'message' : 'messages';
-				metaEl.textContent = formatRelativeTime(conv.updatedAt) + ' · ' + count + ' ' + messageWord;
+				metaEl.textContent = [conv.workspaceName || uiText('historyWorkspaceUnknown'), formatRelativeTime(conv.updatedAt), count + ' ' + messageWord].join(' · ');
 				body.appendChild(metaEl);
 				row.appendChild(body);
 
@@ -959,7 +978,7 @@
 
 		if (historyNewBtn) {
 			historyNewBtn.addEventListener('click', () => {
-				vscode.postMessage({ type: 'runCommand', command: 'sota.newConversation' });
+				vscode.postMessage({ type: 'clearConversation' });
 			});
 		}
 		if (historyPaneList) {
@@ -2850,6 +2869,7 @@
 				const chip = document.createElement('span');
 				chip.className = 'context-chip';
 				chip.textContent = ATTACH_LABELS[id] || id;
+				if (id === 'terminal-output') { chip.title = uiText('terminalAttachmentHelp'); }
 				const remove = document.createElement('button');
 				remove.className = 'context-chip-remove';
 				remove.title = 'Remove';
@@ -2918,7 +2938,7 @@
 					displayLabel = '@url ' + trimmed;
 					titleText = mention.url;
 				} else if (mention.kind === 'terminal') {
-					titleText = 'Terminal buffer capture not yet supported \u2014 paste output manually.';
+					titleText = uiText('terminalAttachmentHelp');
 				} else if (mention.path) {
 					chip.dataset.path = mention.path;
 				}
@@ -3864,6 +3884,7 @@
 			const target = e.target.closest('.popover-item');
 			if (!target) return;
 			currentModel = target.dataset.model;
+			vscode.postMessage({ type: 'selectModel', conversationId: activeConversationId, model: currentModel });
 			persistDraft();
 			updateModelLabel();
 			updateModelMenuChecks();
@@ -4224,7 +4245,7 @@
 					updateAgentMenuChecks();
 					updateHeaderSubtitle();
 					updateComposerPlaceholder();
-					activateDraft(message.conversationId);
+					activateDraft(message.conversationId, message.lastModel);
 					setStreamingState(false);
 					flushStreamingText();
 					currentAssistantDiv = null;
@@ -4267,10 +4288,16 @@
 					}
 					updateEmptyState();
 					break;
+				case 'conversationDeleted':
+					if (typeof message.conversationId === 'string') {
+						drafts.delete(message.conversationId);
+						persistDraft();
+					}
+					break;
 				case 'conversationCleared':
 					conversationHasUnmeteredUsage = false;
 					resetEarlierHistory();
-					activateDraft(message.conversationId);
+					activateDraft(message.conversationId, message.lastModel);
 					setStreamingState(false);
 					flushStreamingText();
 					currentAssistantDiv = null;
@@ -4405,9 +4432,14 @@
 						updateComposerPlaceholder();
 					}
 					break;
+				case 'showProviderSettings':
+					applyActiveTab('settings');
+					document.getElementById('settingsProviders')?.scrollIntoView({ block: 'start' });
+					break;
 				case 'modelChange':
 					if (message.model) {
 						currentModel = message.model;
+						persistDraft();
 						updateModelLabel();
 						updateModelMenuChecks();
 					}
@@ -4868,7 +4900,7 @@
 			// to the exit code (0 + not cancelled = ok; otherwise error /
 			// cancelled). Non-shell tools fall back to the host-reported
 			// status verbatim.
-			let effectiveStatus = message.status || 'running';
+			let effectiveStatus = message.status === 'done' ? 'ok' : message.status || 'running';
 			let effectiveStatusLabel = effectiveStatus === 'ok' ? 'Ok'
 				: effectiveStatus === 'error' ? 'Error'
 				: 'Running';
@@ -9205,5 +9237,5 @@
 			});
 		}
 
-		activateDraft(document.body.dataset.conversationId);
+		activateDraft(document.body.dataset.conversationId, document.body.dataset.defaultModel);
 		vscode.postMessage({ type: 'webviewReady' });

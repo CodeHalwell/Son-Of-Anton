@@ -7,9 +7,17 @@ import * as vscode from 'vscode';
 /** Localized labels shared with the isolated chat webview. */
 export function getChatUiStrings(): Record<string, string> {
 	return {
+		captureTerminalOutput: vscode.l10n.t('Capture Terminal Output'),
+		terminalCaptureHelp: vscode.l10n.t('Attach output from the active terminal with the attachment menu or @terminal. Captures commands run after Anton starts, including output from running commands. Requires VS Code shell integration; keeps the latest lines within 16 KiB.'),
+		terminalAttachmentHelp: vscode.l10n.t('Attach the latest command and output from the active terminal when you send. Requires shell integration.'),
 		browseAcpAdapters: vscode.l10n.t('Browse ACP Adapters'),
 		reviewWithCouncil: vscode.l10n.t('Review with Council'),
 		councilHistory: vscode.l10n.t('Council History'),
+		historyScope: vscode.l10n.t('Conversation Workspace'),
+		allWorkspaces: vscode.l10n.t('All Workspaces'),
+		thisWorkspace: vscode.l10n.t('This Workspace'),
+		clearHistoryFilters: vscode.l10n.t('Clear Filters'),
+		historyWorkspaceUnknown: vscode.l10n.t('Earlier conversation'),
 		providerConfigured: vscode.l10n.t('Configured'),
 		providerUnconfigured: vscode.l10n.t('Not configured'),
 		managedByAcp: vscode.l10n.t('Managed by ACP'),

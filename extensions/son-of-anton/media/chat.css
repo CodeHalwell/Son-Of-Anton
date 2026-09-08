@@ -954,6 +954,7 @@ button {
    when populated with the new structure (a sidebar nav + a content pane). */
 .chat-settings-view-tabbed {
 	display: grid;
+	align-content: start;
 	grid-template-columns: 180px minmax(0, 1fr);
 	gap: var(--sota-pad-loose);
 	padding: var(--sota-pad-loose) 0;
@@ -4990,7 +4991,7 @@ body.vscode-high-contrast-light .chat[data-active-specialist] {
 .plan-checklist-handle {
 	flex-shrink: 0;
 	font-weight: 600;
-	color: var(--sota-fg);
+	color: var(--vscode-foreground);
 }
 
 .plan-checklist-desc {
@@ -5036,7 +5037,7 @@ body.vscode-high-contrast-light .chat[data-active-specialist] {
 	border-radius: var(--sota-radius);
 	background-color: var(--sota-card-bg);
 	font-size: 13px;
-	color: var(--sota-fg);
+	color: var(--vscode-foreground);
 	display: block;
 }
 
@@ -5064,11 +5065,11 @@ body.vscode-high-contrast-light .chat[data-active-specialist] {
 	font-weight: 600;
 	font-size: 14px;
 	margin-bottom: 6px;
-	color: var(--sota-fg);
+	color: var(--vscode-foreground);
 }
 
 .ui-block-card-body {
-	color: var(--sota-fg);
+	color: var(--vscode-foreground);
 	margin-bottom: 8px;
 	line-height: 1.45;
 }
@@ -5092,7 +5093,7 @@ body.vscode-high-contrast-light .chat[data-active-specialist] {
 	font-family: var(--vscode-font-family);
 	cursor: pointer;
 	background-color: var(--sota-card-bg);
-	color: var(--sota-fg);
+	color: var(--vscode-foreground);
 	transition: background-color 120ms ease, border-color 120ms ease;
 }
 
@@ -5280,7 +5281,7 @@ textarea.ui-block-form-input {
 }
 
 .ui-block-progress-active .ui-block-progress-label {
-	color: var(--sota-fg);
+	color: var(--vscode-foreground);
 	font-weight: 500;
 }
 
@@ -5291,7 +5292,7 @@ textarea.ui-block-form-input {
 }
 
 .ui-block-progress-done .ui-block-progress-label {
-	color: var(--sota-fg);
+	color: var(--vscode-foreground);
 	text-decoration: line-through;
 	text-decoration-color: var(--sota-fg-muted);
 }
@@ -5752,7 +5753,7 @@ textarea.ui-block-form-input {
 	background: var(--vscode-editor-background);
 	border: 1px solid color-mix(in srgb, var(--persona-accent, var(--sota-accent)) 40%, var(--sota-border));
 	border-radius: 8px;
-	color: var(--sota-fg);
+	color: var(--vscode-foreground);
 	font-family: var(--vscode-font-family);
 	font-size: 12px;
 	line-height: 1.4;
@@ -5795,7 +5796,7 @@ textarea.ui-block-form-input {
 
 .anton-watching-text {
 	flex: 1 1 auto;
-	color: var(--sota-fg);
+	color: var(--vscode-foreground);
 }
 
 @keyframes anton-watching-slide-in {
@@ -6037,7 +6038,16 @@ body.vscode-high-contrast .composer-shell, body.vscode-high-contrast-light .comp
 	color: var(--vscode-input-foreground); font: inherit; font-size: 12px;
 }
 .history-results, .history-no-results, .model-search-empty { color: var(--sota-fg-muted); font-size: 11px; line-height: 1.6; }
-.history-results { margin-top: 10px; font-variant-numeric: tabular-nums; }
+.history-results { font-variant-numeric: tabular-nums; }
+.history-scope { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 12px; }
+.history-scope button, .history-clear-filters {
+	font: inherit; font-size: 11px; color: var(--sota-fg-muted); background: transparent;
+	border: 1px solid transparent; border-radius: 6px; padding: 6px 9px; cursor: pointer;
+}
+.history-scope button[aria-pressed="true"] { background: var(--vscode-list-hoverBackground); color: var(--vscode-foreground); border-color: var(--sota-border); }
+.history-scope button:hover, .history-clear-filters:hover { background: var(--vscode-list-hoverBackground); color: var(--vscode-foreground); }
+.history-results-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; margin-top: 8px; min-height: 28px; }
+.history-clear-filters[hidden] { display: none; }
 .history-group-title { font-size: 10px; color: var(--sota-fg-muted); font-weight: 600; margin: 18px 0 4px; letter-spacing: .03em; }
 .history-pane-row { border: 1px solid transparent; border-radius: 8px; min-width: 0; }
 .history-pane-row-active { border-color: var(--sota-border); }

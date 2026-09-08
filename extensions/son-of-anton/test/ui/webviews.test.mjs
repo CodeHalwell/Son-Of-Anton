@@ -143,6 +143,35 @@ test('chat: responsive welcome, provider search, keyboard tabs and composer', as
 	for (const width of [280, 400, 800]) { await page.setViewportSize({ width, height: 900 }); await assertNoPageOverflow(page); }
 });
 
+test('terminal attachments explain capture and terminal settings save real preferences', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	await page.locator('#attachBtn').click();
+	await page.locator('[data-attach="terminal-output"]').click();
+	assert.match(await page.locator('#contextChips .context-chip').getAttribute('title'), /latest command and output/);
+	await page.locator('#sendBtn').click();
+	const sent = await page.evaluate(() => sentMessages.find(message => message.type === 'sendMessage'));
+	assert.deepEqual(sent.attachments, ['terminal-output']);
+	await post(page, { type: 'requestSettled', cancelled: false });
+	await page.getByRole('tab', { name: 'Settings tab', exact: true }).click();
+	await page.locator('#settingsTab-terminal').click();
+	await post(page, { type: 'settingsState', settings: { 'sota.terminal.shellIntegration': true, 'sota.terminal.outputLineCap': 100 } });
+	assert.match(await page.locator('#settingsSubtab-terminal').innerText(), /running commands[\s\S]*16 KiB/);
+	await page.getByRole('checkbox', { name: 'Capture Terminal Output', exact: true }).uncheck();
+	await page.locator('#settingsTerminalLineCap').focus();
+	await page.locator('#settingsTerminalLineCap').press('ArrowRight');
+	const changes = await page.evaluate(() => sentMessages.filter(message => message.type === 'settingChange'));
+	assert.ok(changes.some(message => message.settingId === 'sota.terminal.shellIntegration' && message.value === false));
+	assert.ok(changes.some(message => message.settingId === 'sota.terminal.outputLineCap' && message.value === 110));
+	for (const width of [280, 400, 800]) {
+		await page.setViewportSize({ width, height: 900 });
+		const tabHeights = await page.locator('.settings-subtab').evaluateAll(tabs => tabs.map(tab => tab.getBoundingClientRect().height));
+		assert.ok(tabHeights.every(height => height <= 44), 'Settings tabs should remain compact at every width');
+		await assertNoPageOverflow(page);
+	}
+	await page.setViewportSize({ width: 400, height: 900 });
+	await screenshot(page, 'terminal-capture-settings');
+});
+
 test('chat: batched streaming preserves reading position, text, and composer focus', async t => {
 	const page = await openSurface(t, 'chat', 420);
 	await page.locator('#messageInput').fill('Review this implementation');
@@ -188,6 +217,7 @@ test('chat: live Markdown hides protocol fragments and preserves tool controls a
 	assert.doesNotMatch(await page.locator('.msg-body').last().textContent(), /Explain the guard|sota:end/);
 	await post(page, { type: 'messageComplete', inputTokens: 12, outputTokens: 34, totalTokens: 46, estimatedCost: '0.00' });
 	assert.equal(await page.locator('.tool-card').count(), 1);
+	assert.deepEqual(await page.locator('.tool-card').evaluate(card => ({ status: card.dataset.toolStatus, label: card.querySelector('.tool-card-status').textContent, icon: card.querySelector('.tool-card-icon').textContent })), { status: 'ok', label: 'Ok', icon: '✓' });
 	assert.equal(await page.locator('.msg-text-rendered pre code').textContent(), 'const example = "<tag>";');
 	await page.getByRole('button', { name: 'Explain the guard', exact: true }).waitFor();
 	assert.match(await page.locator('#transcriptTaskMeter').textContent(), /12.*34/);
@@ -479,6 +509,7 @@ test('model picker: search by provider, choose with keyboard, escape restores fo
 	await page.keyboard.press('Enter');
 	await page.locator('#modelMenu').waitFor({ state: 'hidden' });
 	assert.equal(await page.locator('#modelChip').evaluate(button => button === document.activeElement), true);
+	assert.deepEqual(await page.evaluate(() => sentMessages.find(message => message.type === 'selectModel')), { type: 'selectModel', conversationId: 'initial-conversation', model: selected });
 	await page.locator('#modelChip').click();
 	await page.getByRole('searchbox', { name: 'Search Models…' }).fill('does-not-exist');
 	await page.locator('#modelSearchEmpty').waitFor({ state: 'visible' });
@@ -494,6 +525,100 @@ test('model picker: search by provider, choose with keyboard, escape restores fo
 	const bounds = await page.locator('#modelMenu').boundingBox();
 	assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= 280 && bounds.y >= 0);
 	await screenshot(page, 'model-search');
+});
+
+test('models restore from the host across reload, chat switches, and New Chat without losing drafts', async t => {
+	const staleDraft = { conversationDrafts: [['initial-conversation', { text: 'Unsent work', model: 'haiku', attachments: [], mentions: [] }]] };
+	const page = await openSurface(t, 'chat', 420, staleDraft);
+	await post(page, { type: 'loadConversation', conversationId: 'initial-conversation', lastModel: 'claude-code-opus', messages: [] });
+	assert.match(await page.locator('#modelChip').textContent(), /Opus.*Claude Code/);
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Unsent work');
+	await screenshot(page, 'restored-claude-model');
+	await post(page, { type: 'loadConversation', conversationId: 'second', lastModel: 'haiku', messages: [] });
+	assert.match(await page.locator('#modelChip').textContent(), /Haiku/);
+	await post(page, { type: 'loadConversation', conversationId: 'initial-conversation', lastModel: 'claude-code-opus', messages: [] });
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Unsent work');
+	await post(page, { type: 'conversationCleared', conversationId: 'fresh', lastModel: 'claude-code-opus' });
+	assert.match(await page.locator('#modelChip').textContent(), /Opus.*Claude Code/);
+	assert.equal(await page.locator('#messageInput').inputValue(), '');
+	await page.locator('#messageInput').fill('Use the restored provider');
+	await page.locator('#messageInput').press('Enter');
+	assert.equal(await page.evaluate(() => sentMessages.find(message => message.type === 'sendMessage').model), 'claude-code-opus');
+});
+
+test('provider-settings action opens Settings, and history identifies and searches workspaces', async t => {
+	const page = await openSurface(t, 'chat', 420);
+	await post(page, { type: 'showProviderSettings' });
+	assert.equal(await page.getByRole('tab', { name: 'Settings tab', exact: true }).getAttribute('aria-selected'), 'true');
+	await post(page, { type: 'historySnapshot', conversations: [
+		{ id: 'a', title: 'Explain this file', workspaceName: 'Project Alpha', updatedAt: Date.now(), messageCount: 2 },
+		{ id: 'b', title: 'Earlier work', updatedAt: Date.now(), messageCount: 1 },
+	] });
+	await page.getByRole('tab', { name: 'History tab', exact: true }).click();
+	assert.match(await page.locator('#historyPaneList').textContent(), /Project Alpha/);
+	assert.match(await page.locator('#historyPaneList').textContent(), /Earlier conversation/);
+	await screenshot(page, 'workspace-history');
+	await page.getByRole('searchbox', { name: 'Search Conversations…' }).fill('Project Alpha');
+	assert.equal(await page.locator('.history-pane-row').count(), 1);
+	await assertNoPageOverflow(page);
+});
+
+test('history workspace filters and searches persist, with clear filters and consistent New Chat actions', async t => {
+	const snapshot = { type: 'historySnapshot', activeId: 'local', conversations: [
+		{ id: 'local', title: 'Current task', inCurrentWorkspace: true, workspaceName: 'Current Project', updatedAt: Date.now(), messageCount: 1 },
+		{ id: 'remote', title: 'Older task', inCurrentWorkspace: false, workspaceName: 'Other Project', updatedAt: Date.now(), messageCount: 2 },
+	] };
+	const page = await openSurface(t, 'chat', 400);
+	await post(page, snapshot);
+	await page.getByRole('tab', { name: 'History tab', exact: true }).click();
+	await page.getByRole('button', { name: 'This Workspace', exact: true }).click();
+	assert.equal(await page.locator('.history-pane-row').count(), 1);
+	await page.getByRole('searchbox', { name: 'Search Conversations…' }).fill('Current task');
+	await screenshot(page, 'history-workspace-filter');
+	const reloaded = await openSurface(t, 'chat', 400, await page.evaluate(() => savedWebviewState));
+	await post(reloaded, snapshot);
+	await reloaded.getByRole('tab', { name: 'History tab', exact: true }).click();
+	assert.equal(await reloaded.getByRole('searchbox', { name: 'Search Conversations…' }).inputValue(), 'Current task');
+	assert.equal(await reloaded.getByRole('button', { name: 'This Workspace', exact: true }).getAttribute('aria-pressed'), 'true');
+	await reloaded.getByRole('searchbox', { name: 'Search Conversations…' }).fill('Nothing matching');
+	await reloaded.locator('#historyNoResults').waitFor({ state: 'visible' });
+	await reloaded.getByRole('button', { name: 'Clear Filters', exact: true }).click();
+	assert.equal(await reloaded.locator('.history-pane-row').count(), 2);
+	assert.equal(await reloaded.locator('#historySearch').evaluate(input => input === document.activeElement), true);
+	await reloaded.locator('#historyNewBtn').click();
+	assert.equal(await reloaded.evaluate(() => sentMessages.at(-1).type), 'clearConversation');
+	for (const width of [280, 400, 800]) { await reloaded.setViewportSize({ width, height: 900 }); await assertNoPageOverflow(reloaded); }
+});
+
+test('deleted conversations release their saved drafts without discarding the current draft', async t => {
+	const page = await openSurface(t, 'chat', 400, { conversationDrafts: [['deleted', { text: 'Remove this draft' }]] });
+	await page.locator('#messageInput').fill('Keep this draft');
+	await post(page, { type: 'conversationDeleted', conversationId: 'deleted' });
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Keep this draft');
+	assert.equal(await page.evaluate(() => savedWebviewState.conversationDrafts.some(([id]) => id === 'deleted')), false);
+});
+
+test('board switching cancels assistant work, scopes actions, and clears unrelated task filters', async t => {
+	const page = await openSurface(t, 'board', 1200);
+	await post(page, fixture); await frames(page);
+	await page.getByRole('searchbox', { name: 'Search tasks' }).fill('keyboard');
+	await page.getByRole('button', { name: 'Ask Anton', exact: true }).click();
+	await page.getByRole('textbox', { name: 'Message the board assistant' }).fill('Review the old plan');
+	await page.getByRole('button', { name: 'Send ↑', exact: true }).click();
+	const request = await page.evaluate(() => sentMessages.find(message => message.type === 'chat-runtime'));
+	assert.equal(request.conversationId, fixture.conversationId);
+	await post(page, { ...fixture, conversationId: 'new-board', conversationTitle: 'A different project', snapshot: { ...fixture.snapshot, conversationId: 'new-board' } });
+	await frames(page);
+	assert.equal(await page.getByRole('searchbox', { name: 'Search tasks' }).inputValue(), '');
+	assert.equal(await page.evaluate(id => sentMessages.some(message => message.type === 'cancel-chat' && message.requestId === id), request.requestId), true);
+	await post(page, { type: 'chat-runtime-chunk', requestId: request.requestId, event: { type: 'tool-call', id: 'late', name: 'addCard', input: { instruction: 'Wrong project' } } });
+	assert.equal(await page.evaluate(() => sentMessages.some(message => message.type === 'board-action')), false);
+	assert.equal(await page.getByRole('region', { name: 'Board conversation' }).textContent().then(text => text.includes('Review the old plan')), false);
+	await page.getByRole('textbox', { name: 'Message the board assistant' }).fill('Review this plan');
+	await page.getByRole('button', { name: 'Send ↑', exact: true }).click();
+	const current = await page.evaluate(() => sentMessages.filter(message => message.type === 'chat-runtime').at(-1));
+	await post(page, { type: 'chat-runtime-chunk', requestId: current.requestId, event: { type: 'tool-call', id: 'current', name: 'addCard', input: { instruction: 'Current task' } } });
+	assert.equal(await page.evaluate(() => sentMessages.find(message => message.type === 'board-action').conversationId), 'new-board');
 });
 
 test('context: preview real host context, ignore stale updates, and send the per-conversation setting', async t => {
@@ -817,5 +942,5 @@ test('Council task review, cancellation and retry route through the native host'
 	await page.getByRole('button', { name: 'Review Changes' }).click(); await page.getByRole('button', { name: 'Retry', exact: true }).click();
 	await post(page, { ...fixture, snapshot: { ...fixture.snapshot, tasks: [{ ...fixture.snapshot.tasks[5], state: 'in-progress', id: 'council:fixture', proposalId: 'retained' }] } }); await frames(page);
 	await page.getByRole('button', { name: 'Cancel Task' }).click();
-	assert.deepEqual((await page.evaluate(() => window.sentMessages)).filter(message => ['review-proposal', 'rerun', 'cancel-task'].includes(message.type)), [{ type: 'review-proposal', taskId: 'council:fixture' }, { type: 'rerun', taskId: 'council:fixture' }, { type: 'cancel-task', taskId: 'council:fixture' }]);
+	assert.deepEqual((await page.evaluate(() => window.sentMessages)).filter(message => ['review-proposal', 'rerun', 'cancel-task'].includes(message.type)), [{ type: 'review-proposal', taskId: 'council:fixture', conversationId: fixture.conversationId }, { type: 'rerun', taskId: 'council:fixture', conversationId: fixture.conversationId }, { type: 'cancel-task', taskId: 'council:fixture', conversationId: fixture.conversationId }]);
 });

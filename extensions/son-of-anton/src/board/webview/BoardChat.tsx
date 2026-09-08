@@ -35,9 +35,10 @@ const DEFAULT_MODEL = 'sonnet';
 
 interface BoardChatProps {
 	readonly assignees: ReadonlyArray<string>;
+	readonly conversationId: string | null;
 }
 
-export function BoardChat({ assignees }: BoardChatProps): JSX.Element {
+export function BoardChat({ assignees, conversationId }: BoardChatProps): JSX.Element {
 	const [messages, setMessages] = useState<ChatMessage[]>([]);
 	const [draft, setDraft] = useState('');
 	const [pending, setPending] = useState(false);
@@ -101,7 +102,7 @@ export function BoardChat({ assignees }: BoardChatProps): JSX.Element {
 					// TaskBoardModel update path stays canonical regardless
 					// of whether the user dragged a card or the LLM emitted
 					// a tool-call.
-					dispatchBoardAction(call.name, call.input);
+					dispatchBoardAction(call.name, call.input, conversationId);
 					// Surface the call inside the assistant bubble so the
 					// user sees what the model just did even when the
 					// natural-language response is empty.
@@ -138,9 +139,10 @@ export function BoardChat({ assignees }: BoardChatProps): JSX.Element {
 				},
 			},
 			tools,
+			conversationId,
 		);
 		cancelRef.current = handle;
-	}, [draft, messages, pending, tools, flushText]);
+	}, [draft, messages, pending, tools, flushText, conversationId]);
 
 	const stop = (): void => {
 		cancelRef.current?.cancel();

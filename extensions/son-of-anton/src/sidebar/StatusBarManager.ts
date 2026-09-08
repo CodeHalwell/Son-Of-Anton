@@ -6,6 +6,9 @@ import * as vscode from 'vscode';
 import { AgentManager } from 'son-of-anton-core/agents/AgentManager';
 import { CredentialBroker } from 'son-of-anton-core/auth/CredentialBroker';
 import type { ProviderStatus } from 'son-of-anton-core/auth/types';
+import { detectCredentials, hasAnyProvider } from 'son-of-anton-core/credentials/credentialDetection';
+import { isClaudeCodeAvailable } from 'son-of-anton-core/llm/claudeCodeRunner';
+import { isCodexAvailable } from 'son-of-anton-core/llm/codexRunner';
 
 /**
  * Manages the status bar items for Son of Anton.
@@ -16,9 +19,8 @@ import type { ProviderStatus } from 'son-of-anton-core/auth/types';
  *    (sota.openChat) and behaviour (spinner / hubot icon depending on whether
  *    any agent task is running).
  *  - The auth item (priority 99) is independent and reflects OAuth provider
- *    connection state. When nothing is connected it offers a single click to
- *    sign in (sota.signInClaude); when one or more providers are connected it
- *    routes the click through sota.signOutAll for quick disconnect.
+ *    connection state alongside configured API, local CLI, and ACP routes.
+ *    Clicking opens provider settings without disconnecting anything.
  *
  * Splitting the items keeps the agent-task display intact (no string-juggling
  * with provider state) and gives each entry a dedicated tooltip + command.
@@ -28,8 +30,10 @@ export class StatusBarManager implements vscode.Disposable {
 	private readonly authItem: vscode.StatusBarItem;
 	private readonly disposables: vscode.Disposable[] = [];
 	private readonly broker: CredentialBroker;
+	private refreshSequence = 0;
+	private disposed = false;
 
-	constructor(agentManager: AgentManager, broker: CredentialBroker) {
+	constructor(agentManager: AgentManager, broker: CredentialBroker, private readonly secrets?: vscode.SecretStorage) {
 		this.broker = broker;
 
 		// --- Agent task indicator (existing behaviour preserved) ---
@@ -58,7 +62,8 @@ export class StatusBarManager implements vscode.Disposable {
 		// Render the disconnected baseline immediately so the item shows up on
 		// activation; then kick off the async status fetch which will replace
 		// the placeholder once it resolves.
-		this.renderAuth([]);
+		this.authItem.text = '$(account) ' + vscode.l10n.t('Checking Connections');
+		this.authItem.command = 'sota.openProviderSettings';
 		void this.refreshAuth();
 
 		// CredentialBroker exposes onDidDisconnect; there is no onDidConnect
@@ -68,6 +73,10 @@ export class StatusBarManager implements vscode.Disposable {
 		this.broker.onDidDisconnect(() => {
 			void this.refreshAuth();
 		});
+		this.disposables.push(vscode.workspace.onDidChangeConfiguration(event => {
+			if (event.affectsConfiguration('sota')) { void this.refreshAuth(); }
+		}));
+		if (secrets) { this.disposables.push(secrets.onDidChange(() => { void this.refreshAuth(); })); }
 	}
 
 	/**
@@ -75,13 +84,30 @@ export class StatusBarManager implements vscode.Disposable {
 	 * Exposed so command handlers can refresh after sign-in / sign-out.
 	 */
 	async refreshAuth(): Promise<void> {
+		if (this.disposed) { return; }
+		const sequence = ++this.refreshSequence;
 		try {
-			const providers = await this.broker.status();
-			this.renderAuth(providers);
+			const config = vscode.workspace.getConfiguration('sota');
+			const [providers, credentials] = await Promise.all([
+				this.broker.status(),
+				this.secrets ? detectCredentials(this.secrets, config, this.broker) : undefined,
+			]);
+			if (this.disposed || sequence !== this.refreshSequence) { return; }
+			const sources: string[] = [];
+			if (isClaudeCodeAvailable()) { sources.push(vscode.l10n.t('Claude Code installed; sign-in is checked when it runs.')); }
+			if (isCodexAvailable()) { sources.push(vscode.l10n.t('Codex CLI installed; sign-in is checked when it runs.')); }
+			const adapters = config.get<Array<{ id?: string; command?: string }>>('acp.agents', []);
+			const configuredAdapters = Array.isArray(adapters) ? adapters.filter(adapter => typeof adapter?.id === 'string' && adapter.id.trim() && typeof adapter.command === 'string' && adapter.command.trim()).length : 0;
+			if (configuredAdapters) { sources.push(vscode.l10n.t('{0} ACP adapters configured; availability is checked when they run.', configuredAdapters)); }
+			if (credentials && hasAnyProvider({ ...credentials, codex: { hasCli: false } })) { sources.push(vscode.l10n.t('Provider credentials or local endpoints configured.')); }
+			this.renderAuth(providers, sources);
 		} catch {
 			// status() should not throw, but guard so a transient failure does
 			// not leave the status bar in a broken state.
-			this.renderAuth([]);
+			if (!this.disposed && sequence === this.refreshSequence) {
+				this.authItem.text = '$(account) ' + vscode.l10n.t('Check Connections');
+				this.authItem.tooltip = vscode.l10n.t('Connection status could not be read. Open provider settings to inspect your configuration.');
+			}
 		}
 	}
 
@@ -95,30 +121,28 @@ export class StatusBarManager implements vscode.Disposable {
 		}
 	}
 
-	private renderAuth(providers: ReadonlyArray<ProviderStatus>): void {
+	private renderAuth(providers: ReadonlyArray<ProviderStatus>, sources: string[]): void {
 		const connected = providers.filter(p => p.connected);
 
 		if (connected.length === 0) {
-			this.authItem.text = '$(account) Sign in';
-			this.authItem.command = 'sota.signInClaude';
+			this.authItem.text = '$(account) ' + (sources.length ? vscode.l10n.t('Connections Configured') : vscode.l10n.t('Connect a Provider'));
 		} else if (connected.length === 1) {
 			this.authItem.text = `$(account) ${connected[0].displayName}`;
-			this.authItem.command = 'sota.signOutAll';
 		} else {
 			this.authItem.text = `$(account) ${connected.length} providers`;
-			this.authItem.command = 'sota.signOutAll';
 		}
 
-		this.authItem.tooltip = this.buildTooltip(providers);
+		this.authItem.command = 'sota.openProviderSettings';
+		this.authItem.tooltip = this.buildTooltip(providers, sources);
 	}
 
-	private buildTooltip(providers: ReadonlyArray<ProviderStatus>): vscode.MarkdownString {
+	private buildTooltip(providers: ReadonlyArray<ProviderStatus>, sources: string[]): vscode.MarkdownString {
 		const md = new vscode.MarkdownString(undefined, true);
 		md.isTrusted = false;
 		md.supportThemeIcons = true;
 
-		if (providers.length === 0) {
-			md.appendMarkdown('**Son of Anton**\n\nNo providers configured. Click to sign in.');
+		if (providers.length === 0 && sources.length === 0) {
+			md.appendText(vscode.l10n.t('No provider connection was detected. Click to open provider settings.'));
 			return md;
 		}
 
@@ -132,10 +156,12 @@ export class StatusBarManager implements vscode.Disposable {
 			}
 		}
 		md.appendMarkdown(lines.join('\n'));
-		// Keep tooltip concise: cap to <400 chars to satisfy the spec.
+		for (const source of sources) { md.appendText('\n' + source); }
+		md.appendText('\n\n' + vscode.l10n.t('Click to manage connections.'));
+		// Bound unusually large provider lists without hiding normal setup details.
 		const text = md.value;
-		if (text.length > 380) {
-			const truncated = new vscode.MarkdownString(text.slice(0, 377) + '...', true);
+		if (text.length > 1200) {
+			const truncated = new vscode.MarkdownString(text.slice(0, 1197) + '...', true);
 			truncated.supportThemeIcons = true;
 			return truncated;
 		}
@@ -163,6 +189,8 @@ export class StatusBarManager implements vscode.Disposable {
 	}
 
 	dispose(): void {
+		this.disposed = true;
+		this.refreshSequence++;
 		this.agentItem.dispose();
 		this.authItem.dispose();
 		for (const d of this.disposables) {

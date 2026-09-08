@@ -472,6 +472,8 @@ export class ChatSession {
 		this.currentConversationId = resolved.summary.id;
 		this.conversation = [...resolved.messages];
 		this.currentSpecialistId = resolved.summary.lastSpecialist ?? 'anton';
+		this.currentModel = this.resolveChatModel(resolved.summary.lastModel);
+		this.conversationStore.rememberActive(this.currentConversationId);
 		this.currentMode = resolved.summary.lastMode ?? 'act';
 		this.currentTab = resolved.summary.lastTab ?? 'chat';
 		this.webview.html = this.getHtmlContent();
@@ -510,6 +512,7 @@ export class ChatSession {
 				messages: this.conversation,
 				lastSpecialist: this.currentSpecialistId,
 				lastMode: this.currentMode,
+				lastModel: this.currentModel,
 			});
 		} else {
 			// Even on an empty conversation we want the chip to reflect the
@@ -617,6 +620,7 @@ export class ChatSession {
 		// create / rename / delete from any surface.
 		this.disposables.push(
 			this.conversationStore.onDidChange(() => this.postHistorySnapshot()),
+			this.conversationStore.onDidDelete(id => this.handleConversationDeleted(id)),
 		);
 		this.disposables.push(new vscode.Disposable(() => {
 			if (this.costUpdateDebounceTimer) {
@@ -1207,6 +1211,14 @@ export class ChatSession {
 		this.webview.postMessage({ type: 'workspaceIndexUpdate', entries });
 	}
 
+	openProviderSettings(): void {
+		this.currentTab = 'settings';
+		this.saveConversation();
+		this.postSettingsState();
+		void this.refreshConnectionState();
+		this.webview.postMessage({ type: 'showProviderSettings' });
+	}
+
 	clearConversation(): void {
 		// "Clear" now means "start a new conversation" — the previous one is
 		// preserved in the store so users can return to it from the History
@@ -1219,15 +1231,17 @@ export class ChatSession {
 		this.pendingUiBlockResponses.clear();
 		const fresh = this.conversationStore.create();
 		this.currentConversationId = fresh.summary.id;
+		this.conversationStore.rememberActive(this.currentConversationId);
 		this.conversation = [...fresh.messages];
 		// Fresh conversation starts on the Chat tab so the user sees the
 		// composer immediately rather than landing on whichever pane was
 		// active in the previous conversation.
 		this.currentTab = 'chat';
+		this.saveConversation();
 		this.webview.postMessage({ type: 'tabChanged', tab: this.currentTab });
 		this.postBoardSnapshot();
 		this.postHistorySnapshot();
-		this.webview.postMessage({ type: 'conversationCleared', conversationId: this.currentConversationId });
+		this.webview.postMessage({ type: 'conversationCleared', conversationId: this.currentConversationId, lastModel: this.currentModel });
 		// Reset the running cost meter so a fresh chat starts at $0.00. The
 		// CostReporter's onDidChange will fanout the empty totals; the
 		// dedicated `costReset` message is the canonical "hide and zero" cue
@@ -1271,7 +1285,9 @@ export class ChatSession {
 		this.pendingUiBlockResponses.clear();
 		this.currentConversationId = record.summary.id;
 		this.conversation = [...record.messages];
-		this.currentSpecialistId = record.summary.lastSpecialist ?? this.currentSpecialistId;
+		this.currentSpecialistId = record.summary.lastSpecialist ?? 'anton';
+		this.currentModel = this.resolveChatModel(record.summary.lastModel);
+		this.conversationStore.rememberActive(this.currentConversationId);
 		this.currentMode = record.summary.lastMode ?? 'act';
 		this.currentTab = record.summary.lastTab ?? 'chat';
 		this.webview.postMessage({
@@ -1280,6 +1296,7 @@ export class ChatSession {
 			messages: this.conversation,
 			lastSpecialist: this.currentSpecialistId,
 			lastMode: this.currentMode,
+			lastModel: this.currentModel,
 		});
 		// Replay checkpoints so the pills come back after a conversation
 		// switch. Posted after `loadConversation` so the user bubbles are
@@ -1300,6 +1317,16 @@ export class ChatSession {
 		this.webview.postMessage({ type: 'tabChanged', tab: this.currentTab });
 		this.postBoardSnapshot();
 		this.postHistorySnapshot();
+	}
+
+	/** Replace a deleted active chat while leaving unrelated conversations and streams alone. */
+	handleConversationDeleted(id: string): void {
+		if (this.disposed) { return; }
+		if (id === this.currentConversationId) {
+			const next = this.conversationStore.getInitialConversation() ?? this.conversationStore.create();
+			this.switchConversation(next.summary.id);
+		}
+		this.webview.postMessage({ type: 'conversationDeleted', conversationId: id });
 	}
 
 	/**
@@ -1331,6 +1358,7 @@ export class ChatSession {
 			messages: this.conversation,
 			lastSpecialist: this.currentSpecialistId,
 			lastMode: this.currentMode,
+			lastModel: this.currentModel,
 		});
 		this.postCheckpointsForCurrentConversation();
 	}
@@ -1415,12 +1443,15 @@ export class ChatSession {
 		if (this.disposed) {
 			return;
 		}
+		const workspaceIds = new Set(this.conversationStore.listForWorkspace().map(summary => summary.id));
 		const summaries = this.conversationStore.list().map(s => ({
 			id: s.id,
 			title: s.title,
 			updatedAt: s.updatedAt,
 			messageCount: s.messageCount,
 			lastSpecialist: s.lastSpecialist,
+			workspaceName: s.workspaceName,
+			inCurrentWorkspace: workspaceIds.has(s.id),
 		}));
 		this.webview.postMessage({
 			type: 'historySnapshot',
@@ -1448,6 +1479,7 @@ export class ChatSession {
 			getModel: () => this.currentModel,
 			setModel: (id: ModelId) => {
 				this.currentModel = id;
+				this.saveConversation();
 				this.webview.postMessage({ type: 'modelChange', model: id });
 			},
 			getMode: () => this.currentMode,
@@ -1492,11 +1524,11 @@ export class ChatSession {
 
 	/**
 	 * Pick the initial conversation when the session boots. Honours an
-	 * explicit caller-supplied id, then falls back to the most recently used
-	 * conversation, and finally creates a new one when the store is empty.
+	 * explicit caller-supplied id, then restores this workspace’s active
+	 * conversation, and finally creates a new one.
 	 */
 	private resolveInitialConversation(initialConversationId: string | undefined): {
-		summary: { id: string; lastSpecialist?: AgentHandle | 'anton'; lastMode?: ChatMode; lastTab?: ChatTab };
+		summary: { id: string; lastSpecialist?: AgentHandle | 'anton'; lastMode?: ChatMode; lastTab?: ChatTab; lastModel?: ModelId };
 		messages: ChatMessage[];
 	} {
 		if (initialConversationId) {
@@ -1505,16 +1537,16 @@ export class ChatSession {
 				return { summary: record.summary, messages: record.messages };
 			}
 		}
-		const list = this.conversationStore.list();
-		if (list.length > 0) {
-			const mostRecent = list[0];
-			const record = this.conversationStore.load(mostRecent.id);
-			if (record) {
-				return { summary: record.summary, messages: record.messages };
-			}
-		}
+		const current = this.conversationStore.getInitialConversation();
+		if (current) { return current; }
 		const fresh = this.conversationStore.create();
 		return { summary: fresh.summary, messages: fresh.messages };
+	}
+
+	private resolveChatModel(saved?: ModelId): ModelId {
+		if (typeof saved === 'string' && Object.prototype.hasOwnProperty.call(MODEL_METADATA, saved)) { return saved; }
+		const configured = vscode.workspace.getConfiguration('sota').get<string>('defaultModel', 'sonnet');
+		return typeof configured === 'string' && Object.prototype.hasOwnProperty.call(MODEL_METADATA, configured) ? configured as ModelId : 'sonnet';
 	}
 
 	private saveConversation(): void {
@@ -1525,6 +1557,7 @@ export class ChatSession {
 			lastSpecialist,
 			this.currentMode,
 			this.currentTab,
+			this.currentModel,
 		);
 	}
 
@@ -1532,6 +1565,12 @@ export class ChatSession {
 		this.webview.onDidReceiveMessage(
 			async (message: WebviewMessage) => {
 				switch (message.type) {
+					case 'selectModel':
+						if (message.conversationId === this.currentConversationId && typeof message.model === 'string' && Object.prototype.hasOwnProperty.call(MODEL_METADATA, message.model)) {
+							this.currentModel = message.model;
+							this.saveConversation();
+						}
+						break;
 					case 'browseAcpAdapters':
 						await vscode.commands.executeCommand('sota.browseAcpAdapters');
 						break;
@@ -1543,7 +1582,7 @@ export class ChatSession {
 						break;
 					case 'webviewReady':
 						// Bootstrap only after the document installs its message listener.
-						this.webview.postMessage({ type: 'loadConversation', conversationId: this.currentConversationId, messages: this.conversation, lastSpecialist: this.currentSpecialistId, lastMode: this.currentMode });
+						this.webview.postMessage({ type: 'loadConversation', conversationId: this.currentConversationId, messages: this.conversation, lastSpecialist: this.currentSpecialistId, lastMode: this.currentMode, lastModel: this.currentModel });
 						this.webview.postMessage({ type: 'tabChanged', tab: this.currentTab });
 						this.webview.postMessage({ type: 'workspaceIndexUpdate', entries: this.workspaceIndex });
 						this.postCheckpointsForCurrentConversation();
@@ -1698,43 +1737,12 @@ export class ChatSession {
 							void this.refreshConnectionState();
 						}
 						break;
-					case 'historyRename': {
-						// Rename a conversation from the History tab. The TreeItem-based
-						// `sota.renameConversation` command needs a tree node arg, so
-						// we drive the rename directly via the store with an inline
-						// input box for the new title.
-						const id = typeof message.id === 'string' ? message.id : '';
-						if (!id) { break; }
-						const current = this.conversationStore.list().find(s => s.id === id);
-						if (!current) { break; }
-						const next = await vscode.window.showInputBox({
-							prompt: 'Rename conversation',
-							value: current.title,
-							validateInput: (value) => (value.trim().length === 0 ? 'Title cannot be empty.' : undefined),
-						});
-						if (next !== undefined) {
-							this.conversationStore.rename(id, next);
-						}
+					case 'historyRename':
+						if (typeof message.id === 'string' && message.id) { await vscode.commands.executeCommand('sota.renameConversation', message.id); }
 						break;
-					}
-					case 'historyDelete': {
-						// Mirrors the `sota.deleteConversation` command's confirm-and-
-						// delete flow without requiring a TreeItem argument so the
-						// History tab can call it directly.
-						const id = typeof message.id === 'string' ? message.id : '';
-						if (!id) { break; }
-						const current = this.conversationStore.list().find(s => s.id === id);
-						if (!current) { break; }
-						const choice = await vscode.window.showWarningMessage(
-							`Delete conversation "${current.title}"?`,
-							{ modal: true },
-							'Delete',
-						);
-						if (choice === 'Delete') {
-							this.conversationStore.delete(id);
-						}
+					case 'historyDelete':
+						if (typeof message.id === 'string' && message.id) { await vscode.commands.executeCommand('sota.deleteConversation', message.id); }
 						break;
-					}
 					case 'openCodeInEditor': {
 						if (typeof message.code !== 'string') {
 							break;
@@ -1886,7 +1894,7 @@ export class ChatSession {
 						// Delegates to the host command so the save dialog,
 						// filename, and post-save toast match what the palette
 						// flow does — keeping a single export code path.
-						await vscode.commands.executeCommand('sota.exportConversation');
+						await vscode.commands.executeCommand('sota.exportConversation', this.currentConversationId);
 						break;
 					}
 					case 'rerunFromSubtask': {
@@ -2210,8 +2218,8 @@ export class ChatSession {
 	/**
 	 * Connect Anthropic via the locally-installed Claude Code CLI. No API key
 	 * required — the CLI handles auth itself (subscription tokens stored by
-	 * the Claude Code installer). We just verify the binary is present, set
-	 * the active model to a `claude-code-*` id, and surface the result.
+	 * the Claude Code installer). Configure ACP too so specialists can use
+	 * tools when a `claude-code-*` model is selected.
 	 */
 	private async handleConnectClaudeCode(): Promise<void> {
 		const { isClaudeCodeAvailable } = await import('son-of-anton-core/llm/claudeCodeRunner');
@@ -2225,12 +2233,16 @@ export class ChatSession {
 			});
 			return;
 		}
+		if (!await vscode.commands.executeCommand<boolean>('sota.configureClaudeAcp')) {
+			this.webview.postMessage({ type: 'providerSaveResult', provider: 'anthropic', ok: false, deferred: false, message: vscode.l10n.t('Claude Code is available, but ACP setup was not completed. Configure Claude ACP to enable specialist tools.') });
+			return;
+		}
 		this.webview.postMessage({
 			type: 'providerSaveResult',
 			provider: 'anthropic',
 			ok: true,
 			deferred: false,
-			message: 'Connected via Claude Code. Pick a "via Claude Code" model in the dropdown to use your subscription.',
+			message: vscode.l10n.t('Connected via Claude Code with ACP specialist tools. Pick a “via Claude Code” model to use your subscription.'),
 		});
 		void this.refreshConnectionState();
 	}
@@ -2738,10 +2750,11 @@ export class ChatSession {
 				this.conversation = [...record.messages];
 				this.webview.postMessage({
 					type: 'loadConversation',
-				conversationId: this.currentConversationId,
+					conversationId: this.currentConversationId,
 					messages: this.conversation,
 					lastSpecialist: this.currentSpecialistId,
 					lastMode: this.currentMode,
+					lastModel: this.currentModel,
 				});
 			}
 		}
@@ -2781,7 +2794,7 @@ export class ChatSession {
 		// Allow attachment-only messages: when the user types nothing but has
 		// attached context (e.g. just the current file), we still want to send.
 		const hasAttachments = Array.isArray(message.attachments) && message.attachments.length > 0;
-		const hasMentions = Array.isArray(message.mentions) && message.mentions.length > 0;
+		const hasMentions = (Array.isArray(message.mentions) && message.mentions.length > 0) || (Array.isArray(message.mentionsKinded) && message.mentionsKinded.length > 0);
 		// Image attachments are validated separately so a malformed entry doesn't
 		// silently get embedded in the prompt; sanitisation lives below.
 		const incomingImages: ImageAttachmentPayload[] = Array.isArray(message.images)
@@ -3805,7 +3818,7 @@ export class ChatSession {
 				// webview message so the chat surface renders the same
 				// inline tool card the chat-panel direct-tool-loop path
 				// already produces. Status maps verbatim — the webview
-				// already knows 'running' / 'done' / 'error'. Skip
+				// normalizes 'done' to its 'ok' presentation. Skip
 				// emit_ui_block here too so generative-UI blocks render via
 				// their dedicated `uiBlock` postMessage instead.
 				if (event.name === 'emit_ui_block') {
@@ -3882,7 +3895,7 @@ export class ChatSession {
 		}
 		if (hasAttachments && attachments) {
 			for (const id of attachments) {
-				const block = this.resolveAttachment(id);
+				const block = await this.resolveAttachment(id);
 				if (block) {
 					sections.push(block);
 				}
@@ -4007,7 +4020,7 @@ export class ChatSession {
 	 * containing the actual content (file body, selection, etc.). Returns
 	 * `undefined` for unknown ids so callers can skip them silently.
 	 */
-	private resolveAttachment(id: string): string | undefined {
+	private async resolveAttachment(id: string): Promise<string | undefined> {
 		const editor = vscode.window.activeTextEditor;
 		switch (id) {
 			case 'current-file': {
@@ -4039,12 +4052,8 @@ export class ChatSession {
 				const content = editor.document.getText(editor.selection);
 				return `**Attached selection** (\`${filename}\` lines ${startLine}-${endLine}):\n\n\`\`\`${language}\n${content}\n\`\`\``;
 			}
-			case 'terminal-output': {
-				// VS Code's stable API doesn't expose terminal scrollback to
-				// extensions, so we surface a graceful hint rather than a
-				// silent no-op. The user can paste the relevant lines manually.
-				return '_(Terminal output capture is not yet supported. Please paste any relevant terminal output into the message manually.)_';
-			}
+			case 'terminal-output':
+				return this.workspaceContext?.resolveTerminalMention() ?? vscode.l10n.t('Terminal context is unavailable. Reload the window and try again.');
 			default:
 				return undefined;
 		}
@@ -4371,7 +4380,7 @@ export class ChatSession {
 			nonce += NONCE_CHARS.charAt(Math.floor(Math.random() * NONCE_CHARS.length));
 		}
 
-		const defaultModel = vscode.workspace.getConfiguration('sota').get<string>('defaultModel', 'sonnet').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+		const defaultModel = this.currentModel.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 		// Serialise the registry into the page so the webview JS can render the
 		// agent menu without an extra round-trip. JSON.stringify produces JSON
 		// that's safe to embed inside a <script type="application/json"> block.
@@ -4668,7 +4677,11 @@ export class ChatSession {
 				</div>
 				<button type="button" id="councilHistoryBtn" class="history-pane-new" data-ui-text="councilHistory"></button>
 				<label class="history-search"><input type="search" id="historySearch" data-ui-label="searchConversations" data-ui-placeholder="searchConversations" autocomplete="off" /></label>
-				<div class="history-results" id="historyResults" role="status"></div>
+				<div class="history-scope" role="group" data-ui-label="historyScope">
+					<button type="button" data-history-scope="all" aria-pressed="true" data-ui-text="allWorkspaces"></button>
+					<button type="button" data-history-scope="workspace" aria-pressed="false" data-ui-text="thisWorkspace"></button>
+				</div>
+				<div class="history-results-row"><div class="history-results" id="historyResults" role="status"></div><button type="button" id="historyClearFilters" class="history-clear-filters" hidden data-ui-text="clearHistoryFilters"></button></div>
 				<div class="history-pane-list" id="historyPaneList"></div>
 				<p class="history-no-results" id="historyNoResults" hidden data-ui-text="noConversations"></p>
 				<button class="history-show-more" id="historyShowMore" type="button" hidden data-ui-text="showMore"></button>
@@ -4929,14 +4942,14 @@ export class ChatSession {
 							<svg class="settings-section-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1"/><path d="M5 7l2 2-2 2M9 11h3"/></svg>
 							<h4>Terminal</h4>
 						</div>
-						<p class="settings-section-blurb">Tune how much terminal output Anton can read at a time.</p>
+						<p class="settings-section-blurb" data-ui-text="terminalCaptureHelp"></p>
 						<label class="settings-field">
 							<span class="settings-field-label">Output line cap — <span class="settings-slider-value" id="terminalOutputLinesValue">100</span></span>
 							<input class="settings-input settings-slider" type="range" min="20" max="500" step="10" data-setting-number="sota.terminal.outputLineCap" id="settingsTerminalLineCap" />
 						</label>
 						<label class="settings-toggle">
 							<input type="checkbox" data-setting="sota.terminal.shellIntegration" />
-							<span>Shell integration (advisory)</span>
+							<span data-ui-text="captureTerminalOutput"></span>
 						</label>
 					</section>
 
@@ -5441,26 +5454,26 @@ export class ChatPanel {
 	 * surface contract simple — read CLI, write IDE — and avoids the
 	 * conflict-resolution rabbit hole that two-way sync would open.
 	 *
-	 * Returns `true` on success and `false` if the file was missing,
+	 * Returns the imported conversation id, or undefined if the file was missing,
 	 * malformed, or otherwise unreadable. The caller is responsible for
 	 * surfacing user-visible feedback when this happens.
 	 */
 	static async openCliConversation(
 		cliId: string,
 		conversationStore: ConversationStore,
-	): Promise<boolean> {
+	): Promise<string | undefined> {
 		if (typeof cliId !== 'string' || !cliId) {
-			return false;
+			return undefined;
 		}
 		const cliRecord = await loadCliConversation(cliId);
 		if (!cliRecord) {
-			return false;
+			return undefined;
 		}
 		const fresh = conversationStore.create(cliRecord.messages);
 		ChatPanel.switchConversation(fresh.summary.id);
 		void vscode.window.showInformationMessage(
 			'Imported CLI session into a new IDE conversation.',
 		);
-		return true;
+		return fresh.summary.id;
 	}
 }

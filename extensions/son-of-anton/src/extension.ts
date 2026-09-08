@@ -10,7 +10,8 @@ import { ChatPanel } from './chat/ChatPanel';
 import { ChatViewProvider } from './chat/ChatViewProvider';
 import { WriteSnapshotStore } from './chat/WriteSnapshotStore';
 import { ConversationStore } from './chat/ConversationStore';
-import { ConversationListProvider, ConversationTreeItem } from './chat/ConversationListProvider';
+import { ConversationActions } from './chat/ConversationActions';
+import { ConversationListProvider } from './chat/ConversationListProvider';
 import { InlineEditProvider } from './inline/InlineEdit';
 import { CompletionProvider } from './inline/CompletionProvider';
 import { AgentStatusProvider } from './sidebar/AgentStatusProvider';
@@ -261,7 +262,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	const agentManager = new AgentManager(llmClient);
 	const agentStatusProvider = new AgentStatusProvider(agentManager);
 	const taskQueueProvider = new TaskQueueProvider(agentManager);
-	const statusBarManager = new StatusBarManager(agentManager, auth.broker);
+	const statusBarManager = new StatusBarManager(agentManager, auth.broker, context.secrets);
 
 	// --- Command execution model ---
 	// Agent shell commands run HOST-SIDE through the core `run_command` tool,
@@ -841,8 +842,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	// sidebar) so it can occupy a full editor column for the kanban grid.
 	context.subscriptions.push(
 		vscode.commands.registerCommand('sota.openTaskBoard', (conversationId?: string) => {
-			const list = conversationStore.list();
-			const activeId = typeof conversationId === 'string' && conversationStore.load(conversationId) ? conversationId : list[0]?.id;
+			const activeId = typeof conversationId === 'string' && conversationStore.load(conversationId) ? conversationId : conversationStore.getInitialConversation()?.summary.id;
 
 			// Best-effort hydration: if the orchestrator already has a live plan
 			// (e.g. the user proposed a plan, then opened the board before
@@ -975,7 +975,13 @@ export function activate(context: vscode.ExtensionContext): void {
 		}),
 	);
 
-	// Conversation history commands (Phase 47).
+	context.subscriptions.push(vscode.commands.registerCommand('sota.openProviderSettings', async () => {
+		await vscode.commands.executeCommand(`${ChatViewProvider.VIEW_ID}.focus`);
+		chatViewProvider.openProviderSettings();
+	}));
+
+	// Conversation actions share validation and confirmation across every surface.
+	const conversationActions = new ConversationActions(conversationStore);
 	context.subscriptions.push(
 		vscode.commands.registerCommand('sota.openConversation', async (id: string) => {
 			if (typeof id !== 'string' || !id) {
@@ -1007,20 +1013,13 @@ export function activate(context: vscode.ExtensionContext): void {
 				);
 				return;
 			}
-			// `ChatPanel.openCliConversation` mints the fresh IDE
-			// conversation and broadcasts the switch via the static
-			// `switchConversation` helper; the sidebar webview view also
-			// needs a nudge so its single-session surface re-renders.
-			const newest = conversationStore.list();
-			if (newest.length > 0) {
-				chatViewProvider.openConversation(newest[0].id);
-			}
+			chatViewProvider.openConversation(imported);
 		}),
 	);
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('sota.newConversation', async () => {
-			const fresh = conversationStore.create();
+			const fresh = conversationActions.create();
 			await vscode.commands.executeCommand(`${ChatViewProvider.VIEW_ID}.focus`);
 			chatViewProvider.openConversation(fresh.summary.id);
 			ChatPanel.switchConversation(fresh.summary.id);
@@ -1028,68 +1027,21 @@ export function activate(context: vscode.ExtensionContext): void {
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('sota.renameConversation', async (item?: ConversationTreeItem) => {
-			if (!item || !item.summary) {
-				return;
-			}
-			const newTitle = await vscode.window.showInputBox({
-				prompt: 'Rename conversation',
-				value: item.summary.title,
-				validateInput: (value) => (value.trim().length === 0 ? 'Title cannot be empty.' : undefined),
-			});
-			if (newTitle === undefined) {
-				return;
-			}
-			conversationStore.rename(item.summary.id, newTitle);
+		vscode.commands.registerCommand('sota.renameConversation', target => conversationActions.rename(target)),
+		vscode.commands.registerCommand('sota.deleteConversation', target => conversationActions.delete(target)),
+		conversationStore.onDidDelete(id => {
+			void checkpointManager.deleteFor(id).catch(error => console.warn('[checkpoint] Cleanup failed', error));
 		}),
 	);
 
-	context.subscriptions.push(
-		vscode.commands.registerCommand('sota.deleteConversation', async (item?: ConversationTreeItem) => {
-			if (!item || !item.summary) {
-				return;
-			}
-			const confirm = await vscode.window.showWarningMessage(
-				`Delete conversation "${item.summary.title}"? This cannot be undone.`,
-				{ modal: true },
-				'Delete',
-			);
-			if (confirm !== 'Delete') {
-				return;
-			}
-			const deletedId = item.summary.id;
-			conversationStore.delete(deletedId);
-			// Drop the conversation's checkpoints alongside it so we don't
-			// leak orphaned index entries pointing at a now-defunct
-			// conversation id.
-			void checkpointManager.deleteFor(deletedId).catch(error => console.warn('[checkpoint] Cleanup failed', error));
-			// If the deleted conversation was the active one, switch to the
-			// most recent remaining (or create a fresh one when the list is
-			// now empty) so the chat view doesn't keep rendering a tombstoned
-			// conversation's scrollback.
-			const remaining = conversationStore.list();
-			const target = remaining.length > 0 ? remaining[0].id : conversationStore.create().summary.id;
-			chatViewProvider.openConversation(target);
-			ChatPanel.switchConversation(target);
-		}),
-	);
-
-	// Export the active (most recent) conversation to a Markdown file. The
+	// Export this workspace’s active conversation to a Markdown file. The
 	// command is also wired to a small icon button in the chat header so
 	// users don't have to open the palette for a routine archive action.
 	context.subscriptions.push(
-		vscode.commands.registerCommand('sota.exportConversation', async () => {
-			const list = conversationStore.list();
-			if (list.length === 0) {
-				await vscode.window.showInformationMessage('No conversations to export.');
-				return;
-			}
-			// V1 exports the most recently updated conversation. A future
-			// follow-up can wire a quickpick when users push back on this.
-			const summary = list[0];
-			const record = conversationStore.load(summary.id);
+		vscode.commands.registerCommand('sota.exportConversation', async (conversationId?: string) => {
+			const record = typeof conversationId === 'string' ? conversationStore.load(conversationId) : conversationStore.getInitialConversation();
 			if (!record) {
-				await vscode.window.showWarningMessage('Conversation not found.');
+				await vscode.window.showInformationMessage('No conversations to export.');
 				return;
 			}
 			const { exportConversationAsMarkdown, exportFilename } = await import('./chat/ConversationExporter');
@@ -1237,9 +1189,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	// The previous conversation is preserved in the ConversationStore so it
 	// remains accessible from the History sidebar.
 	context.subscriptions.push(
-		vscode.commands.registerCommand('sota.clearChat', () => {
-			ChatPanel.clearConversation();
-		})
+		vscode.commands.registerCommand('sota.clearChat', () => vscode.commands.executeCommand('sota.newConversation'))
 	);
 
 	// --- Workspace Checkpoints ---
@@ -1254,8 +1204,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			if (summary === undefined) {
 				return;
 			}
-			const conversationList = conversationStore.list();
-			const conversationId = conversationList.length > 0 ? conversationList[0].id : conversationStore.create().summary.id;
+			const conversationId = conversationStore.getInitialConversation()?.summary.id ?? conversationStore.create().summary.id;
 			const record = conversationStore.load(conversationId);
 			const turnIndex = record ? record.messages.length : 0;
 			const checkpoint = await checkpointManager.capture(

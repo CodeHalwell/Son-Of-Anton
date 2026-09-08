@@ -49,13 +49,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 			],
 		};
 
-		// Pick the most recent conversation as the initial — the store handles
+		// Restore this workspace’s active conversation as the initial — the store handles
 		// the empty-store case by minting a fresh conversation, so the chat
 		// always boots with something to show. VS Code may dispose+recreate
 		// this view (e.g. on a different sidebar tab being activated), and
 		// we want subsequent reloads to also pick up the most recent state.
-		const list = this.conversationStore.list();
-		const initialConversationId = list.length > 0 ? list[0].id : undefined;
+		const initialConversationId = this.conversationStore.getInitialConversation()?.summary.id;
 
 		this.session = new ChatSession(
 			view.webview,
@@ -79,6 +78,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 			this.session?.dispose();
 			this.session = undefined;
 		});
+	}
+
+	openProviderSettings(): void {
+		this.session?.openProviderSettings();
 	}
 
 	/**

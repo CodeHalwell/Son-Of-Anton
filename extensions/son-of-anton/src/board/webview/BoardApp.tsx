@@ -15,7 +15,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { BoardChat } from './BoardChat';
 import { KanbanColumn } from './KanbanColumn';
-import { postToHost } from './vscode';
+import { postToHost, setBoardConversation } from './vscode';
 import type { BoardSnapshotView, PersonaView, SubtaskState, HostToWebviewMessage } from './protocol';
 import { boardStyles } from './styles';
 
@@ -51,6 +51,7 @@ export function BoardApp(): JSX.Element {
 			if (!msg || msg.type !== 'snapshot') {
 				return;
 			}
+			setBoardConversation(msg.conversationId);
 			setState({
 				conversationId: msg.conversationId,
 				conversationTitle: msg.conversationTitle,
@@ -85,6 +86,7 @@ function BoardInner({ state }: BoardInnerProps): JSX.Element {
 	const [assignee, setAssignee] = useState('');
 	const [filter, setFilter] = useState<'all' | 'active' | 'attention' | 'done'>('all');
 	const [chatOpen, setChatOpen] = useState(false);
+	useEffect(() => { setQuery(''); setAssignee(''); setFilter('all'); }, [state.conversationId]);
 	const personasById = useMemo(() => {
 		const map = new Map<string, PersonaView>();
 		for (const p of state.personas) {
@@ -166,7 +168,7 @@ function BoardInner({ state }: BoardInnerProps): JSX.Element {
 						))}
 					</section>
 				)}
-				<div id="board-assistant" className="assistant-container" hidden={!chatOpen}><BoardChat key={state.conversationId ?? 'empty'} assignees={assignees} /></div>
+				<div id="board-assistant" className="assistant-container" hidden={!chatOpen}><BoardChat key={state.conversationId ?? 'empty'} assignees={assignees} conversationId={state.conversationId} /></div>
 			</div>
 		</main>
 	);

@@ -103,6 +103,7 @@ export function buildCliAgentStack(host: CoreHost, options?: CliAgentStackOption
 	// any setting change is picked up on the next `sota` invocation
 	// without reload churn.
 	const stack = createAgentStack({
+		disableAcpRouting: options?.disableAcpRouting,
 		canUseAcp: () => host.workspace.isTrusted,
 		acpPermission: async (request, signal) => {
 			if (signal.aborted || !options?.approvalGate) { return { outcome: { outcome: 'cancelled' } }; }
@@ -124,7 +125,7 @@ export function buildCliAgentStack(host: CoreHost, options?: CliAgentStackOption
 				return !signal?.aborted && decision.approved;
 			},
 		} : undefined,
-		configStore: options?.disableAcpRouting ? { ...host.config, get: <T>(key: string) => key.endsWith('.acpAgent') ? undefined : host.config.get<T>(key) } : host.config,
+		configStore: host.config,
 		spendGuard: buildCliSpendGuard(),
 	});
 

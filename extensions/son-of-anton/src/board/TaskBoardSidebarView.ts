@@ -5,7 +5,7 @@
 
 import * as vscode from 'vscode';
 import { ConversationStore } from '../chat/ConversationStore';
-import { BoardSnapshot, SubtaskState, TaskBoardModel } from './TaskBoardModel';
+import { SubtaskState, TaskBoardModel } from './TaskBoardModel';
 
 interface OpenFullBoardMessage { type: 'openFullBoard' }
 interface OpenChatMessage { type: 'openChat' }
@@ -63,6 +63,7 @@ export class TaskBoardSidebarView implements vscode.WebviewViewProvider, vscode.
 		// Conversation list mutations (new/rename/delete) shift which
 		// conversation the sidebar should display, so refresh on any change.
 		this.disposables.push(
+			this.conversationStore.onDidChangeActive(() => this.pushSnapshot()),
 			this.conversationStore.onDidChange(() => {
 				this.pushSnapshot();
 			}),
@@ -118,7 +119,7 @@ export class TaskBoardSidebarView implements vscode.WebviewViewProvider, vscode.
 		}
 		switch (message.type) {
 			case 'openFullBoard':
-				void vscode.commands.executeCommand('sota.openTaskBoard');
+				void vscode.commands.executeCommand('sota.openTaskBoard', this.computeSnapshotPayload().conversationId ?? undefined);
 				return;
 			case 'openChat':
 				// `*.focus` reveals the matching webview view container; chat
@@ -142,34 +143,8 @@ export class TaskBoardSidebarView implements vscode.WebviewViewProvider, vscode.
 	}
 
 	private computeSnapshotPayload(): SidebarSnapshotPayload {
-		const list = this.conversationStore.list();
-		// Active conversation = most-recently updated, matching the heuristic
-		// used by ChatViewProvider and the `sota.openTaskBoard` command.
-		const activeId = list.length > 0 ? list[0].id : undefined;
-		const conversationTitle = activeId
-			? list.find(s => s.id === activeId)?.title ?? '(untitled)'
-			: '';
-
-		// Prefer the active conversation's board, but fall back to any other
-		// conversation that *does* have a board so users see real progress
-		// rather than an empty state when work is happening on a different
-		// conversation than the one their chat is currently focused on.
-		let snapshot: BoardSnapshot | undefined = activeId
-			? this.model.getSnapshot(activeId)
-			: undefined;
-		let displayConversationId: string | undefined = activeId;
-		let displayTitle: string = conversationTitle;
-		if (!snapshot || snapshot.tasks.length === 0) {
-			for (const summary of list) {
-				const candidate = this.model.getSnapshot(summary.id);
-				if (candidate && candidate.tasks.length > 0) {
-					snapshot = candidate;
-					displayConversationId = summary.id;
-					displayTitle = summary.title;
-					break;
-				}
-			}
-		}
+		const active = this.conversationStore.getInitialConversation()?.summary;
+		const snapshot = active ? this.model.getSnapshot(active.id) : undefined;
 
 		const counts = this.emptyCounts();
 		if (snapshot) {
@@ -181,8 +156,8 @@ export class TaskBoardSidebarView implements vscode.WebviewViewProvider, vscode.
 
 		return {
 			type: 'snapshot',
-			conversationId: displayConversationId ?? null,
-			conversationTitle: displayTitle,
+			conversationId: active?.id ?? null,
+			conversationTitle: active?.title ?? '',
 			hasPlan: total > 0,
 			counts,
 			total,
