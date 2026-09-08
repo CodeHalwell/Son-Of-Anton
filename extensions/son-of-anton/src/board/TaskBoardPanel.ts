@@ -155,8 +155,7 @@ export class TaskBoardPanel {
 	}
 
 	private pickDefaultConversationId(): string | undefined {
-		const list = this.conversationStore.list();
-		return list.length > 0 ? list[0].id : undefined;
+		return this.conversationStore.getInitialConversation()?.summary.id;
 	}
 
 	private async confirmRerun(taskId: string): Promise<void> {

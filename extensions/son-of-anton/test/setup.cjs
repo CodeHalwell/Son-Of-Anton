@@ -17,6 +17,11 @@ const vscodeMock = {
 		static from(...disposables) { return { dispose: () => { for (const disposable of disposables) { disposable.dispose(); } } }; }
 	},
 	l10n: { t: (message, ...args) => message.replace(/\{(\d+)\}/g, (_, index) => String(args[Number(index)] ?? '')) },
+	MarkdownString: class MarkdownString {
+		constructor(value = '') { this.value = value; this.isTrusted = false; }
+		appendText(text) { this.value += text; return this; }
+		appendMarkdown(text) { this.value += text; return this; }
+	},
 	EventEmitter: class EventEmitter {
 		constructor() {
 			this._listeners = [];

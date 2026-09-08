@@ -36,12 +36,12 @@ class FakeMemento implements vscode.Memento {
 	}
 }
 
-function makeContext(): {
+function makeContext(sharedGlobalState?: FakeMemento): {
 	context: vscode.ExtensionContext;
 	globalState: FakeMemento;
 	workspaceState: FakeMemento;
 } {
-	const globalState = new FakeMemento();
+	const globalState = sharedGlobalState ?? new FakeMemento();
 	const workspaceState = new FakeMemento();
 	const context = {
 		globalState,
@@ -207,7 +207,7 @@ suite('ConversationStore — Phase 47', () => {
 	});
 
 	test('migration imports the legacy CONVERSATION_STORAGE_KEY on first construction and clears it', () => {
-		const { context, globalState, workspaceState } = makeContext();
+		const { context, workspaceState } = makeContext();
 		const legacy: ChatMessage[] = [userMsg('legacy question'), assistantMsg('legacy answer')];
 		void workspaceState.update('sota.chatHistory', legacy);
 
@@ -219,7 +219,7 @@ suite('ConversationStore — Phase 47', () => {
 				count: list.length,
 				title: list[0]?.title,
 				legacyCleared: workspaceState.get<unknown>('sota.chatHistory') === undefined,
-				migrationFlag: globalState.get<boolean>('sota.conversations.migrated'),
+				migrationFlag: workspaceState.get<boolean>('sota.conversations.migrated'),
 			},
 			{ count: 1, title: 'legacy question', legacyCleared: true, migrationFlag: true },
 		);
@@ -227,14 +227,75 @@ suite('ConversationStore — Phase 47', () => {
 	});
 
 	test('migration runs at most once — re-instantiating with the flag set is a no-op', () => {
-		const { context, globalState, workspaceState } = makeContext();
+		const { context, workspaceState } = makeContext();
 		void workspaceState.update('sota.chatHistory', [userMsg('would-be reimport')]);
-		void globalState.update('sota.conversations.migrated', true);
+		void workspaceState.update('sota.conversations.migrated', true);
 
 		const store = new ConversationStore(context);
 
 		assert.strictEqual(store.list().length, 0);
 		store.dispose();
+	});
+
+	test('restores each workspace’s selected chat even when another conversation is newer', () => {
+		const a = makeContext();
+		const b = makeContext(a.globalState);
+		const storeA = new ConversationStore(a.context, 'file:///workspace-a', 'Project A');
+		const storeB = new ConversationStore(b.context, 'file:///workspace-b', 'Project B');
+		try {
+			const selected = storeA.create([userMsg('A selected')]);
+			storeA.rememberActive(selected.summary.id);
+			storeA.create([userMsg('A newer')]);
+			const other = storeB.create([userMsg('B newest')]);
+			storeA.rememberActive(other.summary.id);
+			const reopened = new ConversationStore(a.context, 'file:///workspace-a', 'Project A');
+			try {
+				assert.deepStrictEqual({
+					activeA: reopened.getInitialConversation()?.summary.id,
+					activeB: storeB.getInitialConversation()?.summary.id,
+					historyCount: reopened.list().length,
+					workspace: reopened.getInitialConversation()?.summary.workspaceName,
+				}, { activeA: selected.summary.id, activeB: other.summary.id, historyCount: 3, workspace: 'Project A' });
+				storeA.delete(selected.summary.id);
+				assert.strictEqual(reopened.getInitialConversation()?.summary.title, 'A newer');
+			} finally { reopened.dispose(); }
+		} finally { storeA.dispose(); storeB.dispose(); }
+	});
+
+	test('keeps older unscoped history available without restoring it in an unrelated workspace', () => {
+		const { context, globalState } = makeContext();
+		void globalState.update('sota.conversations.index', [{ id: 'older', title: 'Earlier work', updatedAt: 1, createdAt: 1, messageCount: 1 }]);
+		void globalState.update('sota.conversations.older', [userMsg('original message')]);
+		const store = new ConversationStore(context, 'file:///new-project', 'New Project');
+		try {
+			assert.deepStrictEqual({ initial: store.getInitialConversation(), retained: store.load('older')?.messages[0]?.content }, { initial: undefined, retained: 'original message' });
+		} finally { store.dispose(); }
+	});
+
+	test('migrates legacy history independently for each workspace, despite an older global flag', () => {
+		const a = makeContext();
+		const b = makeContext(a.globalState);
+		void a.globalState.update('sota.conversations.migrated', true);
+		void a.workspaceState.update('sota.chatHistory', [userMsg('Legacy A')]);
+		void b.workspaceState.update('sota.chatHistory', [userMsg('Legacy B')]);
+		const storeA = new ConversationStore(a.context, 'a', 'A');
+		const storeB = new ConversationStore(b.context, 'b', 'B');
+		try {
+			assert.deepStrictEqual([storeA.getInitialConversation()?.summary.title, storeB.getInitialConversation()?.summary.title, storeA.list().length], ['Legacy A', 'Legacy B', 2]);
+		} finally { storeA.dispose(); storeB.dispose(); }
+	});
+
+	test('retains model and workspace metadata through message updates and renames', () => {
+		const { context } = makeContext();
+		const store = new ConversationStore(context, 'a', 'A');
+		try {
+			const record = store.create();
+			store.update(record.summary.id, [], 'anton-code', 'plan', 'roster', 'claude-code-opus');
+			store.update(record.summary.id, [userMsg('Keep my provider')]);
+			store.rename(record.summary.id, 'Renamed');
+			const summary = store.load(record.summary.id)?.summary;
+			assert.deepStrictEqual({ model: summary?.lastModel, workspace: summary?.workspaceId, name: summary?.workspaceName, mode: summary?.lastMode, tab: summary?.lastTab }, { model: 'claude-code-opus', workspace: 'a', name: 'A', mode: 'plan', tab: 'roster' });
+		} finally { store.dispose(); }
 	});
 
 	test('onDidChange fires for create / update / rename / delete', () => {

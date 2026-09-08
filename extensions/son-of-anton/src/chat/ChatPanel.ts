@@ -472,6 +472,8 @@ export class ChatSession {
 		this.currentConversationId = resolved.summary.id;
 		this.conversation = [...resolved.messages];
 		this.currentSpecialistId = resolved.summary.lastSpecialist ?? 'anton';
+		this.currentModel = this.resolveChatModel(resolved.summary.lastModel);
+		this.conversationStore.rememberActive(this.currentConversationId);
 		this.currentMode = resolved.summary.lastMode ?? 'act';
 		this.currentTab = resolved.summary.lastTab ?? 'chat';
 		this.webview.html = this.getHtmlContent();
@@ -510,6 +512,7 @@ export class ChatSession {
 				messages: this.conversation,
 				lastSpecialist: this.currentSpecialistId,
 				lastMode: this.currentMode,
+				lastModel: this.currentModel,
 			});
 		} else {
 			// Even on an empty conversation we want the chip to reflect the
@@ -1207,6 +1210,14 @@ export class ChatSession {
 		this.webview.postMessage({ type: 'workspaceIndexUpdate', entries });
 	}
 
+	openProviderSettings(): void {
+		this.currentTab = 'settings';
+		this.saveConversation();
+		this.postSettingsState();
+		void this.refreshConnectionState();
+		this.webview.postMessage({ type: 'showProviderSettings' });
+	}
+
 	clearConversation(): void {
 		// "Clear" now means "start a new conversation" — the previous one is
 		// preserved in the store so users can return to it from the History
@@ -1219,15 +1230,17 @@ export class ChatSession {
 		this.pendingUiBlockResponses.clear();
 		const fresh = this.conversationStore.create();
 		this.currentConversationId = fresh.summary.id;
+		this.conversationStore.rememberActive(this.currentConversationId);
 		this.conversation = [...fresh.messages];
 		// Fresh conversation starts on the Chat tab so the user sees the
 		// composer immediately rather than landing on whichever pane was
 		// active in the previous conversation.
 		this.currentTab = 'chat';
+		this.saveConversation();
 		this.webview.postMessage({ type: 'tabChanged', tab: this.currentTab });
 		this.postBoardSnapshot();
 		this.postHistorySnapshot();
-		this.webview.postMessage({ type: 'conversationCleared', conversationId: this.currentConversationId });
+		this.webview.postMessage({ type: 'conversationCleared', conversationId: this.currentConversationId, lastModel: this.currentModel });
 		// Reset the running cost meter so a fresh chat starts at $0.00. The
 		// CostReporter's onDidChange will fanout the empty totals; the
 		// dedicated `costReset` message is the canonical "hide and zero" cue
@@ -1271,7 +1284,9 @@ export class ChatSession {
 		this.pendingUiBlockResponses.clear();
 		this.currentConversationId = record.summary.id;
 		this.conversation = [...record.messages];
-		this.currentSpecialistId = record.summary.lastSpecialist ?? this.currentSpecialistId;
+		this.currentSpecialistId = record.summary.lastSpecialist ?? 'anton';
+		this.currentModel = this.resolveChatModel(record.summary.lastModel);
+		this.conversationStore.rememberActive(this.currentConversationId);
 		this.currentMode = record.summary.lastMode ?? 'act';
 		this.currentTab = record.summary.lastTab ?? 'chat';
 		this.webview.postMessage({
@@ -1280,6 +1295,7 @@ export class ChatSession {
 			messages: this.conversation,
 			lastSpecialist: this.currentSpecialistId,
 			lastMode: this.currentMode,
+			lastModel: this.currentModel,
 		});
 		// Replay checkpoints so the pills come back after a conversation
 		// switch. Posted after `loadConversation` so the user bubbles are
@@ -1331,6 +1347,7 @@ export class ChatSession {
 			messages: this.conversation,
 			lastSpecialist: this.currentSpecialistId,
 			lastMode: this.currentMode,
+			lastModel: this.currentModel,
 		});
 		this.postCheckpointsForCurrentConversation();
 	}
@@ -1421,6 +1438,7 @@ export class ChatSession {
 			updatedAt: s.updatedAt,
 			messageCount: s.messageCount,
 			lastSpecialist: s.lastSpecialist,
+			workspaceName: s.workspaceName,
 		}));
 		this.webview.postMessage({
 			type: 'historySnapshot',
@@ -1448,6 +1466,7 @@ export class ChatSession {
 			getModel: () => this.currentModel,
 			setModel: (id: ModelId) => {
 				this.currentModel = id;
+				this.saveConversation();
 				this.webview.postMessage({ type: 'modelChange', model: id });
 			},
 			getMode: () => this.currentMode,
@@ -1492,11 +1511,11 @@ export class ChatSession {
 
 	/**
 	 * Pick the initial conversation when the session boots. Honours an
-	 * explicit caller-supplied id, then falls back to the most recently used
-	 * conversation, and finally creates a new one when the store is empty.
+	 * explicit caller-supplied id, then restores this workspace’s active
+	 * conversation, and finally creates a new one.
 	 */
 	private resolveInitialConversation(initialConversationId: string | undefined): {
-		summary: { id: string; lastSpecialist?: AgentHandle | 'anton'; lastMode?: ChatMode; lastTab?: ChatTab };
+		summary: { id: string; lastSpecialist?: AgentHandle | 'anton'; lastMode?: ChatMode; lastTab?: ChatTab; lastModel?: ModelId };
 		messages: ChatMessage[];
 	} {
 		if (initialConversationId) {
@@ -1505,16 +1524,16 @@ export class ChatSession {
 				return { summary: record.summary, messages: record.messages };
 			}
 		}
-		const list = this.conversationStore.list();
-		if (list.length > 0) {
-			const mostRecent = list[0];
-			const record = this.conversationStore.load(mostRecent.id);
-			if (record) {
-				return { summary: record.summary, messages: record.messages };
-			}
-		}
+		const current = this.conversationStore.getInitialConversation();
+		if (current) { return current; }
 		const fresh = this.conversationStore.create();
 		return { summary: fresh.summary, messages: fresh.messages };
+	}
+
+	private resolveChatModel(saved?: ModelId): ModelId {
+		if (typeof saved === 'string' && Object.prototype.hasOwnProperty.call(MODEL_METADATA, saved)) { return saved; }
+		const configured = vscode.workspace.getConfiguration('sota').get<string>('defaultModel', 'sonnet');
+		return typeof configured === 'string' && Object.prototype.hasOwnProperty.call(MODEL_METADATA, configured) ? configured as ModelId : 'sonnet';
 	}
 
 	private saveConversation(): void {
@@ -1525,6 +1544,7 @@ export class ChatSession {
 			lastSpecialist,
 			this.currentMode,
 			this.currentTab,
+			this.currentModel,
 		);
 	}
 
@@ -1532,6 +1552,12 @@ export class ChatSession {
 		this.webview.onDidReceiveMessage(
 			async (message: WebviewMessage) => {
 				switch (message.type) {
+					case 'selectModel':
+						if (message.conversationId === this.currentConversationId && typeof message.model === 'string' && Object.prototype.hasOwnProperty.call(MODEL_METADATA, message.model)) {
+							this.currentModel = message.model;
+							this.saveConversation();
+						}
+						break;
 					case 'browseAcpAdapters':
 						await vscode.commands.executeCommand('sota.browseAcpAdapters');
 						break;
@@ -1543,7 +1569,7 @@ export class ChatSession {
 						break;
 					case 'webviewReady':
 						// Bootstrap only after the document installs its message listener.
-						this.webview.postMessage({ type: 'loadConversation', conversationId: this.currentConversationId, messages: this.conversation, lastSpecialist: this.currentSpecialistId, lastMode: this.currentMode });
+						this.webview.postMessage({ type: 'loadConversation', conversationId: this.currentConversationId, messages: this.conversation, lastSpecialist: this.currentSpecialistId, lastMode: this.currentMode, lastModel: this.currentModel });
 						this.webview.postMessage({ type: 'tabChanged', tab: this.currentTab });
 						this.webview.postMessage({ type: 'workspaceIndexUpdate', entries: this.workspaceIndex });
 						this.postCheckpointsForCurrentConversation();
@@ -2742,10 +2768,11 @@ export class ChatSession {
 				this.conversation = [...record.messages];
 				this.webview.postMessage({
 					type: 'loadConversation',
-				conversationId: this.currentConversationId,
+					conversationId: this.currentConversationId,
 					messages: this.conversation,
 					lastSpecialist: this.currentSpecialistId,
 					lastMode: this.currentMode,
+					lastModel: this.currentModel,
 				});
 			}
 		}
@@ -4375,7 +4402,7 @@ export class ChatSession {
 			nonce += NONCE_CHARS.charAt(Math.floor(Math.random() * NONCE_CHARS.length));
 		}
 
-		const defaultModel = vscode.workspace.getConfiguration('sota').get<string>('defaultModel', 'sonnet').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+		const defaultModel = this.currentModel.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 		// Serialise the registry into the page so the webview JS can render the
 		// agent menu without an extra round-trip. JSON.stringify produces JSON
 		// that's safe to embed inside a <script type="application/json"> block.

@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 import { ChatMessage } from './ChatPanel';
 import { AgentHandle } from 'son-of-anton-core/agents/types';
 import { ChatMode } from 'son-of-anton-core/agents/agentEvents';
+import type { ModelId } from 'son-of-anton-core/llm/LlmClient';
 
 /**
  * Maximum number of conversations retained in the store. Once exceeded the
@@ -27,6 +28,8 @@ const MAX_MESSAGES_PER_CONVERSATION = 500;
  * suffix so the sidebar tree stays readable.
  */
 const MAX_TITLE_LENGTH = 50;
+
+const ACTIVE_KEY = 'sota.conversations.active';
 
 const INDEX_KEY = 'sota.conversations.index';
 const RECORD_PREFIX = 'sota.conversations.';
@@ -71,6 +74,10 @@ export interface ConversationSummary {
 	 * `'chat'` when undefined (every legacy summary lands here).
 	 */
 	readonly lastTab?: ChatTab;
+	readonly lastModel?: ModelId;
+	/** Absent on older conversations whose original workspace is unknown. */
+	readonly workspaceId?: string;
+	readonly workspaceName?: string;
 }
 
 /**
@@ -150,19 +157,23 @@ export class ConversationStore implements vscode.Disposable {
 	private readonly _onDidChange = new vscode.EventEmitter<void>();
 	readonly onDidChange: vscode.Event<void> = this._onDidChange.event;
 
-	constructor(private readonly context: vscode.ExtensionContext) {
+	constructor(
+		private readonly context: vscode.ExtensionContext,
+		private readonly workspaceId = vscode.workspace.workspaceFile?.toString() ?? JSON.stringify((vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.toString()).sort()),
+		private readonly workspaceName = vscode.workspace.name ?? 'Empty Window',
+	) {
 		this.migrateLegacyConversation();
 	}
 
 	/**
 	 * If a legacy `sota.chatHistory` entry exists in workspaceState, import it
 	 * as a single conversation in the new store and clear the legacy key. Runs
-	 * at most once per install, gated by a globalState flag so subsequent
+	 * once per workspace, gated by a workspaceState flag so subsequent
 	 * activations don't re-import a key the user may have intentionally
 	 * cleared from the new store.
 	 */
 	private migrateLegacyConversation(): void {
-		const alreadyMigrated = this.context.globalState.get<boolean>(MIGRATION_FLAG_KEY);
+		const alreadyMigrated = this.context.workspaceState.get<boolean>(MIGRATION_FLAG_KEY);
 		if (alreadyMigrated) {
 			return;
 		}
@@ -177,6 +188,8 @@ export class ConversationStore implements vscode.Disposable {
 				createdAt: now,
 				updatedAt: now,
 				messageCount: messages.length,
+				workspaceId: this.workspaceId,
+				workspaceName: this.workspaceName,
 			};
 			const index = [summary, ...this.readIndex()];
 			void this.context.globalState.update(recordKey(id), messages);
@@ -184,12 +197,25 @@ export class ConversationStore implements vscode.Disposable {
 		}
 		// Clear the legacy key regardless so we don't keep a stale copy around.
 		void this.context.workspaceState.update(LEGACY_CONVERSATION_KEY, undefined);
-		void this.context.globalState.update(MIGRATION_FLAG_KEY, true);
+		void this.context.workspaceState.update(MIGRATION_FLAG_KEY, true);
 	}
 
 	/** Returns the conversation summaries, newest-first by `updatedAt`. */
 	list(): ReadonlyArray<ConversationSummary> {
 		return [...this.readIndex()].sort((a, b) => b.updatedAt - a.updatedAt);
+	}
+
+	/** Only restore conversations associated with this workspace; older unscoped history stays accessible. */
+	getInitialConversation(): ConversationRecord | undefined {
+		const active = this.context.workspaceState.get<string>(ACTIVE_KEY);
+		const record = active ? this.load(active) : undefined;
+		if (record?.summary.workspaceId === this.workspaceId) { return record; }
+		const recent = this.list().find(summary => summary.workspaceId === this.workspaceId);
+		return recent ? this.load(recent.id) : undefined;
+	}
+
+	rememberActive(id: string): void {
+		if (this.load(id)?.summary.workspaceId === this.workspaceId) { void this.context.workspaceState.update(ACTIVE_KEY, id); }
 	}
 
 	/** Returns the full record for a conversation, or `undefined` if missing. */
@@ -219,6 +245,8 @@ export class ConversationStore implements vscode.Disposable {
 			createdAt: now,
 			updatedAt: now,
 			messageCount: messages.length,
+			workspaceId: this.workspaceId,
+			workspaceName: this.workspaceName,
 		};
 		const index = [summary, ...this.readIndex()];
 		void this.context.globalState.update(recordKey(id), messages);
@@ -240,6 +268,7 @@ export class ConversationStore implements vscode.Disposable {
 		lastSpecialist?: AgentHandle | 'anton',
 		lastMode?: ChatMode,
 		lastTab?: ChatTab,
+		lastModel?: ModelId,
 	): void {
 		const index = this.readIndex();
 		const existing = index.find(s => s.id === id);
@@ -258,6 +287,9 @@ export class ConversationStore implements vscode.Disposable {
 			lastSpecialist: lastSpecialist ?? existing.lastSpecialist,
 			lastMode: lastMode ?? existing.lastMode,
 			lastTab: lastTab ?? existing.lastTab,
+			lastModel: lastModel ?? existing.lastModel,
+			workspaceId: existing.workspaceId,
+			workspaceName: existing.workspaceName,
 		};
 		const updatedIndex = index.map(s => (s.id === id ? next : s));
 		void this.context.globalState.update(recordKey(id), trimmed);

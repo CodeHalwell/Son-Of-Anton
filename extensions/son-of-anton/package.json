@@ -449,6 +449,10 @@
 				"title": "Anton: Browse ACP Adapters"
 			},
 			{
+				"command": "sota.openProviderSettings",
+				"title": "%command.openProviderSettings%"
+			},
+			{
 				"command": "sota.configureClaudeAcp",
 				"title": "Anton: Configure Claude ACP"
 			},

@@ -10,6 +10,7 @@ export function getChatUiStrings(): Record<string, string> {
 		browseAcpAdapters: vscode.l10n.t('Browse ACP Adapters'),
 		reviewWithCouncil: vscode.l10n.t('Review with Council'),
 		councilHistory: vscode.l10n.t('Council History'),
+		historyWorkspaceUnknown: vscode.l10n.t('Earlier conversation'),
 		providerConfigured: vscode.l10n.t('Configured'),
 		providerUnconfigured: vscode.l10n.t('Not configured'),
 		managedByAcp: vscode.l10n.t('Managed by ACP'),

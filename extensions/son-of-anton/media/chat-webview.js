@@ -511,8 +511,14 @@
 			draftStatus.hidden = !draft.text && !draft.attachments.length && !draft.mentions.length && !draft.images.length;
 			draftStatus.textContent = uiText(draft.images.length ? 'draftImages' : 'draftSaved');
 		}
-		function activateDraft(id) {
-			if (typeof id !== 'string' || !id || id === activeConversationId) return;
+		function activateDraft(id, savedModel) {
+			if (typeof id !== 'string' || !id) return;
+			if (id === activeConversationId) {
+				if (typeof savedModel === 'string' && Object.hasOwn(MODEL_METADATA_RAW, savedModel)) currentModel = savedModel;
+				updateModelLabel();
+				updateModelMenuChecks();
+				return;
+			}
 			persistDraft();
 			activeConversationId = id;
 			const draft = drafts.get(id);
@@ -521,7 +527,7 @@
 			mentions = Array.isArray(draft?.mentions) ? [...draft.mentions] : [];
 			imageAttachments = Array.isArray(draft?.images) ? [...draft.images] : [];
 			includeContext.checked = draft?.includeContext !== false;
-			currentModel = typeof draft?.model === 'string' ? draft.model : document.body.dataset.defaultModel || 'sonnet';
+			currentModel = [savedModel, draft?.model, document.body.dataset.defaultModel, 'sonnet'].find(model => typeof model === 'string' && Object.hasOwn(MODEL_METADATA_RAW, model));
 			historyIndex = -1;
 			historyDraft = '';
 			messageInput.style.height = 'auto';
@@ -877,7 +883,7 @@
 			heading.textContent = active?.title || uiText('newConversation');
 			heading.title = heading.textContent;
 			const query = historySearch.value.trim().toLocaleLowerCase();
-			const matches = conversations.filter(conversation => [conversation.title, conversation.lastSpecialist].filter(Boolean).join(' ').toLocaleLowerCase().includes(query)).sort((a, b) => b.updatedAt - a.updatedAt);
+			const matches = conversations.filter(conversation => [conversation.title, conversation.lastSpecialist, conversation.workspaceName].filter(Boolean).join(' ').toLocaleLowerCase().includes(query)).sort((a, b) => b.updatedAt - a.updatedAt);
 			document.getElementById('historyResults').textContent = uiText(matches.length === 1 ? 'conversationResult' : 'conversationResults', matches.length.toLocaleString());
 			document.getElementById('historyNoResults').hidden = !conversations.length || matches.length > 0;
 			historyShowMore.hidden = matches.length <= historyLimit;
@@ -923,7 +929,7 @@
 				metaEl.className = 'history-pane-row-meta';
 				const count = Number(conv.messageCount || 0);
 				const messageWord = count === 1 ? 'message' : 'messages';
-				metaEl.textContent = formatRelativeTime(conv.updatedAt) + ' · ' + count + ' ' + messageWord;
+				metaEl.textContent = [conv.workspaceName || uiText('historyWorkspaceUnknown'), formatRelativeTime(conv.updatedAt), count + ' ' + messageWord].join(' · ');
 				body.appendChild(metaEl);
 				row.appendChild(body);
 
@@ -3864,6 +3870,7 @@
 			const target = e.target.closest('.popover-item');
 			if (!target) return;
 			currentModel = target.dataset.model;
+			vscode.postMessage({ type: 'selectModel', conversationId: activeConversationId, model: currentModel });
 			persistDraft();
 			updateModelLabel();
 			updateModelMenuChecks();
@@ -4224,7 +4231,7 @@
 					updateAgentMenuChecks();
 					updateHeaderSubtitle();
 					updateComposerPlaceholder();
-					activateDraft(message.conversationId);
+					activateDraft(message.conversationId, message.lastModel);
 					setStreamingState(false);
 					flushStreamingText();
 					currentAssistantDiv = null;
@@ -4270,7 +4277,7 @@
 				case 'conversationCleared':
 					conversationHasUnmeteredUsage = false;
 					resetEarlierHistory();
-					activateDraft(message.conversationId);
+					activateDraft(message.conversationId, message.lastModel);
 					setStreamingState(false);
 					flushStreamingText();
 					currentAssistantDiv = null;
@@ -4405,9 +4412,14 @@
 						updateComposerPlaceholder();
 					}
 					break;
+				case 'showProviderSettings':
+					applyActiveTab('settings');
+					document.getElementById('settingsProviders')?.scrollIntoView({ block: 'start' });
+					break;
 				case 'modelChange':
 					if (message.model) {
 						currentModel = message.model;
+						persistDraft();
 						updateModelLabel();
 						updateModelMenuChecks();
 					}
@@ -9205,5 +9217,5 @@
 			});
 		}
 
-		activateDraft(document.body.dataset.conversationId);
+		activateDraft(document.body.dataset.conversationId, document.body.dataset.defaultModel);
 		vscode.postMessage({ type: 'webviewReady' });

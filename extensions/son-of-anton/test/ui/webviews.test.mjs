@@ -480,6 +480,7 @@ test('model picker: search by provider, choose with keyboard, escape restores fo
 	await page.keyboard.press('Enter');
 	await page.locator('#modelMenu').waitFor({ state: 'hidden' });
 	assert.equal(await page.locator('#modelChip').evaluate(button => button === document.activeElement), true);
+	assert.deepEqual(await page.evaluate(() => sentMessages.find(message => message.type === 'selectModel')), { type: 'selectModel', conversationId: 'initial-conversation', model: selected });
 	await page.locator('#modelChip').click();
 	await page.getByRole('searchbox', { name: 'Search Models…' }).fill('does-not-exist');
 	await page.locator('#modelSearchEmpty').waitFor({ state: 'visible' });
@@ -495,6 +496,42 @@ test('model picker: search by provider, choose with keyboard, escape restores fo
 	const bounds = await page.locator('#modelMenu').boundingBox();
 	assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= 280 && bounds.y >= 0);
 	await screenshot(page, 'model-search');
+});
+
+test('models restore from the host across reload, chat switches, and New Chat without losing drafts', async t => {
+	const staleDraft = { conversationDrafts: [['initial-conversation', { text: 'Unsent work', model: 'haiku', attachments: [], mentions: [] }]] };
+	const page = await openSurface(t, 'chat', 420, staleDraft);
+	await post(page, { type: 'loadConversation', conversationId: 'initial-conversation', lastModel: 'claude-code-opus', messages: [] });
+	assert.match(await page.locator('#modelChip').textContent(), /Opus.*Claude Code/);
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Unsent work');
+	await screenshot(page, 'restored-claude-model');
+	await post(page, { type: 'loadConversation', conversationId: 'second', lastModel: 'haiku', messages: [] });
+	assert.match(await page.locator('#modelChip').textContent(), /Haiku/);
+	await post(page, { type: 'loadConversation', conversationId: 'initial-conversation', lastModel: 'claude-code-opus', messages: [] });
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Unsent work');
+	await post(page, { type: 'conversationCleared', conversationId: 'fresh', lastModel: 'claude-code-opus' });
+	assert.match(await page.locator('#modelChip').textContent(), /Opus.*Claude Code/);
+	assert.equal(await page.locator('#messageInput').inputValue(), '');
+	await page.locator('#messageInput').fill('Use the restored provider');
+	await page.locator('#messageInput').press('Enter');
+	assert.equal(await page.evaluate(() => sentMessages.find(message => message.type === 'sendMessage').model), 'claude-code-opus');
+});
+
+test('provider-settings action opens Settings, and history identifies and searches workspaces', async t => {
+	const page = await openSurface(t, 'chat', 420);
+	await post(page, { type: 'showProviderSettings' });
+	assert.equal(await page.getByRole('tab', { name: 'Settings tab', exact: true }).getAttribute('aria-selected'), 'true');
+	await post(page, { type: 'historySnapshot', conversations: [
+		{ id: 'a', title: 'Explain this file', workspaceName: 'Project Alpha', updatedAt: Date.now(), messageCount: 2 },
+		{ id: 'b', title: 'Earlier work', updatedAt: Date.now(), messageCount: 1 },
+	] });
+	await page.getByRole('tab', { name: 'History tab', exact: true }).click();
+	assert.match(await page.locator('#historyPaneList').textContent(), /Project Alpha/);
+	assert.match(await page.locator('#historyPaneList').textContent(), /Earlier conversation/);
+	await screenshot(page, 'workspace-history');
+	await page.getByRole('searchbox', { name: 'Search Conversations…' }).fill('Project Alpha');
+	assert.equal(await page.locator('.history-pane-row').count(), 1);
+	await assertNoPageOverflow(page);
 });
 
 test('context: preview real host context, ignore stale updates, and send the per-conversation setting', async t => {
