@@ -608,9 +608,12 @@ function ensureNodeForPlatform(spec) {
 
 function extractNodeArchive(archivePath, destDir, target) {
 	if (target.nodeArchiveName.endsWith('.zip')) {
-		const r = spawnSync('unzip', ['-q', '-o', archivePath, '-d', destDir], { stdio: 'inherit' });
+		// Windows ships bsdtar with ZIP support; a separate Unix unzip is not required.
+		const r = process.platform === 'win32'
+			? spawnSync('tar.exe', ['-xf', archivePath, '-C', destDir], { stdio: 'inherit' })
+			: spawnSync('unzip', ['-q', '-o', archivePath, '-d', destDir], { stdio: 'inherit' });
 		if (r.status !== 0) {
-			console.error('unzip failed for Windows Node tarball');
+			console.error(`Windows Node archive extraction failed: ${r.error?.message ?? r.status}`);
 			process.exit(r.status ?? 1);
 		}
 		return;
