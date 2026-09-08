@@ -1667,6 +1667,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	// enough to plausibly benefit from a code graph. The prompt is silent for
 	// users with tiny workspaces or those who've already answered.
 	context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => { void codeGraphBackend.start(); }));
+	context.subscriptions.push(vscode.workspace.onDidGrantWorkspaceTrust(() => { void codeGraphBackend.start(); }));
 	context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => { if (event.affectsConfiguration('sota.codeGraph')) { void codeGraphBackend.start(); } }));
 
 	// --- Personality ---

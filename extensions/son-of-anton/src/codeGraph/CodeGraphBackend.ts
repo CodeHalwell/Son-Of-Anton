@@ -75,6 +75,7 @@ export class CodeGraphBackend implements vscode.Disposable {
 		const choice = config.get<CodeGraphBackendChoice>('backend', 'auto');
 		const workspace = this.options.getWorkspaceRoot?.() ?? this.options.workspaceRoot;
 		if (choice === 'off' || !workspace) { this.setState('off'); return; }
+		if (!vscode.workspace.isTrusted) { this.setState('off', vscode.l10n.t('Trust this workspace to enable the code graph.')); return; }
 		if (choice === 'docker') {
 			this.setState('degraded', 'Connect the optional Docker gateway through sota.mcp.servers, or select the embedded backend.');
 			return;

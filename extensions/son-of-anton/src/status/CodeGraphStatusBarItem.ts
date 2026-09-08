@@ -54,7 +54,7 @@ export class CodeGraphStatusBarItem implements vscode.Disposable {
 			case 'off':
 			default:
 				this.item.text = '$(database) code-graph $(circle-outline)';
-				this.item.tooltip = this.buildTooltip('off');
+				this.item.tooltip = this.buildTooltip(this.backend.failureReason ?? 'off');
 				return;
 		}
 	}

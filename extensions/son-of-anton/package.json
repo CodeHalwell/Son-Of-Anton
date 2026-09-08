@@ -24,6 +24,9 @@
 		"virtualWorkspaces": false
 	},
 	"contributes": {
+		"configurationDefaults": {
+			"workbench.secondarySideBar.defaultVisibility": "hidden"
+		},
 		"chatParticipants": [
 			{
 				"id": "sota.anton",
