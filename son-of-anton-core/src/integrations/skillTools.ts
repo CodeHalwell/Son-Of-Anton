@@ -12,7 +12,7 @@ export const LIST_SKILLS_TOOL: Tool = {
 		inputSchema: { type: 'object', properties: { query: { type: 'string' }, offset: { type: 'integer' } } },
 	},
 	async execute(input, ctx) {
-		if (ctx.getConfigValue?.('sota.integrations.enabled') === false) { return { content: 'System integrations are disabled.' }; }
+		if (ctx.getConfigValue?.('sota.integrations.enabled') === false) { return { content: 'System integrations are disabled.', isError: true }; }
 		const catalog = await getSystemCatalog({ workspace: ctx.workspaceRoot });
 		const query = typeof input.query === 'string' ? input.query.toLowerCase() : '';
 		const entries = catalog.entries.filter(entry => entry.kind === 'skill' && entry.enabled && `${entry.name} ${entry.description} ${entry.source}`.toLowerCase().includes(query));

@@ -61,7 +61,9 @@
 	}
 	function merge(report) { const previous = reports.get(report?.id); if (!report?.id || (previous?.sequence ?? -1) > report.sequence || (!report.snapshot && previous?.snapshot && previous.sequence === report.sequence)) { return; } reports.set(report.id, report); }
 	window.addEventListener('message', event => {
+		if (event.origin !== window.origin || event.source !== window.parent) { return; }
 		const message = event.data;
+		if (!message || typeof message !== 'object') { return; }
 		if (message.type === 'councilState') {
 			if (message.groups) { const initial = !groups.length; const current = byId('group').value || saved.groupId; groups = message.groups; byId('group').replaceChildren(...groups.map(group => { const option = node('option', group.name); option.value = group.id; return option; })); if (groups.some(group => group.id === current)) { byId('group').value = current; } if (initial && saved.rounds === undefined) { byId('rounds').value = String(groups.find(group => group.id === byId('group').value)?.rounds ?? 1); } }
 			(message.reports || []).forEach(merge); if (message.selected) { selected = message.selected; } selected ||= message.reports?.[0]?.id;

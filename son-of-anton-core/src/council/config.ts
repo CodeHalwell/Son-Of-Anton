@@ -2,7 +2,8 @@
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { readBoundedFile } from '../util/readBoundedFile';
 import { defaultCouncilGroup, validateGroup } from './prompts';
 import type { CouncilGroup } from './types';
 
@@ -10,8 +11,7 @@ export function councilDirectory(workspace: string): string { return join(homedi
 export async function readCouncilGroups(directory: string, model = 'sonnet'): Promise<CouncilGroup[]> {
 	const file = join(directory, 'groups.json');
 	try {
-		if ((await stat(file)).size > 128 * 1024) { throw new Error('Council groups file exceeds 128 KiB'); }
-		const groups = JSON.parse(await readFile(file, 'utf8')) as CouncilGroup[];
+		const groups = JSON.parse((await readBoundedFile(file, 128 * 1024)).content) as CouncilGroup[];
 		if (!Array.isArray(groups) || !groups.length || groups.length > 64 || new Set(groups.map(group => group.id)).size !== groups.length) { throw new Error('Expected 1–64 unique Council groups'); }
 		groups.forEach(validateGroup); return groups;
 	} catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return [defaultCouncilGroup(model)]; } throw error; }

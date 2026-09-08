@@ -5,6 +5,7 @@ import { mkdir, readFile, writeFile, rename, unlink, realpath, stat, open, readd
 import { join, relative, isAbsolute } from 'node:path';
 import { GitSnapshotStore, type GitSnapshot } from '../checkpoint/GitSnapshotStore';
 import type { ValidationEvidence } from './ProposalValidation';
+import { readBoundedFile } from '../util/readBoundedFile';
 
 export interface WorkspaceProposal {
 	version: 1;
@@ -64,8 +65,7 @@ export class IsolatedWorkspace {
 	}
 	async load(id: string): Promise<WorkspaceProposal> {
 		const file = join(this.folder(id), 'proposal.json');
-		if ((await stat(file)).size > 256 * 1024) { throw new Error('Workspace proposal exceeds size limit'); }
-		const proposal = JSON.parse(await readFile(file, 'utf8')) as WorkspaceProposal;
+		const proposal = JSON.parse((await readBoundedFile(file, 256 * 1024)).content) as WorkspaceProposal;
 		if (proposal.version !== 1 || proposal.id !== id || !proposal.baseline || !Array.isArray(proposal.files)) { throw new Error('Invalid workspace proposal'); }
 		if (await realpath(proposal.worktree) !== await realpath(join(this.folder(id), 'workspace'))) { throw new Error('Proposal worktree does not match its retained directory'); }
 		if (proposal.validation?.status === 'running') {

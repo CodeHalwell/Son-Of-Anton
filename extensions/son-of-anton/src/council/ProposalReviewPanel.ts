@@ -38,7 +38,11 @@ export class ProposalReviewPanel implements vscode.Disposable {
 		if (!this.closed) { this.panel.webview.html = proposalReviewHtml(this.proposal, this.selected, this.busy); }
 	}
 	private checkBuffers(): void {
-		if (vscode.workspace.textDocuments.some(document => document.isDirty && document.uri.scheme === 'file' && !path.relative(this.displayWorkspace, document.uri.fsPath).startsWith('..'))) { throw new Error(vscode.l10n.t('Save workspace editor buffers before validating, applying or restoring changes.')); }
+		if (vscode.workspace.textDocuments.some(document => {
+			if (!document.isDirty || document.uri.scheme !== 'file') { return false; }
+			const relative = path.relative(this.displayWorkspace, document.uri.fsPath);
+			return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+		})) { throw new Error(vscode.l10n.t('Save workspace editor buffers before validating, applying or restoring changes.')); }
 	}
 	private async handle(message: { type?: string; files?: string[]; file?: string; index?: number }): Promise<void> {
 		if (!message || typeof message !== 'object') { return; }

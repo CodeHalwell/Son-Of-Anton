@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { IsolatedWorkspace, type WorkspaceProposal } from 'son-of-anton-core/workspace/IsolatedWorkspace';
 import { GitSnapshotStore } from 'son-of-anton-core/checkpoint/GitSnapshotStore';
 import { realpathSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { CouncilStore, renderCouncilMarkdown } from 'son-of-anton-core/council/CouncilStore';
 import { CouncilService } from 'son-of-anton-core/council/CouncilService';
 import { CouncilModelRunner } from 'son-of-anton-core/council/CouncilModelRunner';
@@ -34,12 +35,14 @@ export class CouncilController implements vscode.Disposable {
 	private promotion = Promise.resolve();
 	private restoringBoard = false;
 	private readonly boardOwners = new Map<string, string>();
+	private readonly evidenceScheme = `sota-council-evidence-${randomUUID()}`;
 	constructor(private readonly context: vscode.ExtensionContext, private readonly workspace: string, llm: LlmClient, acp: AcpRuntime, private readonly bridge: AgentBridge, private readonly board: TaskBoardModel, private readonly conversations: ConversationStore) {
 		this.isolation = new IsolatedWorkspace(path.join(context.globalStorageUri.fsPath, 'isolated-tasks'));
 		this.displayWorkspace = workspace;
 		this.workspace = realpathSync(workspace);
 		const configured = vscode.workspace.getConfiguration('sota').get<string>('council.storageDirectory');
 		this.service = new CouncilService(new CouncilStore(configured || councilDirectory(this.workspace)), new CouncilModelRunner(llm, acp, () => vscode.workspace.getConfiguration('sota').get<AcpAgentDefinition[]>('acp.agents', []), () => this.bridge.isWorkspaceTrusted(workspace)));
+		this.disposables.push(vscode.workspace.registerTextDocumentContentProvider(this.evidenceScheme, { provideTextDocumentContent: uri => this.evidenceContent(uri) }));
 		this.ready = this.service.store.recover().then(async () => { for (const summary of await this.service.store.summaries(100_000)) { if (summary.hasBoard) { this.restoreBoard(await this.service.store.load(summary.id)); } } });
 		void this.ready.catch(() => {});
 		this.disposables.push(board.onDidChangeBoard(({ conversationId }) => {
@@ -54,6 +57,11 @@ export class CouncilController implements vscode.Disposable {
 	}
 	private view(report: CouncilReport) { return { ...report, owned: this.service.isOwned(report.id), snapshot: { ...report.snapshot, patch: '' } }; }
 	private model(): string { return vscode.workspace.getConfiguration('sota').get<string>('defaultModel', 'sonnet'); }
+	private async evidenceContent(uri: vscode.Uri): Promise<string> {
+		const report = await this.service.store.load(uri.query);
+		if (report.snapshot.workspace !== this.workspace) { throw new Error('Evidence is outside the workspace'); }
+		return report.snapshot.patch;
+	}
 	open(): void {
 		if (this.panel) { this.panel.reveal(); void this.sendState(); return; }
 		const panel = vscode.window.createWebviewPanel('sota.council', vscode.l10n.t('AI Council'), vscode.ViewColumn.Active, { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'media')], retainContextWhenHidden: true });
@@ -98,10 +106,10 @@ export class CouncilController implements vscode.Disposable {
 			case 'export': if (typeof message.id === 'string') { await vscode.window.showTextDocument(vscode.Uri.file(await this.service.store.exportMarkdown(message.id))); } return;
 			case 'evidence': {
 				const report = await this.service.store.load(message.id ?? ''); const finding = report.stages.find(stage => stage.id === message.stageId)?.answer?.findings[message.index ?? -1];
-				if (!finding || report.snapshot.workspace !== this.workspace) { throw new Error('Finding unavailable for this workspace'); }
-				const file = path.resolve(this.workspace, finding.file); const relative = path.relative(this.workspace, realpathSync(file));
-				if (relative.startsWith('..') || path.isAbsolute(relative)) { throw new Error('Evidence is outside the workspace'); }
-				await vscode.window.showTextDocument(vscode.Uri.file(path.resolve(this.displayWorkspace, finding.file)), { selection: new vscode.Range(finding.line - 1, 0, finding.line - 1, 0) }); return;
+				if (!finding || report.snapshot.workspace !== this.workspace || !report.snapshot.files.includes(finding.file)) { throw new Error('Finding unavailable for this workspace'); }
+				const uri = vscode.Uri.from({ scheme: this.evidenceScheme, path: `/${finding.file}.diff`, query: report.id });
+				const line = Math.max(0, report.snapshot.patch.split('\n').findIndex(line => line === `diff --git a/${finding.file} b/${finding.file}`));
+				await vscode.window.showTextDocument(uri, { selection: new vscode.Range(line, 0, line, 0) }); return;
 			}
 			case 'promote': {
 				const next = this.promotion.then(() => this.promote(message.id ?? '', message.stageId ?? '')); this.promotion = next.catch(() => {}); await next; return;

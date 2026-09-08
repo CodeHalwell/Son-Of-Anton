@@ -8,8 +8,8 @@
  * `TaskBoardPanel.ts`:
  *
  *   - ready -> in-progress     => dispatch the subtask.
- *   - done -> ready/in-progress (with confirm) => rerun.
- *   - failed -> ready/in-progress (with confirm) => rerun.
+ *   - done -> ready/in-progress => request a host-confirmed rerun.
+ *   - failed -> ready/in-progress => request a host-confirmed rerun.
  *   - same column => no-op.
  *   - other transitions => silently ignored (undefined behaviour by design).
  */

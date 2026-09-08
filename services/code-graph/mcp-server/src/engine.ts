@@ -109,6 +109,7 @@ export class EngineSession {
 	private readonly changedPaths = new Set<string>();
 	private disposed = false;
 	private embedderConfigured = false;
+	private readonly databaseFiles = new Set<string>();
 
 	constructor(private readonly config: EngineConfig, private readonly changed: (status: EngineStatus) => void = () => {}) { }
 
@@ -121,21 +122,24 @@ export class EngineSession {
 		try {
 			if (!this.config.indexRoot) { throw new Error('Open a workspace or pass --index-root=<directory>.'); }
 			this.config.indexRoot = await realpath(this.config.indexRoot);
-			await mkdir(path.dirname(this.config.dbPath), { recursive: true });
+			const databasePath = path.resolve(this.config.dbPath);
+			await mkdir(path.dirname(databasePath), { recursive: true });
+			this.config.dbPath = path.join(await realpath(path.dirname(databasePath)), path.basename(databasePath));
+			for (const suffix of ['', '-wal', '-shm', '-journal']) { this.databaseFiles.add(this.config.dbPath + suffix); }
+			if (this.disposed) { return; }
 			const require = createRequire(typeof __filename === 'string' ? __filename : import.meta.url);
 			this.engine = injected ?? require(process.env.CODEGRAPH_NAPI_PATH || '@son-of-anton/codegraph-napi') as CodegraphEngine;
 			this.engine.init(this.config.dbPath);
-			await this.refresh();
-			if (!this.status.structural || this.disposed) { return; }
 			this.watcher = watch(this.config.indexRoot, { recursive: true }, (_event, filename) => {
 				if (!filename) { this.scheduleRefresh(); return; }
 				const name = filename.toString().replace(/\\/g, '/');
 				if (/(^|\/)(node_modules|target|dist|out)(\/|$)/.test(name)) { return; }
 				if (name.startsWith('.git/') && !/^\.git\/(HEAD|index|refs\/)/.test(name)) { return; }
-				if (path.resolve(this.config.indexRoot!, name).startsWith(this.config.dbPath)) { return; }
+				if (this.databaseFiles.has(path.resolve(this.config.indexRoot!, name))) { return; }
 				this.scheduleRefresh(name.startsWith('.git/') ? undefined : name);
 			});
 			this.watcher.on('error', error => this.publish({ ...this.status, state: 'degraded', reason: `File watcher failed: ${error.message}. Restart code graph.` }));
+			await this.refresh();
 		} catch (error) {
 			this.publish({ state: 'failed', structural: false, semantic: 'disabled', reason: `Code graph could not start: ${this.message(error)}. Run sota doctor to check bundled assets.` });
 		}

@@ -93,7 +93,7 @@ async function panelHtml(relativeFile, exportName, method, args = []) {
 	const panel = Object.assign(Object.create(exports[exportName].prototype), { panel: { webview: { cspSource: 'https://sota.test' } } });
 	return panel[method](...args);
 }
-async function post(page, message) { await page.evaluate(data => window.dispatchEvent(new MessageEvent('message', { data })), message); }
+async function post(page, message) { await page.evaluate(data => window.dispatchEvent(new MessageEvent('message', { data, origin: window.origin, source: window.parent })), message); }
 
 test('proposal review supports safe file selection, diffs, validation logs and restore at sidebar widths', async t => {
 	const maliciousName = '<img src=x onerror=alert(1)>.ts';
@@ -730,6 +730,8 @@ const councilReport = { version: 1, id: 'report-1', sequence: 2, owned: true, ob
 test('Council form, progress, cancellation, evidence, export, promotion and restored reports work under CSP', async t => {
 	const page = await openCouncil(t);
 	assert.equal(await page.locator('#start').isDisabled(), true);
+	await page.evaluate(() => window.dispatchEvent(new MessageEvent('message', { origin: 'https://untrusted.invalid', source: window.parent, data: { type: 'councilState', error: 'Forged host message' } })));
+	assert.equal(await page.getByText('Forged host message').count(), 0);
 	await post(page, { type: 'councilState', groups: [councilGroup], reports: [] });
 	await page.locator('#objective').fill('Audit parser changes'); await page.locator('#revision').fill('HEAD~1'); await page.locator('#finalReview').check(); await page.locator('#start').click();
 	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'start', objective: 'Audit parser changes', groupId: 'review', revision: 'HEAD~1', rounds: 1, finalReview: true });

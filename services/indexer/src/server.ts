@@ -3,6 +3,7 @@ import { WorkspacePathError } from '../_shared/auth/dist/workspaceFs.js';
 // Exposes health, stats, and control endpoints for the indexer service.
 
 import http from 'http';
+import * as path from 'node:path';
 import { Indexer } from './indexer';
 import { IndexerConfig } from './config';
 import { prometheusHandler } from '../_lib/metrics/dist/index.js';
@@ -125,9 +126,9 @@ export class IndexerServer {
 			let filePath: string;
 			try { filePath = decodeURIComponent(url.pathname.substring('/reindex/'.length)); }
 			catch { res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid encoded path' })); return; }
-			const fullPath = filePath.startsWith('/')
+			const fullPath = path.isAbsolute(filePath)
 				? filePath
-				: `${this.config.project.path}/${filePath}`;
+				: path.join(this.config.project.path, filePath);
 
 			try {
 				const updated = await this.indexer.indexFile(fullPath);

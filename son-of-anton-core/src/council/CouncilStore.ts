@@ -1,9 +1,10 @@
 /* Copyright (c) Microsoft Corporation. Licensed under the MIT License. */
-import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Stats } from 'node:fs';
 import type { CouncilReport } from './types';
+import { readBoundedFile } from '../util/readBoundedFile';
 
 const validId = (id: string) => /^[a-f0-9-]{36}$/.test(id);
 const MAX_REPORT_BYTES = 8 * 1024 * 1024;
@@ -37,8 +38,7 @@ export class CouncilStore {
 	}
 	async load(id: string): Promise<CouncilReport> {
 		const file = this.path(id);
-		if ((await stat(file)).size > MAX_REPORT_BYTES) { throw new Error('Council report exceeds size limit'); }
-		const report = JSON.parse(await readFile(file, 'utf8')) as CouncilReport;
+		const report = JSON.parse((await readBoundedFile(file, MAX_REPORT_BYTES)).content) as CouncilReport;
 		if (report.version !== 1 || report.id !== id || !Array.isArray(report.stages) || !report.snapshot || !report.group) { throw new Error('Invalid Council report'); }
 		return report;
 	}
@@ -57,8 +57,7 @@ export class CouncilStore {
 				try {
 					const info = await stat(this.path(id)); const sidecar = join(this.directory, `${id}.summary`);
 					try {
-						if ((await stat(sidecar)).size > 64 * 1024) { throw new Error('Invalid summary size'); }
-						const cached = JSON.parse(await readFile(sidecar, 'utf8')) as { mtime: number; size: number; inode: number; summary: CouncilSummary };
+						const cached = JSON.parse((await readBoundedFile(sidecar, 64 * 1024)).content) as { mtime: number; size: number; inode: number; summary: CouncilSummary };
 						if (cached.mtime === info.mtimeMs && cached.size === info.size && cached.inode === info.ino && cached.summary?.id === id && typeof cached.summary.createdAt === 'number' && typeof cached.summary.hasBoard === 'boolean') { return cached.summary; }
 					} catch { /* Rebuild the index without changing the report. */ }
 					const report = await this.load(id); const after = await stat(this.path(id));

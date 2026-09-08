@@ -9,6 +9,7 @@ import { pipeline } from 'node:stream/promises';
 import { x as extractTar } from 'tar';
 import { open as openZip, type Entry, type ZipFile } from 'yauzl';
 import { object, type AcpAgentDefinition } from '../acp/protocol';
+import { readBoundedFile } from '../util/readBoundedFile';
 
 export const ACP_REGISTRY_URL = 'https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json';
 interface PackageDistribution { package: string; args?: string[]; env?: Record<string, string> }
@@ -81,7 +82,7 @@ export class AcpRegistry {
 	constructor(readonly directory: string, private readonly fetcher: typeof fetch = fetch) {}
 	async catalog(refresh = false): Promise<RegistryCatalog> {
 		const file = join(this.directory, 'registry.json');
-		if (!refresh) { try { const info = await stat(file); if (info.size <= 4 * 1024 * 1024 && Date.now() - info.mtimeMs < 86_400_000) { return parseRegistry(await readFile(file, 'utf8')); } } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { throw error; } } }
+		if (!refresh) { try { const { content, info } = await readBoundedFile(file, 4 * 1024 * 1024); if (Date.now() - info.mtimeMs < 86_400_000) { return parseRegistry(content); } } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { throw error; } } }
 		const data = await download(ACP_REGISTRY_URL, 4 * 1024 * 1024, this.fetcher); const catalog = parseRegistry(data.toString('utf8')); await mkdir(this.directory, { recursive: true, mode: 0o700 }); const temp = `${file}.${randomUUID()}.tmp`; try { await writeFile(temp, data, { mode: 0o600 }); await rename(temp, file); } finally { await rm(temp, { force: true }); } return catalog;
 	}
 	async plan(id: string): Promise<RegistryPlan> {

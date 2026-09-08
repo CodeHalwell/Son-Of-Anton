@@ -4,11 +4,11 @@
  *--------------------------------------------------------------------------------------------*/
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs/promises';
-import { constants } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import type { SecretStore } from '../host';
+import { readBoundedFile } from '../util/readBoundedFile';
 
 interface CommandResult { code: number; stdout: string }
 export type SecretCommand = (command: string, args: string[], input?: string) => Promise<CommandResult>;
@@ -36,6 +36,7 @@ export class ProtectedSecretStore implements SecretStore {
 	constructor(private readonly execute: SecretCommand = run, private readonly platform: NodeJS.Platform = process.platform, private readonly directory = path.join(os.homedir(), '.son-of-anton/data/protected-secrets')) { }
 
 	private account(key: string): string { return Buffer.from(key).toString('base64url'); }
+	// This hashes a storage identifier (for example sota.secrets.anthropicApiKey), never a password or credential value.
 	private file(key: string): string { return path.join(this.directory, createHash('sha256').update(key).digest('hex') + '.dpapi'); }
 	private async serialize(key: string, operation: () => Promise<void>): Promise<void> {
 		const id = `${this.platform}:${this.directory}:${key}`;
@@ -109,14 +110,27 @@ export class ProtectedSecretStore implements SecretStore {
 
 	/** Explicit migration keeps the old file until every protected save is verified. */
 	async migrateLegacy(file: string): Promise<number> {
-		const handle = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
-		let original: string;
-		try { original = await handle.readFile('utf8'); } finally { await handle.close(); }
-		const values = JSON.parse(original) as Record<string, string>;
+		const original = await readBoundedFile(file, 1024 * 1024, true);
+		const values = JSON.parse(original.content) as Record<string, string>;
 		if (!values || Array.isArray(values) || typeof values !== 'object' || Object.values(values).some(value => typeof value !== 'string')) { throw new Error('Invalid legacy credential file'); }
 		for (const [key, value] of Object.entries(values)) { if (await this.get(key) === undefined) { await this.store(key, value); } }
-		if (await fs.readFile(file, 'utf8') !== original) { throw new Error('Legacy credentials changed during migration; retry after closing older IDE instances'); }
-		await fs.unlink(file);
+		// Claim the pathname atomically before checking what would be deleted. A concurrent
+		// writer can recreate the original pathname without its new file being removed.
+		const directory = await fs.mkdtemp(path.join(path.dirname(file), '.sota-credential-migration-'));
+		const claimed = path.join(directory, 'secrets.json');
+		let retained = false;
+		try {
+			await fs.rename(file, claimed); retained = true;
+			const current = await readBoundedFile(claimed, 1024 * 1024, true);
+			if (current.info.dev !== original.info.dev || current.info.ino !== original.info.ino || current.content !== original.content) { throw new Error('Legacy credentials changed during migration; retry after closing older IDE instances'); }
+			await fs.unlink(claimed); retained = false;
+		} catch (error) {
+			if (retained) {
+				try { await fs.link(claimed, file); await fs.unlink(claimed); retained = false; }
+				catch { throw new Error(`Legacy credentials were retained at ${claimed}. The original path changed; restore or migrate this retained file after closing older IDE instances.`, { cause: error }); }
+			}
+			throw error;
+		} finally { if (!retained) { await fs.rmdir(directory); } }
 		return Object.keys(values).length;
 	}
 }

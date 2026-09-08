@@ -19,8 +19,8 @@ class FixtureAgent extends BaseAgent {
 	}
 }
 
-function frames(protocol: 'anthropic' | 'openai' | 'google', turn: number, malformed = false): object[] {
-	const input = malformed ? '[' : '{"path":"fixture.txt"}';
+function frames(protocol: 'anthropic' | 'openai' | 'google', turn: number): object[] {
+	const input = '{"path":"fixture.txt"}';
 	if (protocol === 'anthropic') {
 		return [
 			{ type: 'message_start', message: { usage: { input_tokens: 100 } } },
@@ -33,7 +33,7 @@ function frames(protocol: 'anthropic' | 'openai' | 'google', turn: number, malfo
 		];
 	}
 	if (protocol === 'google') {
-		return [{ candidates: [{ content: { parts: turn === 1 ? [{ functionCall: { name: 'read_fixture', args: malformed ? [] : { path: 'fixture.txt' } }, thoughtSignature: 'fixture-signature' }] : [{ text: 'Finished' }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 10 } }];
+		return [{ candidates: [{ content: { parts: turn === 1 ? [{ functionCall: { name: 'read_fixture', args: { path: 'fixture.txt' } }, thoughtSignature: 'fixture-signature' }] : [{ text: 'Finished' }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 10 } }];
 	}
 	return [{ choices: [{ delta: turn === 1 ? { tool_calls: [{ index: 0, id: 'call-1', function: { name: 'read_fixture', arguments: input } }] } : { content: 'Finished' }, finish_reason: turn === 1 ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 100, completion_tokens: 10 } }];
 }

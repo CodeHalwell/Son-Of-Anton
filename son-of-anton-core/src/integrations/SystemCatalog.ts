@@ -8,6 +8,7 @@ import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { parse as parseJson, type ParseError } from 'jsonc-parser';
 import { parse as parseYaml } from 'yaml';
+import { readBoundedFile } from '../util/readBoundedFile';
 
 export type IntegrationSource = 'shared' | 'claude' | 'codex' | 'cursor';
 export interface IntegrationEntry {
@@ -66,9 +67,7 @@ export async function discoverSystemCatalog(options: DiscoveryOptions = {}): Pro
 	const seenSkills = new Set<string>();
 	const read = async (filename: string, maxBytes = MAX_BYTES): Promise<string | undefined> => {
 		try {
-			const stat = await fs.stat(filename);
-			if (!stat.isFile() || stat.size > maxBytes) { throw new Error('File is not regular or exceeds its size limit'); }
-			return await fs.readFile(filename, 'utf8');
+			return (await readBoundedFile(filename, maxBytes)).content;
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { catalog.issues.push({ path: filename, message: 'Could not read configuration (type, size, or permissions).' }); }
 			return undefined;
@@ -228,7 +227,5 @@ export async function readCatalogSkill(catalog: SystemCatalog, id: string, resou
 	const root = await fs.realpath(path.dirname(entry.path));
 	const filename = await fs.realpath(path.resolve(root, resource));
 	if (!inside(root, filename)) { throw new Error('Skill resource must remain inside its installed directory'); }
-	const stat = await fs.stat(filename);
-	if (!stat.isFile() || stat.size > MAX_BYTES) { throw new Error('Skill resource exceeds 256 KiB or is not a regular file'); }
-	return fs.readFile(filename, 'utf8');
+	return (await readBoundedFile(filename, MAX_BYTES, true)).content;
 }

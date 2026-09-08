@@ -65,6 +65,8 @@ export class TaskBoardPanel {
 
 	private readonly disposables: vscode.Disposable[] = [];
 	private readonly activeChatStreams = new Map<string, vscode.Disposable>();
+	private readonly pendingReruns = new Set<string>();
+	private closed = false;
 	private currentConversationId: string | undefined;
 
 	static createOrShow(
@@ -132,6 +134,8 @@ export class TaskBoardPanel {
 	}
 
 	dispose(): void {
+		if (this.closed) { return; }
+		this.closed = true;
 		TaskBoardPanel.currentPanel = undefined;
 		// Cancel any chat streams in flight so their disposables release.
 		for (const stream of this.activeChatStreams.values()) {
@@ -153,6 +157,21 @@ export class TaskBoardPanel {
 	private pickDefaultConversationId(): string | undefined {
 		const list = this.conversationStore.list();
 		return list.length > 0 ? list[0].id : undefined;
+	}
+
+	private async confirmRerun(taskId: string): Promise<void> {
+		const conversationId = this.currentConversationId;
+		if (!conversationId) { return; }
+		const task = this.model.getSnapshot(conversationId)?.tasks.find(task => task.id === taskId);
+		if (!task || !['done', 'failed'].includes(task.state) || this.pendingReruns.has(taskId) || this.closed) { return; }
+		const state = task.state;
+		this.pendingReruns.add(taskId);
+		try {
+			const action = vscode.l10n.t('Run Again');
+			const answer = await vscode.window.showWarningMessage(vscode.l10n.t('Run this task again?'), { modal: true, detail: task.instruction.slice(0, 2000) }, action);
+			const current = this.model.getSnapshot(conversationId)?.tasks.find(task => task.id === taskId);
+			if (answer === action && !this.closed && this.currentConversationId === conversationId && current?.state === state) { this.handlers.rerunSubtask?.(taskId); }
+		} finally { this.pendingReruns.delete(taskId); }
 	}
 
 	private handleMessage(raw: WebviewMessage): void {
@@ -179,7 +198,7 @@ export class TaskBoardPanel {
 			}
 			case 'rerun':
 				if (typeof (message as RerunMessage).taskId === 'string') {
-					this.handlers.rerunSubtask?.((message as RerunMessage).taskId);
+					void this.confirmRerun((message as RerunMessage).taskId).catch(error => vscode.window.showErrorMessage(String(error)));
 				}
 				return;
 			case 'reveal':

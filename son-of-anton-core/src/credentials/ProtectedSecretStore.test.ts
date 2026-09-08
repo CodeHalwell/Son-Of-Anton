@@ -43,9 +43,29 @@ test('legacy migration verifies saves, preserves protected values and removes on
 		assert.equal(await store.migrateLegacy(file), 2);
 		assert.deepEqual([await store.get('provider'), await store.get('other')], ['current synthetic', 'migrate synthetic']);
 		await assert.rejects(fs.access(file));
-		await fs.writeFile(file, '{"provider":"keep synthetic"}');
+		const failedFile = path.join(directory, 'failed.json');
+		await fs.writeFile(failedFile, '{"provider":"keep synthetic"}');
 		const unavailable = new ProtectedSecretStore(async () => { throw new Error('locked'); }, 'darwin');
-		await assert.rejects(unavailable.migrateLegacy(file), /locked/);
-		assert.equal(await fs.readFile(file, 'utf8'), '{"provider":"keep synthetic"}');
+		await assert.rejects(unavailable.migrateLegacy(failedFile), /locked/);
+		assert.equal(await fs.readFile(failedFile, 'utf8'), '{"provider":"keep synthetic"}');
 	} finally { await fs.rm(directory, { recursive: true, force: true }); }
+});
+
+test('legacy migration preserves a source replaced while protected storage is saving', async t => {
+	const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'sota-secret-race-'));
+	t.after(() => fs.rm(directory, { recursive: true, force: true }));
+	const file = path.join(directory, 'secrets.json');
+	await fs.writeFile(file, '{"provider":"original synthetic"}');
+	const mock = keychain();
+	const execute: SecretCommand = async (command, args, input) => {
+		const result = await mock.execute(command, args, input);
+		if (args[0] === '-i') {
+			const replacement = path.join(directory, 'replacement.json');
+			await fs.writeFile(replacement, '{"provider":"new synthetic"}'); await fs.rename(replacement, file);
+		}
+		return result;
+	};
+	const store = new ProtectedSecretStore(execute, 'darwin');
+	await assert.rejects(store.migrateLegacy(file), /changed during migration/);
+	assert.deepEqual({ source: await fs.readFile(file, 'utf8'), protected: await store.get('provider'), files: await fs.readdir(directory) }, { source: '{"provider":"new synthetic"}', protected: 'original synthetic', files: ['secrets.json'] });
 });
