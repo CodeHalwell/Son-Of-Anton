@@ -165,6 +165,7 @@ jobs:
           desktop-file-validate /usr/share/applications/son-of-anton.desktop
           SOTA_TEST_INSTALLED_APP=/usr/share/son-of-anton xvfb-run -a node scripts/verify-ide-package.mjs
       - name: Packaged native graph lifecycle and retrieval
+        timeout-minutes: 5
         env:
           IDE_TARGET: ${{ matrix.target }}
         run: |

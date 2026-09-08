@@ -36,7 +36,18 @@ if (process.platform === 'darwin') {
 	await mkdir(staging); await cp(app, path.join(staging, path.basename(app)), { recursive: true, verbatimSymlinks: true });
 	await symlink('/Applications', path.join(staging, 'Applications'));
 	const dmg = `${prefix}.dmg`;
-	try { run('hdiutil', ['create', '-volname', product.nameLong, '-srcfolder', staging, '-ov', '-format', 'UDZO', path.join(output, dmg)]); assets.push(dmg); }
+	try {
+		const args = ['create', '-volname', product.nameLong, '-srcfolder', staging, '-ov', '-format', 'UDZO', path.join(output, dmg)];
+		for (let attempt = 1; ; attempt++) {
+			const result = spawnSync('hdiutil', args, { cwd: root, encoding: 'utf8', timeout: 300_000 });
+			if (result.stdout) { process.stdout.write(result.stdout); }
+			if (result.stderr) { process.stderr.write(result.stderr); }
+			if (!result.error && result.status === 0) { assets.push(dmg); break; }
+			if (result.error || attempt >= 3 || !/Resource busy/i.test(result.stderr ?? '')) { throw new Error(`Disk image creation failed: ${result.error?.message ?? result.stderr}`); }
+			console.warn(`Disk image tool is busy; retrying (${attempt}/2).`);
+			await new Promise(resolve => setTimeout(resolve, attempt * 5000));
+		}
+	}
 	finally { await rm(staging, { recursive: true, force: true }); }
 	if (process.env.SOTA_MACOS_NOTARY_KEY_PATH) {
 		run('xcrun', ['notarytool', 'submit', path.join(output, dmg), '--key', process.env.SOTA_MACOS_NOTARY_KEY_PATH, '--key-id', process.env.MACOS_NOTARY_KEY_ID, '--issuer', process.env.MACOS_NOTARY_KEY_ISSUER, '--wait', '--timeout', '30m']);
