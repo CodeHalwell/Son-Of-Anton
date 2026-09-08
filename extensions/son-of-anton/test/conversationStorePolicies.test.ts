@@ -247,7 +247,6 @@ suite('ConversationStore — Phase 47', () => {
 			storeA.rememberActive(selected.summary.id);
 			storeA.create([userMsg('A newer')]);
 			const other = storeB.create([userMsg('B newest')]);
-			storeA.rememberActive(other.summary.id);
 			const reopened = new ConversationStore(a.context, 'file:///workspace-a', 'Project A');
 			try {
 				assert.deepStrictEqual({
@@ -270,6 +269,24 @@ suite('ConversationStore — Phase 47', () => {
 		try {
 			assert.deepStrictEqual({ initial: store.getInitialConversation(), retained: store.load('older')?.messages[0]?.content }, { initial: undefined, retained: 'original message' });
 		} finally { store.dispose(); }
+	});
+
+	test('an explicitly opened older conversation becomes active only in the workspace that selected it', () => {
+		const a = makeContext();
+		const b = makeContext(a.globalState);
+		void a.globalState.update('sota.conversations.index', [{ id: 'older', title: 'Earlier work', updatedAt: 1, createdAt: 1, messageCount: 1 }]);
+		void a.globalState.update('sota.conversations.older', [userMsg('original message')]);
+		const storeA = new ConversationStore(a.context, 'a', 'A');
+		const storeB = new ConversationStore(b.context, 'b', 'B');
+		try {
+			storeA.create([userMsg('A newer')]);
+			storeA.rememberActive('older');
+			storeA.rememberActive('nonexistent');
+			assert.deepStrictEqual({ activeA: storeA.getInitialConversation()?.summary.id, activeB: storeB.getInitialConversation() }, { activeA: 'older', activeB: undefined });
+			const reopened = new ConversationStore(a.context, 'a', 'A');
+			try { assert.strictEqual(reopened.getInitialConversation()?.summary.id, 'older'); }
+			finally { reopened.dispose(); }
+		} finally { storeA.dispose(); storeB.dispose(); }
 	});
 
 	test('migrates legacy history independently for each workspace, despite an older global flag', () => {

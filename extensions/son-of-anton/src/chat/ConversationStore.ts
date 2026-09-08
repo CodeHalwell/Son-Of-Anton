@@ -160,7 +160,7 @@ export class ConversationStore implements vscode.Disposable {
 	constructor(
 		private readonly context: vscode.ExtensionContext,
 		private readonly workspaceId = vscode.workspace.workspaceFile?.toString() ?? JSON.stringify((vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.toString()).sort()),
-		private readonly workspaceName = vscode.workspace.name ?? 'Empty Window',
+		private readonly workspaceName = vscode.workspace.name ?? vscode.l10n.t('Empty Window'),
 	) {
 		this.migrateLegacyConversation();
 	}
@@ -205,17 +205,18 @@ export class ConversationStore implements vscode.Disposable {
 		return [...this.readIndex()].sort((a, b) => b.updatedAt - a.updatedAt);
 	}
 
-	/** Only restore conversations associated with this workspace; older unscoped history stays accessible. */
+	/** Resume a conversation explicitly selected here; otherwise restore only this workspace’s history. */
 	getInitialConversation(): ConversationRecord | undefined {
 		const active = this.context.workspaceState.get<string>(ACTIVE_KEY);
 		const record = active ? this.load(active) : undefined;
-		if (record?.summary.workspaceId === this.workspaceId) { return record; }
+		if (record) { return record; }
 		const recent = this.list().find(summary => summary.workspaceId === this.workspaceId);
 		return recent ? this.load(recent.id) : undefined;
 	}
 
+	/** Remember explicit history selections in this workspace without reassigning their original ownership. */
 	rememberActive(id: string): void {
-		if (this.load(id)?.summary.workspaceId === this.workspaceId) { void this.context.workspaceState.update(ACTIVE_KEY, id); }
+		if (this.load(id)) { void this.context.workspaceState.update(ACTIVE_KEY, id); }
 	}
 
 	/** Returns the full record for a conversation, or `undefined` if missing. */
