@@ -162,6 +162,8 @@ jobs:
           node --test son-of-anton-core/dist/util/readBoundedFile.test.js son-of-anton-core/dist/credentials/ProtectedSecretStore.test.js
           node --test son-of-anton-cli/dist/test/updateInstall.test.js
           node --test scripts/test/ide-release.test.mjs
+      - name: Graph watcher regressions
+        run: node --test services/code-graph/mcp-server/test/incremental.test.mjs
       - name: Build native code graph
         run: node scripts/build-codegraph-runtime.mjs
       - name: Save compiled native graph dependencies
@@ -210,7 +212,7 @@ jobs:
           else
             export SOTA_RUNTIME_SOURCE="$GITHUB_WORKSPACE/../Son of Anton-$IDE_TARGET/resources/app/extensions/son-of-anton/runtime/codegraph"
           fi
-          node --test services/code-graph/mcp-server/test/offline.test.mjs services/code-graph/mcp-server/test/incremental.test.mjs
+          node --test services/code-graph/mcp-server/test/offline.test.mjs
       - name: Retain install diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -222,6 +224,8 @@ jobs:
             .build/ide-release/*/activation-logs/**
           if-no-files-found: ignore
       - name: Upload verified installers
+        id: upload-installers
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: ide-${{ matrix.target }}
@@ -229,6 +233,16 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
+      - name: Retry verified installer upload
+        if: steps.upload-installers.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ide-${{ matrix.target }}
+          path: .build/ide-release/${{ matrix.target }}/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+          overwrite: true
 
   release:
     name: Draft downloadable IDE release
