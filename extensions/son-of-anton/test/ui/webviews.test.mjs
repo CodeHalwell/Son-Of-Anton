@@ -143,6 +143,74 @@ test('chat: responsive welcome, provider search, keyboard tabs and composer', as
 	for (const width of [280, 400, 800]) { await page.setViewportSize({ width, height: 900 }); await assertNoPageOverflow(page); }
 });
 
+test('reuse prompt restores persisted attachments and preferences, with Undo for the existing draft', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const image = { type: 'image', mimeType: 'image/png', base64Data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS1sAAAAASUVORK5CYII=', name: 'example.png' };
+	await post(page, { type: 'loadConversation', conversationId: 'reusable', messages: [
+		{ role: 'user', content: [image, { type: 'text', text: 'Explain the attached example' }], model: 'haiku', specialistId: 'anton-code', request: { text: 'Explain the attached example', attachments: ['terminal-output'], mentionsKinded: [{ kind: 'file', path: 'src/example.ts' }, { kind: 'problems' }], chatMode: 'plan', includeWorkspaceContext: false } },
+		{ role: 'assistant', content: 'Here is the explanation.' },
+	] });
+	await page.locator('#messageInput').fill('Do not lose this draft');
+	await page.locator('#attachBtn').click(); await page.locator('[data-attach="current-file"]').click();
+	await page.getByRole('button', { name: 'Reuse Prompt', exact: true }).click();
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Explain the attached example');
+	assert.match(await page.locator('#contextChips').innerText(), /Terminal output[\s\S]*example.png[\s\S]*src\/example.ts[\s\S]*@problems/);
+	assert.equal(await page.locator('#includeWorkspaceContext').isChecked(), false);
+	assert.equal(await page.locator('#planActBtnPlan').getAttribute('aria-checked'), 'true');
+	assert.equal(await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').length), 0);
+	assert.equal(await page.locator('.msg-user').count(), 1);
+	await screenshot(page, 'prompt-reuse'); await assertNoPageOverflow(page);
+	await page.locator('#undoPromptRestore').click();
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Do not lose this draft');
+	assert.match(await page.locator('#contextChips').innerText(), /Current file/);
+	assert.equal(await page.locator('#contextChips .attachment-thumb').count(), 0);
+	await page.getByRole('button', { name: 'Reuse Prompt', exact: true }).click();
+	await page.locator('#sendBtn').click();
+	const sent = await page.evaluate(() => sentMessages.find(message => message.type === 'sendMessage'));
+	assert.deepEqual({ text: sent.text, model: sent.model, agent: sent.specialistId, mode: sent.chatMode, context: sent.includeWorkspaceContext, attachments: sent.attachments, mentions: sent.mentionsKinded, images: sent.images }, { text: 'Explain the attached example', model: 'haiku', agent: 'anton-code', mode: 'plan', context: false, attachments: ['terminal-output'], mentions: [{ kind: 'file', path: 'src/example.ts' }, { kind: 'problems' }], images: [{ mime: image.mimeType, base64: image.base64Data, name: image.name }] });
+	assert.equal(await page.locator('#promptRestoreNotice').isVisible(), false);
+});
+
+test('failed attachment-only requests can be restored without sending a duplicate', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	await page.locator('#attachBtn').click(); await page.locator('[data-attach="terminal-output"]').click();
+	await page.locator('#sendBtn').click();
+	assert.match(await page.locator('.msg-user').innerText(), /Terminal output/);
+	await post(page, { type: 'streamError', error: 'Provider unavailable' });
+	await page.getByRole('button', { name: 'Reuse Prompt', exact: true }).click();
+	assert.equal(await page.locator('#messageInput').inputValue(), '');
+	assert.match(await page.locator('#contextChips').innerText(), /Terminal output/);
+	assert.equal(await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').length), 1);
+});
+
+test('older responses reuse their own prompt and stale controls cannot replace another conversation draft', async t => {
+	const page = await openSurface(t, 'chat', 420);
+	const messages = Array.from({ length: 220 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: 'Message ' + index }));
+	await post(page, { type: 'loadConversation', conversationId: 'history-a', messages });
+	await page.getByRole('button', { name: /Show Earlier Messages/ }).click();
+	await page.getByRole('button', { name: 'Reuse Prompt', exact: true }).first().click();
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Message 0');
+	await page.evaluate(() => { window.staleReuse = document.querySelector('.msg-action-reuse'); });
+	await post(page, { type: 'loadConversation', conversationId: 'history-b', messages: [] });
+	await page.locator('#messageInput').fill('Current conversation draft');
+	await page.evaluate(() => window.staleReuse.click());
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Current conversation draft');
+	assert.equal(await page.locator('#promptRestoreNotice').isVisible(), false);
+});
+
+test('suggested follow-ups stage the correct text and preserve the previous draft with Undo', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	await page.locator('#messageInput').fill('Explain'); await page.locator('#sendBtn').click();
+	await post(page, { type: 'streamToken', token: 'Explanation.\n<<sota:suggestions>>["Add meaningful tests"]<<sota:end>>' });
+	await post(page, { type: 'messageComplete' });
+	await page.locator('#messageInput').fill('Existing draft');
+	await page.getByRole('button', { name: 'Add meaningful tests', exact: true }).click();
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Add meaningful tests');
+	assert.equal(await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').length), 1);
+	await page.locator('#undoPromptRestore').click();
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Existing draft');
+});
+
 test('terminal attachments explain capture and terminal settings save real preferences', async t => {
 	const page = await openSurface(t, 'chat', 400);
 	await page.locator('#attachBtn').click();
