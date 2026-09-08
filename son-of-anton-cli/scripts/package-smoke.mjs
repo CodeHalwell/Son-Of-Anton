@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync, spawn } from 'node:child_process';
+import crossSpawn from 'cross-spawn';
 import assert from 'node:assert/strict';
 export async function packageSmoke(source) {
 	const directory = mkdtempSync(join(tmpdir(), 'sota-package-smoke-'));
@@ -21,9 +22,7 @@ export async function packageSmoke(source) {
 			for (const name of ['claude', 'codex']) {
 				const shim = join(env.SOTA_CACHE_DIR, caches[0], 'node_modules', '.bin', name + (process.platform === 'win32' ? '.cmd' : ''));
 				assert.ok(!readFileSync(shim, 'utf8').includes('__SOTA_BIN__'));
-				const result = process.platform === 'win32'
-					? spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `""${shim}" --version"`], { cwd: install, env, encoding: 'utf8', timeout: 120_000 })
-					: spawnSync(shim, ['--version'], { cwd: install, env, encoding: 'utf8', timeout: 120_000 });
+				const result = crossSpawn.sync(shim, ['--version'], { cwd: install, env, encoding: 'utf8', timeout: 120_000 });
 				assert.equal(result.status, 0, `${name}: ${result.error ?? result.stderr}`); assert.match(result.stdout, /\d+\.\d+/);
 			}
 			return caches[0];
