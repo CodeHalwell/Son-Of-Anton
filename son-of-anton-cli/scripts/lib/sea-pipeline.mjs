@@ -41,6 +41,7 @@
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
+import crossSpawn from 'cross-spawn';
 import {
 	chmodSync,
 	copyFileSync,
@@ -140,9 +141,9 @@ function installVendor(vendorDir, target) {
 		`@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}`,
 		`@openai/codex@${CODEX_VERSION}`,
 	];
-	const r = spawnSync('npm', args, { stdio: 'inherit', cwd: vendorDir });
+	const r = crossSpawn.sync('npm', args, { stdio: 'inherit', cwd: vendorDir });
 	if (r.status !== 0) {
-		console.error('vendor npm install failed');
+		console.error(`vendor npm install failed: ${r.error?.message ?? r.status}`);
 		process.exit(r.status ?? 1);
 	}
 	// Verify the bin shims actually appeared. The optional-dep mechanic
@@ -680,9 +681,9 @@ function inject(target, paths) {
 	if (target.exeFormat === 'macho') {
 		postjectArgs.push('--macho-segment-name', 'NODE_SEA');
 	}
-	const r = spawnSync('npx', postjectArgs, { stdio: 'inherit', cwd: CLI_ROOT });
+	const r = crossSpawn.sync('npx', postjectArgs, { stdio: 'inherit', cwd: CLI_ROOT });
 	if (r.status !== 0) {
-		console.error('postject failed');
+		console.error(`postject failed: ${r.error?.message ?? r.status}`);
 		process.exit(r.status ?? 1);
 	}
 }
