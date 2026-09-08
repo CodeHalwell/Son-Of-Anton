@@ -315,6 +315,19 @@ suite('ConversationStore — Phase 47', () => {
 		} finally { store.dispose(); }
 	});
 
+	test('active-selection and deletion events identify the affected conversation exactly once', () => {
+		const { context } = makeContext(); const store = new ConversationStore(context, 'a', 'A');
+		const selected: string[] = []; const deleted: string[] = [];
+		store.onDidChangeActive(id => selected.push(id));
+		store.onDidDelete(id => { assert.equal(store.load(id), undefined); deleted.push(id); });
+		try {
+			const a = store.create(); const b = store.create();
+			store.rememberActive(a.summary.id); store.rememberActive(a.summary.id); store.rememberActive('missing');
+			store.delete(b.summary.id); store.delete(b.summary.id);
+			assert.deepStrictEqual({ selected, deleted }, { selected: [a.summary.id], deleted: [b.summary.id] });
+		} finally { store.dispose(); }
+	});
+
 	test('onDidChange fires for create / update / rename / delete', () => {
 		const { context } = makeContext();
 		const store = new ConversationStore(context);

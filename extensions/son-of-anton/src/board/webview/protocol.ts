@@ -121,7 +121,7 @@ export interface ChatRuntimeRequestMessage {
 	readonly tools?: ReadonlyArray<ChatToolDefinition>;
 }
 
-export type WebviewToHostMessage =
+export type WebviewToHostMessage = (
 	| { readonly type: 'review-proposal' | 'cancel-task'; readonly taskId: string }
 	| DispatchMessage
 	| ReassignMessage
@@ -132,12 +132,14 @@ export type WebviewToHostMessage =
 	| { readonly type: 'review-council' }
 	| CancelChatMessage
 	| BoardActionMessage
-	| ChatRuntimeRequestMessage;
+	| ChatRuntimeRequestMessage
+) & { readonly conversationId?: string | null };
 
 /** Validate untrusted postMessage data once, before narrowing to the shared contract. */
 export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMessage {
 	if (!value || typeof value !== 'object' || Array.isArray(value)) { return false; }
 	const message = value as Record<string, unknown>;
+	if (message.conversationId !== undefined && message.conversationId !== null && typeof message.conversationId !== 'string') { return false; }
 	const text = (field: string): boolean => typeof message[field] === 'string' && (message[field] as string).length > 0;
 	switch (message.type) {
 		case 'refresh': case 'open-chat': case 'review-council': return true;

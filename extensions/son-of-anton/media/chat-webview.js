@@ -862,7 +862,18 @@
 		const historySearch = document.getElementById('historySearch');
 		const historyShowMore = document.getElementById('historyShowMore');
 		let historyLimit = 50;
-		historySearch.addEventListener('input', () => { historyLimit = 50; renderHistoryPane(lastHistorySnapshot); });
+		const historySaved = vscode.getState()?.historyFilters;
+		let historyScope = historySaved?.scope === 'workspace' ? 'workspace' : 'all';
+		historySearch.value = typeof historySaved?.query === 'string' ? historySaved.query : '';
+		const historyClearFilters = document.getElementById('historyClearFilters');
+		function updateHistoryFilters() {
+			historyLimit = 50;
+			vscode.setState({ ...vscode.getState(), historyFilters: { query: historySearch.value, scope: historyScope } });
+			renderHistoryPane(lastHistorySnapshot);
+		}
+		historySearch.addEventListener('input', updateHistoryFilters);
+		document.querySelectorAll('[data-history-scope]').forEach(button => button.addEventListener('click', () => { historyScope = button.dataset.historyScope; updateHistoryFilters(); }));
+		historyClearFilters.addEventListener('click', () => { historyScope = 'all'; historySearch.value = ''; updateHistoryFilters(); historySearch.focus(); });
 		historyShowMore.addEventListener('click', () => { historyLimit += 50; renderHistoryPane(lastHistorySnapshot); });
 		function historyGroup(timestamp) {
 			const date = new Date();
@@ -883,7 +894,9 @@
 			heading.textContent = active?.title || uiText('newConversation');
 			heading.title = heading.textContent;
 			const query = historySearch.value.trim().toLocaleLowerCase();
-			const matches = conversations.filter(conversation => [conversation.title, conversation.lastSpecialist, conversation.workspaceName].filter(Boolean).join(' ').toLocaleLowerCase().includes(query)).sort((a, b) => b.updatedAt - a.updatedAt);
+			document.querySelectorAll('[data-history-scope]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.historyScope === historyScope)));
+			historyClearFilters.hidden = !query && historyScope === 'all';
+			const matches = conversations.filter(conversation => (historyScope === 'all' || conversation.inCurrentWorkspace || conversation.id === activeId) && [conversation.title, conversation.lastSpecialist, conversation.workspaceName].filter(Boolean).join(' ').toLocaleLowerCase().includes(query)).sort((a, b) => b.updatedAt - a.updatedAt);
 			document.getElementById('historyResults').textContent = uiText(matches.length === 1 ? 'conversationResult' : 'conversationResults', matches.length.toLocaleString());
 			document.getElementById('historyNoResults').hidden = !conversations.length || matches.length > 0;
 			historyShowMore.hidden = matches.length <= historyLimit;
@@ -965,7 +978,7 @@
 
 		if (historyNewBtn) {
 			historyNewBtn.addEventListener('click', () => {
-				vscode.postMessage({ type: 'runCommand', command: 'sota.newConversation' });
+				vscode.postMessage({ type: 'clearConversation' });
 			});
 		}
 		if (historyPaneList) {
@@ -4273,6 +4286,12 @@
 						scrollToBottom(true);
 					}
 					updateEmptyState();
+					break;
+				case 'conversationDeleted':
+					if (typeof message.conversationId === 'string') {
+						drafts.delete(message.conversationId);
+						persistDraft();
+					}
 					break;
 				case 'conversationCleared':
 					conversationHasUnmeteredUsage = false;

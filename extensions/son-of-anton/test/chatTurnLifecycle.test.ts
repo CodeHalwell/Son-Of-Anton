@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import { strict as assert } from 'node:assert';
+import * as vscode from 'vscode';
 import { ChatSession, type ChatMessage } from '../src/chat/ChatPanel';
 import type { ModelId } from 'son-of-anton-core/llm/LlmClient';
 import type { AgentEvent } from '../src/chat/agentEvents';
@@ -16,6 +17,7 @@ function deferred() {
 interface TestSession {
 	setupMessageHandler(): void;
 	currentModel: ModelId;
+	handleConversationDeleted(id: string): void;
 	handleSendMessage(message: { text: string; conversationId?: string; includeWorkspaceContext?: boolean }): Promise<void>;
 	switchConversation(id: string): void;
 	clearConversation(): void;
@@ -28,7 +30,7 @@ interface TestSession {
 function createSession() {
 	const messages: Array<{ type: string; [key: string]: unknown }> = [];
 	const models = new Map<string, ModelId>();
-	let receive: (message: { type: string; conversationId?: string; model?: ModelId }) => Promise<void>;
+	let receive: (message: { type: string; conversationId?: string; model?: ModelId; id?: string }) => Promise<void>;
 	const conversations = new Map<string, ChatMessage[]>([['first', []], ['second', []]]);
 	const started = new Map<string, ReturnType<typeof deferred>>();
 	const releases = new Map<string, ReturnType<typeof deferred>>();
@@ -37,7 +39,9 @@ function createSession() {
 		rememberActive: (_id: string) => {},
 		update: (id: string, content: ChatMessage[], _specialist: string, _mode: string, _tab: string, model: ModelId) => { conversations.set(id, [...content]); models.set(id, model); },
 		list: () => Array.from(conversations, ([id, content]) => ({ id, title: id, updatedAt: 1, messageCount: content.length })),
-		load: (id: string) => ({ summary: { id, lastModel: models.get(id) }, messages: conversations.get(id) ?? [] }),
+		listForWorkspace() { return this.list(); },
+		getInitialConversation: () => { const id = conversations.keys().next().value; return id ? { summary: { id }, messages: conversations.get(id) ?? [] } : undefined; },
+		load: (id: string) => conversations.has(id) ? ({ summary: { id, lastModel: models.get(id) }, messages: conversations.get(id) ?? [] }) : undefined,
 		create: () => { conversations.set('fresh', []); return { summary: { id: 'fresh' }, messages: [] }; },
 	};
 	const session = Object.assign(Object.create(ChatSession.prototype), {
@@ -66,6 +70,43 @@ function createSession() {
 }
 
 suite('Chat turn ownership', () => {
+	test('deleting an unrelated conversation leaves the current stream running', async () => {
+		const f = createSession(); const request = f.send('Keep working'); await request.ready;
+		const controller = f.session.abortController;
+		f.conversations.delete('second'); f.session.handleConversationDeleted('second');
+		assert.equal(controller?.signal.aborted, false);
+		request.emit({ type: 'token', token: 'Completed current work' }); request.release(); await request.done;
+		assert.equal(f.conversations.get('first')?.at(-1)?.content, 'Completed current work');
+	});
+
+	test('deleting the active conversation cancels its stream and ignores late output', async () => {
+		const f = createSession(); const request = f.send('Old work'); await request.ready;
+		const controller = f.session.abortController;
+		f.conversations.delete('first'); f.session.handleConversationDeleted('first');
+		const count = f.messages.length;
+		request.emit({ type: 'token', token: 'Do not restore deleted work' }); request.release(); await request.done;
+		assert.deepEqual({ aborted: controller?.signal.aborted, resurrected: f.conversations.has('first'), lateMessages: f.messages.length - count }, { aborted: true, resurrected: false, lateMessages: 0 });
+		assert.equal(f.messages.find(message => message.type === 'loadConversation')?.conversationId, 'second');
+	});
+
+	test('deleting the last conversation creates a usable empty replacement', () => {
+		const f = createSession(); f.conversations.clear(); f.session.handleConversationDeleted('first');
+		assert.deepEqual([...f.conversations], [['fresh', []]]);
+		assert.equal(f.messages.find(message => message.type === 'loadConversation')?.conversationId, 'fresh');
+	});
+
+	test('history actions and export pass exact conversation ids to shared host commands', async () => {
+		const f = createSession(); const calls: Array<[string, string | undefined]> = [];
+		const original = vscode.commands.executeCommand;
+		Object.assign(vscode.commands, { executeCommand: async (command: string, id?: string) => { calls.push([command, id]); } });
+		try {
+			await f.receive({ type: 'historyRename', id: 'second' });
+			await f.receive({ type: 'historyDelete', id: 'second' });
+			await f.receive({ type: 'exportConversation' });
+			assert.deepEqual(calls, [['sota.renameConversation', 'second'], ['sota.deleteConversation', 'second'], ['sota.exportConversation', 'first']]);
+		} finally { Object.assign(vscode.commands, { executeCommand: original }); }
+	});
+
 	test('model selection persists before sending and rejects stale or unsupported selection messages', async () => {
 		const fixture = createSession();
 		await fixture.receive({ type: 'selectModel', conversationId: 'first', model: 'claude-code-opus' });

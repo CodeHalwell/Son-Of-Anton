@@ -620,6 +620,7 @@ export class ChatSession {
 		// create / rename / delete from any surface.
 		this.disposables.push(
 			this.conversationStore.onDidChange(() => this.postHistorySnapshot()),
+			this.conversationStore.onDidDelete(id => this.handleConversationDeleted(id)),
 		);
 		this.disposables.push(new vscode.Disposable(() => {
 			if (this.costUpdateDebounceTimer) {
@@ -1318,6 +1319,16 @@ export class ChatSession {
 		this.postHistorySnapshot();
 	}
 
+	/** Replace a deleted active chat while leaving unrelated conversations and streams alone. */
+	handleConversationDeleted(id: string): void {
+		if (this.disposed) { return; }
+		if (id === this.currentConversationId) {
+			const next = this.conversationStore.getInitialConversation() ?? this.conversationStore.create();
+			this.switchConversation(next.summary.id);
+		}
+		this.webview.postMessage({ type: 'conversationDeleted', conversationId: id });
+	}
+
 	/**
 	 * Abort any in-flight chat stream and outstanding approval prompts.
 	 * Exposed so the static `ChatPanel.abortAll()` helper can fan out the
@@ -1432,6 +1443,7 @@ export class ChatSession {
 		if (this.disposed) {
 			return;
 		}
+		const workspaceIds = new Set(this.conversationStore.listForWorkspace().map(summary => summary.id));
 		const summaries = this.conversationStore.list().map(s => ({
 			id: s.id,
 			title: s.title,
@@ -1439,6 +1451,7 @@ export class ChatSession {
 			messageCount: s.messageCount,
 			lastSpecialist: s.lastSpecialist,
 			workspaceName: s.workspaceName,
+			inCurrentWorkspace: workspaceIds.has(s.id),
 		}));
 		this.webview.postMessage({
 			type: 'historySnapshot',
@@ -1724,43 +1737,12 @@ export class ChatSession {
 							void this.refreshConnectionState();
 						}
 						break;
-					case 'historyRename': {
-						// Rename a conversation from the History tab. The TreeItem-based
-						// `sota.renameConversation` command needs a tree node arg, so
-						// we drive the rename directly via the store with an inline
-						// input box for the new title.
-						const id = typeof message.id === 'string' ? message.id : '';
-						if (!id) { break; }
-						const current = this.conversationStore.list().find(s => s.id === id);
-						if (!current) { break; }
-						const next = await vscode.window.showInputBox({
-							prompt: 'Rename conversation',
-							value: current.title,
-							validateInput: (value) => (value.trim().length === 0 ? 'Title cannot be empty.' : undefined),
-						});
-						if (next !== undefined) {
-							this.conversationStore.rename(id, next);
-						}
+					case 'historyRename':
+						if (typeof message.id === 'string' && message.id) { await vscode.commands.executeCommand('sota.renameConversation', message.id); }
 						break;
-					}
-					case 'historyDelete': {
-						// Mirrors the `sota.deleteConversation` command's confirm-and-
-						// delete flow without requiring a TreeItem argument so the
-						// History tab can call it directly.
-						const id = typeof message.id === 'string' ? message.id : '';
-						if (!id) { break; }
-						const current = this.conversationStore.list().find(s => s.id === id);
-						if (!current) { break; }
-						const choice = await vscode.window.showWarningMessage(
-							`Delete conversation "${current.title}"?`,
-							{ modal: true },
-							'Delete',
-						);
-						if (choice === 'Delete') {
-							this.conversationStore.delete(id);
-						}
+					case 'historyDelete':
+						if (typeof message.id === 'string' && message.id) { await vscode.commands.executeCommand('sota.deleteConversation', message.id); }
 						break;
-					}
 					case 'openCodeInEditor': {
 						if (typeof message.code !== 'string') {
 							break;
@@ -1912,7 +1894,7 @@ export class ChatSession {
 						// Delegates to the host command so the save dialog,
 						// filename, and post-save toast match what the palette
 						// flow does — keeping a single export code path.
-						await vscode.commands.executeCommand('sota.exportConversation');
+						await vscode.commands.executeCommand('sota.exportConversation', this.currentConversationId);
 						break;
 					}
 					case 'rerunFromSubtask': {
@@ -4699,7 +4681,11 @@ export class ChatSession {
 				</div>
 				<button type="button" id="councilHistoryBtn" class="history-pane-new" data-ui-text="councilHistory"></button>
 				<label class="history-search"><input type="search" id="historySearch" data-ui-label="searchConversations" data-ui-placeholder="searchConversations" autocomplete="off" /></label>
-				<div class="history-results" id="historyResults" role="status"></div>
+				<div class="history-scope" role="group" data-ui-label="historyScope">
+					<button type="button" data-history-scope="all" aria-pressed="true" data-ui-text="allWorkspaces"></button>
+					<button type="button" data-history-scope="workspace" aria-pressed="false" data-ui-text="thisWorkspace"></button>
+				</div>
+				<div class="history-results-row"><div class="history-results" id="historyResults" role="status"></div><button type="button" id="historyClearFilters" class="history-clear-filters" hidden data-ui-text="clearHistoryFilters"></button></div>
 				<div class="history-pane-list" id="historyPaneList"></div>
 				<p class="history-no-results" id="historyNoResults" hidden data-ui-text="noConversations"></p>
 				<button class="history-show-more" id="historyShowMore" type="button" hidden data-ui-text="showMore"></button>
@@ -5472,26 +5458,26 @@ export class ChatPanel {
 	 * surface contract simple — read CLI, write IDE — and avoids the
 	 * conflict-resolution rabbit hole that two-way sync would open.
 	 *
-	 * Returns `true` on success and `false` if the file was missing,
+	 * Returns the imported conversation id, or undefined if the file was missing,
 	 * malformed, or otherwise unreadable. The caller is responsible for
 	 * surfacing user-visible feedback when this happens.
 	 */
 	static async openCliConversation(
 		cliId: string,
 		conversationStore: ConversationStore,
-	): Promise<boolean> {
+	): Promise<string | undefined> {
 		if (typeof cliId !== 'string' || !cliId) {
-			return false;
+			return undefined;
 		}
 		const cliRecord = await loadCliConversation(cliId);
 		if (!cliRecord) {
-			return false;
+			return undefined;
 		}
 		const fresh = conversationStore.create(cliRecord.messages);
 		ChatPanel.switchConversation(fresh.summary.id);
 		void vscode.window.showInformationMessage(
 			'Imported CLI session into a new IDE conversation.',
 		);
-		return true;
+		return fresh.summary.id;
 	}
 }

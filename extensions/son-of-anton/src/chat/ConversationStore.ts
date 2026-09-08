@@ -156,6 +156,10 @@ function recordKey(id: string): string {
 export class ConversationStore implements vscode.Disposable {
 	private readonly _onDidChange = new vscode.EventEmitter<void>();
 	readonly onDidChange: vscode.Event<void> = this._onDidChange.event;
+	private readonly _onDidDelete = new vscode.EventEmitter<string>();
+	readonly onDidDelete: vscode.Event<string> = this._onDidDelete.event;
+	private readonly _onDidChangeActive = new vscode.EventEmitter<string>();
+	readonly onDidChangeActive: vscode.Event<string> = this._onDidChangeActive.event;
 
 	constructor(
 		private readonly context: vscode.ExtensionContext,
@@ -205,18 +209,26 @@ export class ConversationStore implements vscode.Disposable {
 		return [...this.readIndex()].sort((a, b) => b.updatedAt - a.updatedAt);
 	}
 
+	/** Conversations created in this workspace; older history remains in list(). */
+	listForWorkspace(): ReadonlyArray<ConversationSummary> {
+		return this.list().filter(summary => summary.workspaceId === this.workspaceId);
+	}
+
 	/** Resume a conversation explicitly selected here; otherwise restore only this workspace’s history. */
 	getInitialConversation(): ConversationRecord | undefined {
 		const active = this.context.workspaceState.get<string>(ACTIVE_KEY);
 		const record = active ? this.load(active) : undefined;
 		if (record) { return record; }
-		const recent = this.list().find(summary => summary.workspaceId === this.workspaceId);
+		const recent = this.listForWorkspace()[0];
 		return recent ? this.load(recent.id) : undefined;
 	}
 
 	/** Remember explicit history selections in this workspace without reassigning their original ownership. */
 	rememberActive(id: string): void {
-		if (this.load(id)) { void this.context.workspaceState.update(ACTIVE_KEY, id); }
+		if (this.load(id) && this.context.workspaceState.get<string>(ACTIVE_KEY) !== id) {
+			void this.context.workspaceState.update(ACTIVE_KEY, id);
+			this._onDidChangeActive.fire(id);
+		}
 	}
 
 	/** Returns the full record for a conversation, or `undefined` if missing. */
@@ -331,11 +343,14 @@ export class ConversationStore implements vscode.Disposable {
 		const updatedIndex = index.filter(s => s.id !== id);
 		void this.context.globalState.update(recordKey(id), undefined);
 		void this.context.globalState.update(INDEX_KEY, updatedIndex);
+		this._onDidDelete.fire(id);
 		this._onDidChange.fire();
 	}
 
 	dispose(): void {
 		this._onDidChange.dispose();
+		this._onDidDelete.dispose();
+		this._onDidChangeActive.dispose();
 	}
 
 	private readIndex(): ConversationSummary[] {

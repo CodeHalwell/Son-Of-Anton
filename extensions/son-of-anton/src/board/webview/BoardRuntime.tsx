@@ -26,6 +26,7 @@ export function requestStream(
 		onToolCall?: (call: ChatToolCall) => void;
 	},
 	tools?: ReadonlyArray<ChatToolDefinition>,
+	conversationId?: string | null,
 ): { cancel: () => void } {
 	const requestId = makeRequestId();
 	let finished = false;
@@ -70,7 +71,7 @@ export function requestStream(
 	};
 	window.addEventListener('message', handler);
 
-	postToHost({ type: 'chat-runtime', requestId, model, messages, tools });
+	postToHost({ type: 'chat-runtime', requestId, model, messages, tools, conversationId });
 
 	return {
 		cancel: (): void => {
