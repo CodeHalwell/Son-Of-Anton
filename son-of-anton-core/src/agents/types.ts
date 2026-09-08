@@ -160,6 +160,8 @@ export interface ExecutionPlan {
 	 * the propagation policy.
 	 */
 	orchestratorModel?: ModelId;
+	/** Retain the original editor context across the separate approval turn. */
+	workspaceContextSnapshot?: string;
 }
 
 /**

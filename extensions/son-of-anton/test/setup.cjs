@@ -13,6 +13,9 @@ const fs = require('fs');
 // VS Code host.  Only the runtime values actually called in test setup are
 // implemented; all others are stubs that throw if invoked unexpectedly.
 const vscodeMock = {
+	Disposable: class Disposable {
+		static from(...disposables) { return { dispose: () => { for (const disposable of disposables) { disposable.dispose(); } } }; }
+	},
 	l10n: { t: (message, ...args) => message.replace(/\{(\d+)\}/g, (_, index) => String(args[Number(index)] ?? '')) },
 	EventEmitter: class EventEmitter {
 		constructor() {

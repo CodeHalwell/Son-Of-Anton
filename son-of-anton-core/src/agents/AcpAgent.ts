@@ -36,7 +36,7 @@ export class AcpAgent extends BaseAgent {
 		};
 		try {
 			const changes = new Map<string, FileChange>();
-			const summary = await this.runAgenticTurn(`${context.instruction}\n\nScope files: ${context.scopeFiles.join(', ')}\n${context.graphContext}`, event => { if (event.type === 'token') { context.onToken?.(event.token); } }, cancellation, { conversationId: `${context.parentTaskId}:${this.handle}`, onReportedChange: change => changes.set(change.filePath, change) });
+			const summary = await this.runAgenticTurn(`${context.instruction}\n\nScope files: ${context.scopeFiles.join(', ')}\n${context.graphContext}`, event => { if (event.type === 'token') { context.onToken?.(event.token); } }, cancellation, { conversationId: `${context.parentTaskId}:${this.handle}`, workspaceContextSnapshot: context.workspaceContextSnapshot, onReportedChange: change => changes.set(change.filePath, change) });
 			return this.interpret({ success: true, changes: [...changes.values()], summary, tokenUsage: { inputTokens: 0, outputTokens: 0, cachedTokens: 0, naiveInputTokens: 0, accounting: 'unavailable' } });
 		} catch (error) {
 			return { success: false, changes: [], summary: error instanceof Error ? error.message : 'ACP agent failed', tokenUsage: { inputTokens: 0, outputTokens: 0, cachedTokens: 0, naiveInputTokens: 0, accounting: 'unavailable' } };
@@ -60,7 +60,7 @@ export class AcpAgent extends BaseAgent {
 		this.agentManager.startTask(task.id);
 		let response = '';
 		const conversationId = `${this.handle}:${options?.conversationId ?? randomUUID()}`;
-		const tools = new Map<string, { name: string; input: Record<string, unknown>; kind?: string; locations?: unknown }>();
+		const tools = new Map<string, { name: string; input: Record<string, unknown>; kind?: string; locations?: unknown; status: 'running' | 'done' | 'error'; output?: string }>();
 		try {
 			const result = await this.runtime.run({
 				agent: this.definition, cwd: this.cwd,
@@ -76,10 +76,13 @@ export class AcpAgent extends BaseAgent {
 						emit({ type: 'token', token: update.content.text });
 					} else if ((update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update') && update.toolCallId) {
 						const previous = tools.get(update.toolCallId);
-						const tool = { kind: update.kind ?? previous?.kind, locations: update.locations ?? previous?.locations, name: update.title ?? previous?.name ?? update.kind ?? 'Agent tool', input: object(update.rawInput) ? update.rawInput : previous?.input ?? {} };
+						// ACP updates are partial: a later title/input update must not
+						// erase a completed status or the tool's captured output.
+						const status = update.status === 'failed' ? 'error' : update.status === 'completed' ? 'done' : update.status ? 'running' : previous?.status ?? 'running';
+						const tool = { kind: update.kind ?? previous?.kind, locations: update.locations ?? previous?.locations, name: update.title ?? previous?.name ?? update.kind ?? 'Agent tool', input: object(update.rawInput) ? update.rawInput : previous?.input ?? {}, status, output: update.rawOutput === undefined ? previous?.output : JSON.stringify(update.rawOutput) };
 						if (tools.size >= 1024 && !previous) { controller.abort(new Error('ACP tool event limit reached')); return; }
 						tools.set(update.toolCallId, tool);
-						if (update.status === 'completed' && (tool.kind === 'edit' || tool.kind === 'delete') && Array.isArray(tool.locations)) {
+						if (tool.status === 'done' && (tool.kind === 'edit' || tool.kind === 'delete') && Array.isArray(tool.locations)) {
 							for (const location of tool.locations) {
 								if (!object(location) || typeof location.path !== 'string') { continue; }
 								const relative = path.relative(this.cwd, path.resolve(this.cwd, location.path));
@@ -88,7 +91,7 @@ export class AcpAgent extends BaseAgent {
 								}
 							}
 						}
-						emit({ type: 'tool-call', id: update.toolCallId, ...tool, status: update.status === 'failed' ? 'error' : update.status === 'completed' ? 'done' : 'running', output: update.rawOutput === undefined ? undefined : JSON.stringify(update.rawOutput) });
+						emit({ type: 'tool-call', id: update.toolCallId, ...tool });
 					}
 				},
 			});

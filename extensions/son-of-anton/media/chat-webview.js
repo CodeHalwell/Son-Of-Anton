@@ -4868,7 +4868,7 @@
 			// to the exit code (0 + not cancelled = ok; otherwise error /
 			// cancelled). Non-shell tools fall back to the host-reported
 			// status verbatim.
-			let effectiveStatus = message.status || 'running';
+			let effectiveStatus = message.status === 'done' ? 'ok' : message.status || 'running';
 			let effectiveStatusLabel = effectiveStatus === 'ok' ? 'Ok'
 				: effectiveStatus === 'error' ? 'Error'
 				: 'Running';

@@ -21,12 +21,19 @@ rl.on('line', line => {
 	} else if (method === 'session/prompt') {
 		count++;
 		const text = params.prompt[0].text;
+		if (text.includes('partial-tool-updates')) {
+			for (const update of [
+				{ sessionUpdate: 'tool_call', toolCallId: 'read', title: 'Read file', kind: 'read', status: 'in_progress' },
+				{ sessionUpdate: 'tool_call_update', toolCallId: 'read', status: 'completed', rawOutput: 'First heading' },
+				{ sessionUpdate: 'tool_call_update', toolCallId: 'read', title: 'Read README.md' },
+			]) { send({ method: 'session/update', params: { sessionId: session, update } }); }
+		}
 		if (text === 'crash') { process.exit(7); }
 		if (text === 'oversize') { process.stdout.write('x'.repeat(5 * 1024 * 1024)); return; }
 		if (text === 'slow' || text === 'ignore-cancel') { pending = { id, ignore: text === 'ignore-cancel' }; return; }
 		if (text === 'leave-review-mode') { pending = { id }; send({ method: 'session/update', params: { sessionId: session, update: { sessionUpdate: 'current_mode_update', modeId: 'act' } } }); return; }
 		const finish = outcome => {
-			const content = JSON.stringify({ pid: process.pid, count, cwd: process.cwd(), text, outcome, mode });
+			const content = JSON.stringify({ pid: process.pid, count, cwd: process.cwd(), text, outcome, mode, model: process.env.ANTHROPIC_MODEL });
 			const frame = Buffer.from(JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: session, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: content + ' 😀' } } } }) + '\n');
 			const split = frame.indexOf(Buffer.from('😀')) + 1;
 			process.stdout.write(frame.subarray(0, split)); process.stdout.write(frame.subarray(split));

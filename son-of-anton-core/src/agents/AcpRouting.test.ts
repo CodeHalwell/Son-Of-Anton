@@ -49,3 +49,95 @@ test('review verdicts cannot turn malformed responses, failed checks or blockers
 	assert.equal(security.interpretAcpResult(result('```json\n{broken}\n```')).success, false);
 	assert.equal(security.interpretAcpResult(result('```json\n{"findings":[{"severity":"high"}]}\n```')).success, false);
 });
+
+async function routingStack(t: import('node:test').TestContext, settings: Record<string, unknown> = {}, disableAcpRouting = false) {
+	const root = await mkdtemp(path.join(os.tmpdir(), 'acp-subscription-'));
+	const config = { get: <T>(key: string, fallback?: T): T => (settings[key] ?? fallback) as T };
+	const llm = new LlmClient({ get: async () => { throw new Error('Unexpected direct provider call'); }, store: async () => {}, delete: async () => {} }, config);
+	const mcp = new McpClient({ readServersSetting: () => [], getWorkspaceRoot: () => root, onSettingChange: () => ({ dispose() {} }) });
+	const stack = createAgentStack({ llmClient: llm, mcpClient: mcp, agentManager: new AgentManager(llm), globalState: { get: <T>(_key: string, fallback?: T) => fallback as T, update: async () => {} }, workspaceRoot: root, configStore: config, canUseAcp: () => true, disableAcpRouting });
+	t.after(async () => { await stack.dispose(); mcp.dispose(); await rm(root, { recursive: true, force: true }); });
+	return { stack, llm };
+}
+
+const claudeFixture = { id: 'claude-acp', command: process.execPath, args: [path.resolve(__dirname, '../../test/fixtures/acp-agent.cjs')] };
+const taskContext = { instruction: 'Explain the current file without editing it', scopeFiles: [], graphContext: '', parentTaskId: 'plan', orchestratorModelHint: 'claude-code-opus' as const, workspaceContextSnapshot: 'Active editor: src/example.ts\nexport const answer = 42;' };
+function fixtureResponse(summary: string): { text: string; model?: string } { return JSON.parse(summary.replace(/ 😀$/, '')); }
+
+test('Claude specialist routing recovers after adapter configuration without rebuilding the stack', async t => {
+	const settings: Record<string, unknown> = {};
+	const { stack } = await routingStack(t, settings);
+	const code = stack.specialists.get('anton-code')!;
+	const missing = await code.execute(taskContext);
+	assert.equal(missing.success, false);
+	assert.match(missing.summary, /Anton: Configure Claude ACP/);
+	settings['sota.acp.agents'] = [claudeFixture];
+	const executed = await code.execute(taskContext);
+	assert.equal(executed.success, true, executed.summary);
+	const response = fixtureResponse(executed.summary);
+	assert.equal(response.model, 'sonnet');
+	assert.ok(response.text.includes(taskContext.workspaceContextSnapshot));
+	const docs = await stack.specialists.get('anton-docs')!.execute(taskContext);
+	assert.equal(docs.success, true, docs.summary);
+	assert.equal(fixtureResponse(docs.summary).model, 'haiku');
+});
+
+test('chat overrides select the Claude ACP model while forced single-shot turns keep the text transport', async t => {
+	const { stack, llm } = await routingStack(t, { 'sota.acp.agents': [claudeFixture] });
+	const code = stack.specialists.get('anton-code')!;
+	const text = await code.runAgenticTurn('Explain', () => {}, cancellation, { modelOverride: 'claude-code-opus' });
+	assert.equal(fixtureResponse(text).model, 'opus');
+	const requests: string[] = [];
+	llm.streamRequest = async function* (options) { requests.push(options.model); yield { type: 'token', token: 'Single-shot response' }; };
+	const single = await code.runAgenticTurn('Plan only', () => {}, cancellation, { modelOverride: 'claude-code-opus', forceSingleShot: true });
+	assert.deepEqual({ single, requests }, { single: 'Single-shot response', requests: ['claude-code-opus'] });
+});
+
+test('a pinned direct model remains native despite a Claude orchestrator hint', async t => {
+	const { stack, llm } = await routingStack(t, { 'sota.acp.agents': [claudeFixture], 'sota.agents.anton-code.model': 'sonnet' });
+	const requests: string[] = [];
+	llm.streamRequest = async function* (options) { requests.push(options.model); yield { type: 'token', token: 'Native result' }; };
+	const executed = await stack.specialists.get('anton-code')!.execute(taskContext);
+	assert.deepEqual({ success: executed.success, summary: executed.summary, requests }, { success: true, summary: 'Native result', requests: ['sonnet'] });
+});
+
+test('plan approval preserves the original editor and provider for both specialist and review', async t => {
+	const { stack, llm } = await routingStack(t, { 'sota.personality.enabled': false });
+	llm.streamRequest = async function* () { yield { type: 'token', token: '```json\n{"subtasks":[{"instruction":"Explain the current file","assignee":"anton-code","scopeFiles":[],"dependencies":[]}]}\n```' }; };
+	const seen: { role: string; editor?: string; model?: string }[] = [];
+	for (const role of ['anton-code', 'anton-review'] as const) {
+		stack.specialists.get(role)!.execute = async context => {
+			seen.push({ role, editor: context.workspaceContextSnapshot, model: context.orchestratorModelHint });
+			return result('Reviewed explanation');
+		};
+	}
+	const stream = { markdown: (_text: string) => {} };
+	await stack.orchestrator.handleChatRequest({ prompt: 'Explain the current file', command: 'plan', modelOverride: 'claude-code-opus', workspaceContextSnapshot: taskContext.workspaceContextSnapshot }, { history: [] }, stream, cancellation);
+	await stack.orchestrator.handleChatRequest({ prompt: '', command: 'approve', workspaceContextSnapshot: 'Active editor: different-file.ts' }, { history: [] }, stream, cancellation);
+	assert.deepEqual(seen, ['anton-code', 'anton-review'].map(role => ({ role, editor: taskContext.workspaceContextSnapshot, model: 'claude-code-opus' })));
+});
+
+test('partial ACP tool updates retain completion and output', async t => {
+	const { stack } = await routingStack(t, { 'sota.acp.agents': [claudeFixture] });
+	const updates: { name: string; status: string; output?: string }[] = [];
+	await stack.specialists.get('anton-code')!.runAgenticTurn('partial-tool-updates', event => {
+		if (event.type === 'tool-call') { updates.push({ name: event.name, status: event.status, output: event.output }); }
+	}, cancellation, { modelOverride: 'claude-code-sonnet' });
+	assert.deepEqual(updates, [
+		{ name: 'Read file', status: 'running', output: undefined },
+		{ name: 'Read file', status: 'done', output: '"First heading"' },
+		{ name: 'Read README.md', status: 'done', output: '"First heading"' },
+	]);
+});
+
+test('ACP server stacks disable both automatic and explicit adapter routing', async t => {
+	const { stack, llm } = await routingStack(t, {
+		'sota.acp.agents': [claudeFixture], 'sota.agents.anton-code.model': 'claude-code-sonnet',
+		'sota.agents.anton-code.acpAgent': 'claude-acp',
+	}, true);
+	const requests: string[] = [];
+	llm.streamRequest = async function* (options) { requests.push(options.model); yield { type: 'token', token: 'Native server response' }; };
+	const code = await stack.specialists.get('anton-code')!.runAgenticTurn('Explain', () => {}, cancellation);
+	const docs = await stack.specialists.get('anton-docs')!.runAgenticTurn('Explain', () => {}, cancellation, { modelOverride: 'claude-code-haiku' });
+	assert.deepEqual({ code, docs, requests }, { code: 'Native server response', docs: 'Native server response', requests: ['claude-code-sonnet', 'claude-code-haiku'] });
+});

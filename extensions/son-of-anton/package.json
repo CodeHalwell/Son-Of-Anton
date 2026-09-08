@@ -449,6 +449,10 @@
 				"title": "Anton: Browse ACP Adapters"
 			},
 			{
+				"command": "sota.configureClaudeAcp",
+				"title": "Anton: Configure Claude ACP"
+			},
+			{
 				"command": "sota.diagnoseAcpAgents",
 				"title": "Anton: Check ACP Connections",
 				"category": "Son of Anton"
@@ -1137,55 +1141,55 @@
 					"type": "string",
 					"default": "",
 					"scope": "machine",
-					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses the built-in agent. Reload after changes."
+					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses configured Claude ACP for Claude Code models, otherwise the built-in agent. Routing changes apply on the next turn."
 				},
 				"sota.agents.anton-test.acpAgent": {
 					"type": "string",
 					"default": "",
 					"scope": "machine",
-					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses the built-in agent. Reload after changes."
+					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses configured Claude ACP for Claude Code models, otherwise the built-in agent. Routing changes apply on the next turn."
 				},
 				"sota.agents.anton-security.acpAgent": {
 					"type": "string",
 					"default": "",
 					"scope": "machine",
-					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses the built-in agent. Reload after changes."
+					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses configured Claude ACP for Claude Code models, otherwise the built-in agent. Routing changes apply on the next turn."
 				},
 				"sota.agents.anton-docs.acpAgent": {
 					"type": "string",
 					"default": "",
 					"scope": "machine",
-					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses the built-in agent. Reload after changes."
+					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses configured Claude ACP for Claude Code models, otherwise the built-in agent. Routing changes apply on the next turn."
 				},
 				"sota.agents.anton-e2e.acpAgent": {
 					"type": "string",
 					"default": "",
 					"scope": "machine",
-					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses the built-in agent. Reload after changes."
+					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses configured Claude ACP for Claude Code models, otherwise the built-in agent. Routing changes apply on the next turn."
 				},
 				"sota.agents.anton-ci.acpAgent": {
 					"type": "string",
 					"default": "",
 					"scope": "machine",
-					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses the built-in agent. Reload after changes."
+					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses configured Claude ACP for Claude Code models, otherwise the built-in agent. Routing changes apply on the next turn."
 				},
 				"sota.agents.anton-pr.acpAgent": {
 					"type": "string",
 					"default": "",
 					"scope": "machine",
-					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses the built-in agent. Reload after changes."
+					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses configured Claude ACP for Claude Code models, otherwise the built-in agent. Routing changes apply on the next turn."
 				},
 				"sota.agents.anton-moderniser.acpAgent": {
 					"type": "string",
 					"default": "",
 					"scope": "machine",
-					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses the built-in agent. Reload after changes."
+					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses configured Claude ACP for Claude Code models, otherwise the built-in agent. Routing changes apply on the next turn."
 				},
 				"sota.agents.anton-review.acpAgent": {
 					"type": "string",
 					"default": "",
 					"scope": "machine",
-					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses the built-in agent. Reload after changes."
+					"description": "Route this specialist through an agent ID from sota.acp.agents. Empty uses configured Claude ACP for Claude Code models, otherwise the built-in agent. Routing changes apply on the next turn."
 				},
 				"sota.integrations.enabled": {
 					"type": "boolean",

@@ -83,6 +83,8 @@ export interface AgentContext {
 	instruction: string;
 	scopeFiles: string[];
 	graphContext: string;
+	/** Editor context captured with the approved plan, including the active file. */
+	workspaceContextSnapshot?: string;
 	parentTaskId: string;
 	/**
 	 * Optional per-token callback. When provided, the specialist should

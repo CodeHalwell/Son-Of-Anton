@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { createHash } from 'node:crypto';
 import type { ConfigStore, MementoStore, ProjectContextProvider } from '../host';
 import { LlmClient, type ModelId } from '../llm/LlmClient';
 import { ModelRouter } from '../llm/ModelRouter';
@@ -11,6 +12,7 @@ import { McpClient } from '../mcp/McpClient';
 import type { ToolExecutionContext } from '../tools/types';
 import { AgentManager } from './AgentManager';
 import { AcpAgent } from './AcpAgent';
+import { RoutedAgent } from './RoutedAgent';
 import { AcpRuntime } from '../acp/AcpRuntime';
 import { validateAgent, type AcpAgentDefinition, type AcpPermissionHandler } from '../acp/protocol';
 import { BaseAgent } from './BaseAgent';
@@ -247,6 +249,8 @@ export function createAgentStack(deps: {
 	 * lifecycle).
 	 */
 	configStore?: ConfigStore;
+	/** Keep an ACP server's native agents from recursively launching external adapters. */
+	disableAcpRouting?: boolean;
 	/**
 	 * Optional. Session spend kill switch (CLAUDE.md: "configurable spend cap
 	 * per session"). When supplied, the single instance is threaded into every
@@ -320,17 +324,32 @@ export function createAgentStack(deps: {
 		maxQueue: configStore?.get<number>('sota.acp.maxQueue'),
 	});
 	const routeAgent = (agent: BaseAgent): BaseAgent => {
-		const id = configStore?.get<string>(`sota.agents.${agent.handle}.acpAgent`);
-		if (!id) { return agent; }
-		const definitions = configStore?.get<AcpAgentDefinition[]>('sota.acp.agents') ?? [];
-		const definition = Array.isArray(definitions) ? definitions.find(entry => entry.id === id) : undefined;
-		// Keep activation available; report invalid routing when the user invokes this specialist.
-		const configured = definition ?? { id, command: '' };
-		return new AcpAgent(acpRuntime, configured, workspaceRoot ?? '', () => {
-			if (!workspaceRoot || !deps.canUseAcp?.()) { throw new Error('ACP agents require a trusted workspace'); }
-			validateAgent(configured);
-			return agent.getAcpInstructions();
-		}, deps.acpPermission, result => agent.interpretAcpResult(result), requireConfig(agent.handle), llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, configStore, projectContext, toolExecutionContext, modelRouter, spendGuard, contextSanitiser);
+		if (deps.disableAcpRouting) { return agent; }
+		let cached: { key: string; agent: AcpAgent } | undefined;
+		const base = [requireConfig(agent.handle), llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, configStore, projectContext, toolExecutionContext, modelRouter, spendGuard, contextSanitiser] satisfies ConstructorParameters<typeof BaseAgent>;
+		return new RoutedAgent(agent, model => {
+			const explicit = configStore?.get<string>(`sota.agents.${agent.handle}.acpAgent`)?.trim();
+			const claudeModel = model.startsWith('claude-code-') ? model.slice('claude-code-'.length) : undefined;
+			const id = explicit || (claudeModel ? 'claude-acp' : undefined);
+			if (!id) { return undefined; }
+			const definitions = configStore?.get<AcpAgentDefinition[]>('sota.acp.agents') ?? [];
+			const definition = Array.isArray(definitions) ? definitions.find(entry => entry.id === id) : undefined;
+			if (!definition) {
+				throw new Error(explicit ? `ACP adapter "${id}" is not configured. Open Anton: Browse ACP Adapters or choose a configured adapter in Agent Settings.` : 'Claude Code specialists require the Claude ACP adapter. Run Anton: Configure Claude ACP, then retry the task. Your Claude Code subscription sign-in is reused.');
+			}
+			validateAgent(definition);
+			// The registry's Claude adapter supports ANTHROPIC_MODEL. Custom explicit
+			// adapters retain their own model configuration and execution semantics.
+			const configured = id === 'claude-acp' && claudeModel ? { ...definition, env: { ...definition.env, ANTHROPIC_MODEL: claudeModel } } : definition;
+			const key = createHash('sha256').update(JSON.stringify(configured)).digest('hex');
+			if (cached?.key !== key) {
+				cached = { key, agent: new AcpAgent(acpRuntime, configured, workspaceRoot ?? '', () => {
+					if (!workspaceRoot || !deps.canUseAcp?.()) { throw new Error('ACP agents require a trusted workspace'); }
+					return agent.getAcpInstructions();
+				}, deps.acpPermission, result => agent.interpretAcpResult(result), ...base) };
+			}
+			return cached.agent;
+		}, ...base);
 	};
 
 	const codeAgent = routeAgent(new CodeGeneratorAgent(

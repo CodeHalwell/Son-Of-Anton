@@ -200,6 +200,7 @@ export class OrchestratorAgent extends BaseAgent {
 		// `/approve` (which carries no message) can pass it to
 		// dispatched specialists as `orchestratorModelHint`.
 		plan.orchestratorModel = request.modelOverride;
+		plan.workspaceContextSnapshot = request.workspaceContextSnapshot;
 		this.activePlan = plan;
 
 		structuredEmit?.({
@@ -731,6 +732,7 @@ export class OrchestratorAgent extends BaseAgent {
 					? (token) => structuredEmit({ type: 'subtask-token', subtaskId: subtask.id, token })
 					: undefined,
 				orchestratorModelHint: this.activePlan?.orchestratorModel,
+				workspaceContextSnapshot: this.activePlan?.workspaceContextSnapshot,
 			};
 
 			// Per-turn timeout (H9). Race the specialist's execute() against a
@@ -801,6 +803,8 @@ export class OrchestratorAgent extends BaseAgent {
 						scopeFiles: result.changes.map(c => c.filePath),
 						graphContext: '',
 						parentTaskId,
+						orchestratorModelHint: context.orchestratorModelHint,
+						workspaceContextSnapshot: context.workspaceContextSnapshot,
 					});
 
 					if (!reviewResult.success) {

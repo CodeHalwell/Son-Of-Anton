@@ -188,6 +188,7 @@ test('chat: live Markdown hides protocol fragments and preserves tool controls a
 	assert.doesNotMatch(await page.locator('.msg-body').last().textContent(), /Explain the guard|sota:end/);
 	await post(page, { type: 'messageComplete', inputTokens: 12, outputTokens: 34, totalTokens: 46, estimatedCost: '0.00' });
 	assert.equal(await page.locator('.tool-card').count(), 1);
+	assert.deepEqual(await page.locator('.tool-card').evaluate(card => ({ status: card.dataset.toolStatus, label: card.querySelector('.tool-card-status').textContent, icon: card.querySelector('.tool-card-icon').textContent })), { status: 'ok', label: 'Ok', icon: '✓' });
 	assert.equal(await page.locator('.msg-text-rendered pre code').textContent(), 'const example = "<tag>";');
 	await page.getByRole('button', { name: 'Explain the guard', exact: true }).waitFor();
 	assert.match(await page.locator('#transcriptTaskMeter').textContent(), /12.*34/);

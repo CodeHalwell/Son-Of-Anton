@@ -2210,8 +2210,8 @@ export class ChatSession {
 	/**
 	 * Connect Anthropic via the locally-installed Claude Code CLI. No API key
 	 * required — the CLI handles auth itself (subscription tokens stored by
-	 * the Claude Code installer). We just verify the binary is present, set
-	 * the active model to a `claude-code-*` id, and surface the result.
+	 * the Claude Code installer). Configure ACP too so specialists can use
+	 * tools when a `claude-code-*` model is selected.
 	 */
 	private async handleConnectClaudeCode(): Promise<void> {
 		const { isClaudeCodeAvailable } = await import('son-of-anton-core/llm/claudeCodeRunner');
@@ -2225,12 +2225,16 @@ export class ChatSession {
 			});
 			return;
 		}
+		if (!await vscode.commands.executeCommand<boolean>('sota.configureClaudeAcp')) {
+			this.webview.postMessage({ type: 'providerSaveResult', provider: 'anthropic', ok: false, deferred: false, message: vscode.l10n.t('Claude Code is available, but ACP setup was not completed. Configure Claude ACP to enable specialist tools.') });
+			return;
+		}
 		this.webview.postMessage({
 			type: 'providerSaveResult',
 			provider: 'anthropic',
 			ok: true,
 			deferred: false,
-			message: 'Connected via Claude Code. Pick a "via Claude Code" model in the dropdown to use your subscription.',
+			message: vscode.l10n.t('Connected via Claude Code with ACP specialist tools. Pick a “via Claude Code” model to use your subscription.'),
 		});
 		void this.refreshConnectionState();
 	}
@@ -3805,7 +3809,7 @@ export class ChatSession {
 				// webview message so the chat surface renders the same
 				// inline tool card the chat-panel direct-tool-loop path
 				// already produces. Status maps verbatim — the webview
-				// already knows 'running' / 'done' / 'error'. Skip
+				// normalizes 'done' to its 'ok' presentation. Skip
 				// emit_ui_block here too so generative-UI blocks render via
 				// their dedicated `uiBlock` postMessage instead.
 				if (event.name === 'emit_ui_block') {
