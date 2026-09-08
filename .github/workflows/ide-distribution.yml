@@ -152,7 +152,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: ide-failure-${{ matrix.target }}
+          name: failure-ide-${{ matrix.target }}
           path: |
             .build/ide-release/*/*.log
             .build/ide-release/*/*report.json
