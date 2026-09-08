@@ -87,7 +87,8 @@ jobs:
             extensions/son-of-anton/package-lock.json
             services/code-graph/mcp-server/package-lock.json
       - name: Cache native graph dependencies
-        uses: actions/cache@v4
+        id: native-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry
@@ -127,6 +128,15 @@ jobs:
           node --test scripts/test/ide-release.test.mjs
       - name: Build native code graph
         run: node scripts/build-codegraph-runtime.mjs
+      - name: Save compiled native graph dependencies
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/target
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
       - name: Build complete IDE distribution
         env:
           IDE_TARGET: ${{ matrix.target }}

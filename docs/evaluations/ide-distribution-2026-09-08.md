@@ -27,9 +27,12 @@ The 1,002-source-file fixture covers independent multi-file proposals, competing
 - All 31 browser webview tests passed, covering sidebar Chat/Tasks/History/Settings/Roster, Board, Council, setup, integrations and proposal review.
 - Six release-integrity tests and three native graph lifecycle/retrieval tests passed.
 - The complete Mac IDE was built, packaged as a DMG, installed in a fresh temporary directory and activated successfully. The installed native graph answered the fixture symbol query. Test applications and debugger processes are cleaned up after inspection.
+- Native UI inspection selected all five sidebar tabs and all nine Settings sections, checked both board views, and confirmed that installed integration discovery completes. The narrow sidebar layouts had no horizontal overflow. Invalid skill metadata appears as a configuration warning without preventing the rest of discovery.
 
 The first-launch review found and corrected a conflicting personality-frequency setting and a misleading graph startup spinner in Restricted Mode. Graph activation now waits for workspace trust and explains that state. The empty secondary sidebar is hidden by the workbench default on new profiles.
 
 Provider credentials are not bundled or exercised by offline installation tests. Gemini's Google sign-in remains a manual prerequisite for the live-provider test; the diagnostic explains how to complete it without placing authorization codes into an ACP conversation. This evaluation does not claim exhaustive testing of every upstream VS Code feature, installed third-party MCP server or provider account.
 
-Native release run results and download links are recorded after the Actions build completes.
+The Linux CI harness also passed all 31 webview checks after correcting focus retention while an integration connection request is pending. Windows CLI packaging, bundled provider launchers, ACP sessions and relocation checks passed on native GitHub runners; the Mac and Linux CLI packages passed as well.
+
+Current native installation results are available in the [installer workflow](https://github.com/CodeHalwell/Son-Of-Anton/actions/workflows/ide-distribution.yml). [GitHub Releases](https://github.com/CodeHalwell/Son-Of-Anton/releases) includes the source manifest, checksums, installation guide and per-platform installation reports for each released IDE build. A release is staged only after all four native installation jobs pass.

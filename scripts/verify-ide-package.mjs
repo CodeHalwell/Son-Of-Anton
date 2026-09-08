@@ -43,7 +43,7 @@ try {
 		await mkdir(path.join(directory, 'profile/User'), { recursive: true });
 		await writeFile(path.join(directory, 'profile/User/settings.json'), '{"sota.installationSentinel":"preserve"}');
 		run(path.join(output, setup.name), args);
-		assert.equal(JSON.parse(await readFile(path.join(directory, 'profile/User/settings.json'))).sota.installationSentinel, 'preserve');
+		assert.equal(JSON.parse(await readFile(path.join(directory, 'profile/User/settings.json')))['sota.installationSentinel'], 'preserve');
 	} else if (!app) {
 		const deb = manifest.files.find(file => file.name.endsWith('.deb')); assert.ok(deb);
 		run('dpkg-deb', ['-x', path.join(output, deb.name), install]); app = path.join(install, 'usr/share/son-of-anton');
@@ -87,6 +87,7 @@ try {
 	await writeFile(path.join(output, 'installation-report.json'), JSON.stringify({ ...report, target, commit: product.commit, ideVersion: product.version, installer: process.env.SOTA_TEST_INSTALLED_APP ? 'system-package' : 'fresh-temporary-install', checkedAssets: manifest.files.map(file => file.name) }, null, 2) + '\n');
 	console.log(`Installed IDE activation and bundled native graph checks passed (${target}).`);
 } finally {
+	try { await cp(path.join(directory, 'setup.log'), path.join(output, 'setup.log')); } catch (error) { if (error.code !== 'ENOENT') { console.warn('Unable to retain installer log'); } }
 	const logs = path.join(directory, 'profile/logs');
 	try { await cp(logs, path.join(output, 'activation-logs'), { recursive: true }); } catch (error) { if (error.code !== 'ENOENT') { console.warn('Unable to retain activation logs'); } }
 	if (mounted) { run('hdiutil', ['detach', mount]); }
