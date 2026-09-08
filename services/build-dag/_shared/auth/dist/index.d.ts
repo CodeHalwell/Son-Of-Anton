@@ -58,3 +58,4 @@ export declare function createAuthMiddleware(token?: string): AuthMiddleware;
  * token is configured so behaviour is unchanged in unauthenticated setups.
  */
 export declare function serviceAuthHeaders(token?: string): Record<string, string>;
+export { WorkspacePathError, workspacePath, readWorkspaceFile, writeWorkspaceFile, removeWorkspaceFile } from './workspaceFs';

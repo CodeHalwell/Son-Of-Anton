@@ -49,10 +49,15 @@ interface ConnectionState {
  */
 export class BrokerServer {
 	private server: net.Server | undefined;
+	private readonly sockets = new Set<net.Socket>();
 	private sessionToken: string | undefined;
 	private tokenFilePath: string | undefined;
+	private boundSocketPath: string | undefined;
 
-	constructor(private readonly broker: CredentialBroker) {}
+	constructor(
+		private readonly broker: CredentialBroker,
+		private readonly endpoint?: { socketPath: string; tokenFilePath: string },
+	) {}
 
 	/**
 	 * Binds the socket and writes the session token file.
@@ -61,18 +66,12 @@ export class BrokerServer {
 	async start(): Promise<{ socketPath: string; tokenFilePath: string }> {
 		this.sessionToken = crypto.randomBytes(32).toString('hex');
 
-		const socketPath = getSocketPath();
+		const socketPath = this.endpoint?.socketPath ?? getSocketPath();
 		const tokenDir = process.platform === 'win32'
 			? os.tmpdir()
 			: (process.env['XDG_RUNTIME_DIR'] ?? os.tmpdir());
 
-		const tokenFilePath = path.join(tokenDir, TOKEN_FILENAME);
-		this.tokenFilePath = tokenFilePath;
-		fs.writeFileSync(tokenFilePath, this.sessionToken, { mode: 0o600 });
-
-		if (process.platform !== 'win32') {
-			try { fs.unlinkSync(socketPath); } catch { /* stale socket */ }
-		}
+		const tokenFilePath = this.endpoint?.tokenFilePath ?? path.join(tokenDir, TOKEN_FILENAME);
 
 		await new Promise<void>((resolve, reject) => {
 			this.server = net.createServer((socket: net.Socket) => this.handleConnection(socket));
@@ -80,27 +79,45 @@ export class BrokerServer {
 			this.server.listen(socketPath, () => resolve());
 		});
 
-		if (process.platform !== 'win32') {
-			try { fs.chmodSync(socketPath, 0o600); } catch { /* best-effort */ }
+		// Do not unlink an existing socket or rotate another editor's token.
+		// Binding first elects the owner; EADDRINUSE leaves the active broker intact.
+		this.boundSocketPath = socketPath;
+		const temporaryToken = tokenFilePath + '.' + crypto.randomUUID();
+		try {
+			if (process.platform !== 'win32') { fs.chmodSync(socketPath, 0o600); }
+			fs.writeFileSync(temporaryToken, this.sessionToken, { mode: 0o600, flag: 'wx' });
+			fs.renameSync(temporaryToken, tokenFilePath);
+			this.tokenFilePath = tokenFilePath;
+		} catch (error) {
+			try { fs.unlinkSync(temporaryToken); } catch { /* not created */ }
+			this.stop();
+			throw error;
 		}
 
 		return { socketPath, tokenFilePath };
 	}
 
 	stop(): void {
+		for (const socket of this.sockets) { socket.destroy(); }
+		this.sockets.clear();
 		this.server?.close();
 		this.server = undefined;
 
-		if (process.platform !== 'win32') {
-			try { fs.unlinkSync(getSocketPath()); } catch { /* already gone */ }
+		if (process.platform !== 'win32' && this.boundSocketPath) {
+			try { fs.unlinkSync(this.boundSocketPath); } catch { /* already gone */ }
 		}
 		if (this.tokenFilePath) {
-			try { fs.unlinkSync(this.tokenFilePath); } catch { /* already gone */ }
+			try { if (fs.readFileSync(this.tokenFilePath, 'utf8') === this.sessionToken) { fs.unlinkSync(this.tokenFilePath); } } catch { /* already gone */ }
 			this.tokenFilePath = undefined;
 		}
+		this.boundSocketPath = undefined;
+		this.sessionToken = undefined;
 	}
 
 	private handleConnection(socket: net.Socket): void {
+		this.sockets.add(socket);
+		socket.once('close', () => this.sockets.delete(socket));
+		socket.setTimeout(30000, () => socket.destroy());
 		const state: ConnectionState = { authenticated: false };
 		let buffer = '';
 		const queue: Array<() => Promise<void>> = [];
@@ -124,6 +141,7 @@ export class BrokerServer {
 		};
 
 		socket.on('data', (chunk: Buffer) => {
+			if (buffer.length + chunk.length > 65536 || queue.length > 64) { socket.destroy(); return; }
 			buffer += chunk.toString('utf-8');
 			const lines = buffer.split('\n');
 			buffer = lines.pop() ?? '';

@@ -20,7 +20,10 @@ tree-sitter-javascript = "0.23"
 tree-sitter-python = "0.23"
 tree-sitter-rust = "0.23"
 walkdir = "2"
-fastembed = { version = "5", features = ["ort-download-binaries"] }
+ignore = "0.4"
+# ORT rc.12 drops Intel macOS binaries and requires a newer Linux glibc.
+# Keep the desktop runtime on the rc.10 binary set until all installer targets pass.
+fastembed = { version = "=5.3.1", features = ["ort-download-binaries"] }
 instant-distance = "0.6"
 bytemuck = "1"
 reqwest = { version = "0.12", features = ["json"] }

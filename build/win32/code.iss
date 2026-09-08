@@ -8,10 +8,10 @@
 AppId={#AppId}
 AppName={#NameLong}
 AppVerName={#NameVersion}
-AppPublisher=Microsoft Corporation
-AppPublisherURL=https://code.visualstudio.com/
-AppSupportURL=https://code.visualstudio.com/
-AppUpdatesURL=https://code.visualstudio.com/
+AppPublisher=Son of Anton Contributors
+AppPublisherURL=https://github.com/CodeHalwell/Son-Of-Anton
+AppSupportURL=https://github.com/CodeHalwell/Son-Of-Anton/issues
+AppUpdatesURL=https://github.com/CodeHalwell/Son-Of-Anton/releases
 DefaultGroupName={#NameLong}
 AllowNoIcons=yes
 OutputDir={#OutputDir}
@@ -1782,7 +1782,7 @@ begin
   until Length(Text)=0;
 end;
 
-function NeedsAddToPath(Son of Anton: string): boolean;
+function NeedsAddToPath(AppPath: string): boolean;
 var
   OrigPath: string;
 begin
@@ -1791,25 +1791,25 @@ begin
     Result := True;
     exit;
   end;
-  Result := Pos(';' + Son of Anton + ';', ';' + OrigPath + ';') = 0;
+  Result := Pos(';' + AppPath + ';', ';' + OrigPath + ';') = 0;
 end;
 
-function AddToPath(Son of Anton: string): string;
+function AddToPath(AppPath: string): string;
 var
   OrigPath: string;
 begin
   RegQueryStringValue({#EnvironmentRootKey}, '{#EnvironmentKey}', 'Path', OrigPath)
 
   if (Length(OrigPath) > 0) and (OrigPath[Length(OrigPath)] = ';') then
-    Result := OrigPath + Son of Anton
+    Result := OrigPath + AppPath
   else
-    Result := OrigPath + ';' + Son of Anton
+    Result := OrigPath + ';' + AppPath
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   Path: string;
-  Son of AntonPath: string;
+  AppPath: string;
   Parts: TArrayOfString;
   NewPath: string;
   i: Integer;
@@ -1825,10 +1825,10 @@ begin
     exit;
   end;
   NewPath := '';
-  Son of AntonPath := ExpandConstant('{app}\bin')
+  AppPath := ExpandConstant('{app}\bin')
   Explode(Parts, Path, ';');
   for i:=0 to GetArrayLength(Parts)-1 do begin
-    if CompareText(Parts[i], Son of AntonPath) <> 0 then begin
+    if CompareText(Parts[i], AppPath) <> 0 then begin
       NewPath := NewPath + Parts[i];
 
       if i < GetArrayLength(Parts) - 1 then begin

@@ -1,0 +1,49 @@
+name: Verify sota packages
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'son-of-anton-cli/**'
+      - 'son-of-anton-core/**'
+      - '.github/workflows/verify-sota-packages.yml'
+permissions:
+  contents: read
+concurrency:
+  group: sota-packages-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: macos-arm64
+          - os: ubuntu-22.04
+            target: linux-x64
+          - os: windows-2022
+            target: windows-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - run: npm ci
+        working-directory: son-of-anton-core
+      - run: npm ci
+        working-directory: son-of-anton-cli
+      - name: Compile before testing
+        shell: bash
+        run: |
+          npm --prefix son-of-anton-core run build
+          npm --prefix son-of-anton-cli run build
+      - name: Protocol, isolation and upgrade regressions
+        shell: bash
+        run: |
+          node --test son-of-anton-core/dist/acp/*.test.js son-of-anton-core/dist/workspace/*.test.js
+          node --test son-of-anton-cli/dist/test/updateInstall.test.js
+      - name: Build and verify installed binary
+        run: npm run package:${{ matrix.target }}
+        working-directory: son-of-anton-cli

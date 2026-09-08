@@ -9,6 +9,7 @@ import { createAgentStack, type AgentStack } from 'son-of-anton-core/dist/agents
 import { SessionBudget } from 'son-of-anton-core/dist/agents/SessionBudget';
 import type { CoreHost, Disposable } from 'son-of-anton-core/dist/host';
 import { LlmClient } from 'son-of-anton-core/dist/llm/LlmClient';
+import { getSystemCatalog } from 'son-of-anton-core/dist/integrations/SystemCatalog';
 import { McpClient, type McpClientDeps } from 'son-of-anton-core/dist/mcp/McpClient';
 import type { ApprovalGate } from './approval';
 import { HookRunner, hooksFilePath } from './persistence/HookRunner';
@@ -17,12 +18,14 @@ import { buildCliToolExecutionContext } from './toolExecutionContext';
 
 /**
  * Optional wiring for {@link buildCliAgentStack}. Callers that drive
- * side-effecting agentic runs (`sota run`) pass an {@link ApprovalGate} so
- * the tool-execution context prompts before writes / commands; read-only
- * surfaces (`plan`, `acp`) omit it and inherit the prior no-gate behaviour.
+ * side-effecting agentic runs pass an {@link ApprovalGate} so tool execution
+ * prompts before writes, commands and external MCP calls. ACP sessions route
+ * these decisions back to their client through session/request_permission.
  */
 export interface CliAgentStackOptions {
 	readonly approvalGate?: ApprovalGate;
+	/** ACP server sessions must not recursively route back into external agents. */
+	readonly disableAcpRouting?: boolean;
 }
 
 /**
@@ -55,21 +58,23 @@ function buildCliSpendGuard(): SessionBudget | undefined {
 /**
  * Construct the canonical agent stack for the CLI. Mirrors the extension's
  * activation wiring (`extensions/son-of-anton/src/extension.ts`) but uses the
- * file-backed CoreHost from `cliHost.ts` and supplies a no-op MCP server list.
- *
- * The CLI v1 deliberately ships without MCP servers — graph queries will fail
- * gracefully (the orchestrator's `gatherGraphContext` already wraps the call
- * in try/catch and surfaces "(Code graph not available)") so the stack still
- * produces a usable response.
+ * file-backed CoreHost from `cliHost.ts`. Trusted workspaces can use MCP
+ * servers from host configuration, including ACP session/new descriptors.
  */
 export function buildCliAgentStack(host: CoreHost, options?: CliAgentStackOptions): { stack: AgentStack; llm: LlmClient; agentManager: AgentManager; mcpClient: McpClient; hookRunner?: HookRunner; dispose: () => void } {
 	const llm = new LlmClient(host.secrets, host.config);
 
-	// MCP deps wired to "no servers, no live updates". The CLI doesn't
-	// currently surface a settings-change hook, so the listener immediately
-	// returns a no-op disposable.
+	// Configuration is fixed for this CLI invocation or ACP session.
 	const mcpDeps: McpClientDeps = {
-		readServersSetting: () => host.config.get<unknown>('sota.mcp.servers') ?? [],
+		readServersSetting: async () => {
+			if (!host.workspace.isTrusted) { return []; }
+			const configured = host.config.get<unknown>('sota.mcp.servers');
+			const list = Array.isArray(configured) ? configured : [];
+			if (host.config.get('sota.integrations.enabled') === false) { return list; }
+			const catalog = await getSystemCatalog({ workspace: host.workspace.folders[0]?.fsPath });
+			const selected = host.config.get<unknown>('sota.integrations.mcpServers');
+			return [...list, ...(Array.isArray(selected) ? selected.flatMap(id => typeof id === 'string' && catalog.servers.has(id) ? [catalog.servers.get(id)!] : []) : [])];
+		},
 		getWorkspaceRoot: () => host.workspace.folders[0]?.fsPath,
 		onSettingChange: (_listener) => ({ dispose: () => { /* no-op */ } } as Disposable),
 	};
@@ -98,14 +103,28 @@ export function buildCliAgentStack(host: CoreHost, options?: CliAgentStackOption
 	// any setting change is picked up on the next `sota` invocation
 	// without reload churn.
 	const stack = createAgentStack({
+		canUseAcp: () => host.workspace.isTrusted,
+		acpPermission: async (request, signal) => {
+			if (signal.aborted || !options?.approvalGate) { return { outcome: { outcome: 'cancelled' } }; }
+			const decision = await options.approvalGate({ kind: request.toolCall.kind === 'edit' ? 'write' : 'command', detail: JSON.stringify(request.toolCall).slice(0, 8000) });
+			const selected = request.options.find(option => option.kind === (decision.approved ? 'allow_once' : 'reject_once'));
+			return signal.aborted || !selected ? { outcome: { outcome: 'cancelled' } } : { outcome: { outcome: 'selected', optionId: selected.optionId } };
+		},
 		llmClient: llm,
 		mcpClient,
 		agentManager,
 		globalState: host.globalState,
 		workspaceRoot,
 		projectContext: host.projectContext,
-		toolExecutionContext,
-		configStore: host.config,
+		toolExecutionContext: toolExecutionContext ? {
+			...toolExecutionContext,
+			requestMcpApproval: async (tool, input, signal) => {
+				if (signal?.aborted || !host.workspace.isTrusted || !options?.approvalGate) { return false; }
+				const decision = await options.approvalGate({ kind: 'command', detail: `MCP ${tool.name}: ${JSON.stringify(input).slice(0, 8000)}` });
+				return !signal?.aborted && decision.approved;
+			},
+		} : undefined,
+		configStore: options?.disableAcpRouting ? { ...host.config, get: <T>(key: string) => key.endsWith('.acpAgent') ? undefined : host.config.get<T>(key) } : host.config,
 		spendGuard: buildCliSpendGuard(),
 	});
 

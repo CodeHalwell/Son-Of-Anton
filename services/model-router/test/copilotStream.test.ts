@@ -121,12 +121,12 @@ describe('CopilotStreamTranslator', () => {
 		assert.strictEqual(t.hasStart, false);
 	});
 
-	test('finalize is idempotent and synthesises end_turn when no finish_reason was seen', () => {
+	test('finalize is idempotent and reports truncated streams', () => {
 		const t = new CopilotStreamTranslator('req-y', 'copilot');
 		t.translate(({ model: 'gpt-4o', choices: [{ index: 0, delta: { content: 'x' } }] }) as Parameters<CopilotStreamTranslator['translate']>[0]);
 		const first = t.finalize();
 		const second = t.finalize();
-		assert.deepStrictEqual(first, [{ type: 'message_stop', stopReason: 'end_turn' }]);
+		assert.deepStrictEqual(first, [{ type: 'error', code: 'incomplete_stream', message: 'Provider stream ended before completion', retryable: true }, { type: 'message_stop', stopReason: 'error' }]);
 		assert.deepStrictEqual(second, []);
 	});
 

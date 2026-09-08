@@ -25,14 +25,9 @@ const FALLBACK_PERSONA: PersonaView = {
 	tagline: '',
 };
 
-const TRUNCATE_AT = 80;
-
 export function KanbanCard({ task, persona }: KanbanCardProps): JSX.Element {
 	const p = persona ?? FALLBACK_PERSONA;
 	const idShort = task.id.split('-').slice(-2).join('-');
-	const truncatedInstruction = task.instruction.length > TRUNCATE_AT
-		? task.instruction.slice(0, TRUNCATE_AT - 1) + '…'
-		: task.instruction;
 
 	const onDragStart = useCallback((ev: DragEvent<HTMLDivElement>): void => {
 		ev.currentTarget.classList.add('dragging');
@@ -54,43 +49,40 @@ export function KanbanCard({ task, persona }: KanbanCardProps): JSX.Element {
 		postToHost({ type: 'reveal', taskId: task.id });
 	}, [task.id]);
 
-	const tooltipParts = [task.instruction];
-	if (task.scopeFiles.length > 0) {
-		tooltipParts.push('Files: ' + task.scopeFiles.join(', '));
-	}
-	if (task.tokenUsage) {
-		tooltipParts.push(`Tokens: ${task.tokenUsage.input} in / ${task.tokenUsage.output} out`);
-	}
-
 	const visibleScope = task.scopeFiles.slice(0, 3);
 	const hiddenScopeCount = Math.max(0, task.scopeFiles.length - visibleScope.length);
+	const title = task.instruction.split('\n').find(line => line.trim()) ?? task.instruction;
 
 	return (
 		<div
 			className="tile"
-			draggable
+			draggable={['ready', 'done', 'failed'].includes(task.state)}
 			onDragStart={onDragStart}
 			onDragEnd={onDragEnd}
-			onClick={onClick}
 			data-task-id={task.id}
 			data-state={task.state}
 			data-assignee={task.assignee}
-			style={{ borderLeftColor: p.accent }}
-			title={tooltipParts.join('\n')}
+			aria-label={task.instruction}
 		>
 			<div className="tile-row">
 				<span className="tile-id">{idShort}</span>
-				<span className={`tile-status-pill ${task.state}`} style={{ marginLeft: 'auto' }}>{task.state}</span>
+				<span className={`tile-status-pill ${task.state}`}>{task.state === 'in-progress' ? 'Running' : task.state === 'review' ? 'In Review' : task.state === 'failed' ? 'Needs Attention' : task.state}</span>
 			</div>
-			<div className="tile-instruction">{truncatedInstruction}</div>
+			<details className="task-details"><summary className="tile-instruction"><span>{title}</span></summary><div className="task-detail-body">
+				<p className="task-full-instruction">{task.instruction}</p>
+				{task.summary ? <p>{task.summary}</p> : <p>No execution summary yet.</p>}
+				{task.scopeFiles.length > 0 && <ul aria-label="Files in scope">{task.scopeFiles.map(file => <li key={file}><code>{file}</code></li>)}</ul>}
+				{task.dependencies.length > 0 && <p>Depends on {task.dependencies.join(', ')}</p>}
+				{task.tokenUsage && <p>{task.tokenUsage.input.toLocaleString()} input · {task.tokenUsage.output.toLocaleString()} output tokens</p>}
+			</div></details>
 			<div className="tile-assignee">
-				<span className="avatar" style={{ background: p.accent }}>{p.monogram}</span>
+				<span className="avatar" style={{ color: p.accent }} aria-hidden="true">{p.monogram}</span>
 				<span className="tile-name">@{task.assignee}</span>
 			</div>
 			{task.scopeFiles.length > 0 && (
 				<div className="chips">
 					{visibleScope.map(file => (
-						<span key={file} className="chip" title={file}>{file}</span>
+						<span key={file} className="chip" title={file}>{file.split(/[\\/]/).pop()}</span>
 					))}
 					{hiddenScopeCount > 0 && (
 						<span className="chip">+{hiddenScopeCount} more</span>
@@ -100,11 +92,18 @@ export function KanbanCard({ task, persona }: KanbanCardProps): JSX.Element {
 			{task.dependencies.length > 0 && (
 				<div className="chips">
 					<span className="chip dep">
-						{'→ ' + task.dependencies.map(d => d.split('-').slice(-2).join('-')).join(', ')}
+						{task.dependencies.length} {task.dependencies.length === 1 ? 'dependency' : 'dependencies'}
 					</span>
 				</div>
 			)}
-			{task.summary && <div className="tile-summary">{task.summary}</div>}
+			{task.state === 'failed' && task.summary && <div className="tile-summary">{task.summary}</div>}
+			<div className="tile-actions">
+				{task.proposalId && <button type="button" className="card-action" onClick={() => postToHost({ type: 'review-proposal', taskId: task.id })}>Review Changes</button>}
+				{task.state === 'in-progress' && task.id.startsWith('council:') && <button type="button" className="card-action" onClick={() => postToHost({ type: 'cancel-task', taskId: task.id })}>Cancel Task</button>}
+				<button type="button" className="quiet-button" onClick={onClick} aria-label={`View task ${idShort} in chat`}>View in Chat <span aria-hidden="true">↗</span></button>
+				{task.state === 'ready' && <button type="button" className="card-action" onClick={() => postToHost({ type: 'dispatch', taskId: task.id })}>Run Task</button>}
+				{(task.state === 'failed' || task.state === 'done') && <button type="button" className="card-action" onClick={() => postToHost({ type: 'rerun', taskId: task.id })}>{task.state === 'failed' ? 'Retry' : 'Run Again'}</button>}
+			</div>
 		</div>
 	);
 }

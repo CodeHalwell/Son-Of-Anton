@@ -1,0 +1,10 @@
+{
+  "fixture": "workflow-v1",
+  "provider": "deterministic-offline",
+  "completed": 1,
+  "unrelatedEdits": 0,
+  "approvalRequired": true,
+  "recoveryPassed": true,
+  "inputTokens": 40,
+  "outputTokens": 10
+}

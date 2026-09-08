@@ -6,6 +6,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { ProtectedSecretStore } from 'son-of-anton-core/dist/credentials/ProtectedSecretStore';
 import type {
 	ConfigChangeEvent,
 	ConfigStore,
@@ -44,12 +45,16 @@ function readJson<T>(file: string, fallback: T): T {
 
 function writeJson(file: string, value: unknown, mode = 0o600): void {
 	ensureDirs();
-	fs.writeFileSync(file, JSON.stringify(value, null, 2), { mode });
+	const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
+	try {
+		fs.writeFileSync(temporary, JSON.stringify(value, null, 2), { mode, flag: 'wx' });
+		fs.renameSync(temporary, file);
+	} finally { try { fs.unlinkSync(temporary); } catch { /* Renamed or absent. */ } }
 }
 
 /**
  * CLI secret store with an in-process, non-persisted overlay on top of the
- * file-backed `~/.son-of-anton/data/secrets.json`.
+ * shared OS-protected credential store.
  *
  * `mirrorEphemeral` exposes a value (e.g. an API key read from an environment
  * variable) to the rest of the core stack for the lifetime of this process
@@ -65,19 +70,33 @@ export interface CliSecretStore extends SecretStore {
 	mirrorEphemeral(key: string, value: string): void;
 }
 
-class FileSecretStore implements CliSecretStore {
+class ProtectedCliSecretStore implements CliSecretStore {
+	private readonly protectedStore = new ProtectedSecretStore();
+	private readonly plaintext = process.env.SOTA_ALLOW_PLAINTEXT_SECRETS === '1';
 	/** In-process overlay; never written to disk. */
 	private readonly ephemeral = new Map<string, string>();
+	private warnedUnavailable = false;
 
 	async get(key: string): Promise<string | undefined> {
 		const overlaid = this.ephemeral.get(key);
 		if (overlaid !== undefined) {
 			return overlaid;
 		}
+		if (!this.plaintext) {
+			try { return await this.protectedStore.get(key); }
+			catch {
+				if (!this.warnedUnavailable) {
+					this.warnedUnavailable = true;
+					process.stderr.write('Protected credential storage is unavailable. Unlock your OS credential store (install secret-tool on Linux), or supply credentials through environment variables.\n');
+				}
+				return undefined;
+			}
+		}
 		const data = readJson<Record<string, string>>(SECRETS_PATH, {});
 		return data[key];
 	}
 	async store(key: string, value: string): Promise<void> {
+		if (!this.plaintext) { await this.protectedStore.store(key, value); this.ephemeral.delete(key); return; }
 		const data = readJson<Record<string, string>>(SECRETS_PATH, {});
 		data[key] = value;
 		writeJson(SECRETS_PATH, data);
@@ -86,6 +105,7 @@ class FileSecretStore implements CliSecretStore {
 	}
 	async delete(key: string): Promise<void> {
 		this.ephemeral.delete(key);
+		if (!this.plaintext) { await this.protectedStore.delete(key); return; }
 		const data = readJson<Record<string, string>>(SECRETS_PATH, {});
 		delete data[key];
 		writeJson(SECRETS_PATH, data);
@@ -290,6 +310,8 @@ function isWorkspaceTrustedFromEnv(): boolean {
 }
 
 export interface CliHostOptions {
+	/** ACP session working directory, without changing process-global cwd. */
+	readonly cwd?: string;
 	/**
 	 * Explicit workspace-trust decision. When omitted, trust is resolved from
 	 * the `SOTA_TRUST_WORKSPACE` environment variable and defaults to `false`.
@@ -298,10 +320,10 @@ export interface CliHostOptions {
 }
 
 export function buildCliHost(options?: CliHostOptions): CoreHost {
-	const cwd = process.cwd();
+	const cwd = options?.cwd ?? process.cwd();
 	const isTrusted = options?.trustWorkspace ?? isWorkspaceTrustedFromEnv();
 	return {
-		secrets: new FileSecretStore(),
+		secrets: new ProtectedCliSecretStore(),
 		config: new FileConfigStore(),
 		files: new FsFileStore(),
 		notifier: new CliNotifier(),

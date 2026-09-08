@@ -61,6 +61,7 @@ export interface ApprovalDecision {
  * continue to receive a confirmation UI.
  */
 export interface CreateWorkspaceToolContextOptions {
+	readonly workspaceRoot?: vscode.Uri;
 	/**
 	 * Host-supplied approval gate. Invoked by `writeFile` / `runCommand`
 	 * before any side-effecting work; the returned {@link ApprovalDecision}
@@ -142,7 +143,7 @@ export async function defaultModalApproval(req: ApprovalRequest): Promise<Approv
 
 export function createWorkspaceToolContext(options?: CreateWorkspaceToolContextOptions): ToolExecutionContext {
 	const requestApproval = options?.requestApproval;
-	const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+	const root = options?.workspaceRoot ?? vscode.workspace.workspaceFolders?.[0]?.uri;
 	const resolveSafe = (relPath: string): vscode.Uri => {
 		if (!root) {
 			throw new Error('No workspace folder is open.');

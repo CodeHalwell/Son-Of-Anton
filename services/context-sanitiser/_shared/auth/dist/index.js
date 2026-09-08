@@ -20,7 +20,7 @@
 // scrapers keep working. Token comparison is constant-time via
 // `crypto.timingSafeEqual`.
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.SERVICE_TOKEN_ENV = void 0;
+exports.removeWorkspaceFile = exports.writeWorkspaceFile = exports.readWorkspaceFile = exports.workspacePath = exports.WorkspacePathError = exports.SERVICE_TOKEN_ENV = void 0;
 exports.requireServiceToken = requireServiceToken;
 exports.isExemptPath = isExemptPath;
 exports.isAuthorized = isAuthorized;
@@ -152,4 +152,10 @@ function serviceAuthHeaders(token) {
     const resolved = resolveToken(token);
     return resolved ? { Authorization: `Bearer ${resolved}` } : {};
 }
+var workspaceFs_1 = require("./workspaceFs");
+Object.defineProperty(exports, "WorkspacePathError", { enumerable: true, get: function () { return workspaceFs_1.WorkspacePathError; } });
+Object.defineProperty(exports, "workspacePath", { enumerable: true, get: function () { return workspaceFs_1.workspacePath; } });
+Object.defineProperty(exports, "readWorkspaceFile", { enumerable: true, get: function () { return workspaceFs_1.readWorkspaceFile; } });
+Object.defineProperty(exports, "writeWorkspaceFile", { enumerable: true, get: function () { return workspaceFs_1.writeWorkspaceFile; } });
+Object.defineProperty(exports, "removeWorkspaceFile", { enumerable: true, get: function () { return workspaceFs_1.removeWorkspaceFile; } });
 //# sourceMappingURL=index.js.map

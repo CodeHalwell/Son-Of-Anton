@@ -19,6 +19,10 @@ export class FleetDashboardPanel {
 	private readonly panel: vscode.WebviewPanel;
 	private readonly metricsTracker: MetricsTracker;
 	private readonly backgroundClient: BackgroundTaskClient;
+	private readonly disposables: vscode.Disposable[] = [];
+	private disposed = false;
+	private updating = false;
+	private initialized = false;
 	private refreshTimer: ReturnType<typeof setInterval> | null = null;
 
 	private constructor(
@@ -40,27 +44,29 @@ export class FleetDashboardPanel {
 			}
 		);
 
-		this.panel.onDidDispose(() => {
+		this.disposables.push(this.panel.onDidDispose(() => {
 			FleetDashboardPanel.instance = undefined;
 			this.stopRefresh();
-		});
+			this.disposed = true;
+			for (const disposable of this.disposables.splice(0)) { disposable.dispose(); }
+		}));
 
-		this.panel.webview.onDidReceiveMessage(async message => {
+		this.disposables.push(this.panel.webview.onDidReceiveMessage(async message => {
 			switch (message.command) {
 				case 'refresh':
 					await this.updateDashboard();
 					break;
 				case 'cancelTask':
-					await this.backgroundClient.cancelTask(message.taskId);
+					if (!await this.backgroundClient.cancelTask(message.taskId)) { void vscode.window.showErrorMessage(vscode.l10n.t('Could not cancel the background task. Refresh its status and try again.')); }
 					await this.updateDashboard();
 					break;
 				case 'viewResults':
 					vscode.commands.executeCommand('sota.showBackgroundTaskResults', message.taskId);
 					break;
 			}
-		});
+		}));
 
-		this.updateDashboard();
+		void this.updateDashboard();
 		this.startRefresh();
 	}
 
@@ -95,26 +101,40 @@ export class FleetDashboardPanel {
 	}
 
 	private async updateDashboard(): Promise<void> {
-		const [backgroundTasks, foregroundMetrics] = await Promise.all([
-			this.backgroundClient.listTasks(),
-			Promise.resolve(this.metricsTracker.getAllMetrics()),
-		]);
+		if (this.disposed || this.updating) { return; }
+		this.updating = true;
+		try {
+			const [backgroundTasks, foregroundMetrics] = await Promise.all([
+				this.backgroundClient.listTasks(),
+				Promise.resolve(this.metricsTracker.getAllMetrics()),
+			]);
 
-		const activeTasks = backgroundTasks.filter(
-			t => t.status === 'running' || t.status === 'pending'
-		);
-		const completedTasks = backgroundTasks.filter(
-			t => t.status !== 'running' && t.status !== 'pending'
-		);
+			const activeTasks = backgroundTasks.filter(
+				t => t.status === 'running' || t.status === 'pending'
+			);
+			const completedTasks = backgroundTasks.filter(
+				t => t.status !== 'running' && t.status !== 'pending'
+			);
 
-		const alerts = this.generateAlerts(backgroundTasks, foregroundMetrics);
+			const alerts = this.generateAlerts(backgroundTasks, foregroundMetrics);
+			if (this.backgroundClient.lastListError) { alerts.unshift({ type: 'error', message: vscode.l10n.t('Background service unavailable. Task counts are incomplete. {0}', this.backgroundClient.lastListError) }); }
 
-		this.panel.webview.html = this.buildHtml(
-			activeTasks,
-			completedTasks,
-			foregroundMetrics,
-			alerts,
-		);
+			if (this.disposed) { return; }
+			const html = this.buildHtml(
+				activeTasks,
+				completedTasks,
+				foregroundMetrics,
+				alerts,
+			);
+			if (!this.initialized) {
+				this.panel.webview.html = html;
+				this.initialized = true;
+			} else {
+				await this.panel.webview.postMessage({ type: 'dashboardUpdate', html });
+			}
+		} finally {
+			this.updating = false;
+		}
 	}
 
 	private generateAlerts(
@@ -183,9 +203,14 @@ export class FleetDashboardPanel {
 		}
 		h1 { font-size: 1.4em; margin-bottom: 16px; }
 		h2 { font-size: 1.1em; margin: 16px 0 8px; border-bottom: 1px solid var(--vscode-panel-border); padding-bottom: 4px; }
+		* { box-sizing: border-box; }
+		.table-scroll { width: 100%; overflow-x: auto; overscroll-behavior: contain; }
+		.table-scroll table { min-width: 520px; }
+		:where(button, .table-scroll):focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
+		.alert { overflow-wrap: anywhere; }
 		.metrics-grid {
 			display: grid;
-			grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+			grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
 			gap: 12px;
 			margin-bottom: 16px;
 		}
@@ -257,6 +282,7 @@ export class FleetDashboardPanel {
 	</style>
 </head>
 <body>
+<main id="dashboardContent">
 	<h1>Agent Fleet Dashboard</h1>
 
 	${alerts.length > 0 ? `
@@ -290,7 +316,7 @@ export class FleetDashboardPanel {
 
 	<h2>Active Tasks</h2>
 	${activeTasks.length === 0 ? '<p class="empty">No active tasks</p>' : `
-	<table>
+	<div class="table-scroll" role="region" aria-label="${vscode.l10n.t('Active Tasks')}" tabindex="0"><table>
 		<thead><tr><th>Name</th><th>Status</th><th>Progress</th><th>Duration</th><th>Actions</th></tr></thead>
 		<tbody>
 		${activeTasks.map(t => `
@@ -306,11 +332,11 @@ export class FleetDashboardPanel {
 			</tr>
 		`).join('')}
 		</tbody>
-	</table>`}
+	</table></div>`}
 
 	<h2>Completed Tasks</h2>
 	${completedTasks.length === 0 ? '<p class="empty">No completed tasks</p>' : `
-	<table>
+	<div class="table-scroll" role="region" aria-label="${vscode.l10n.t('Completed Tasks')}" tabindex="0"><table>
 		<thead><tr><th>Name</th><th>Status</th><th>Duration</th><th>Cost</th><th>Actions</th></tr></thead>
 		<tbody>
 		${completedTasks.slice(0, 20).map(t => `
@@ -323,11 +349,11 @@ export class FleetDashboardPanel {
 			</tr>
 		`).join('')}
 		</tbody>
-	</table>`}
+	</table></div>`}
 
 	<h2>Agent Metrics</h2>
 	${metrics.length === 0 ? '<p class="empty">No agent metrics recorded yet</p>' : `
-	<table>
+	<div class="table-scroll" role="region" aria-label="${vscode.l10n.t('Agent Metrics')}" tabindex="0"><table>
 		<thead><tr><th>Agent</th><th>Invocations</th><th>Success Rate</th><th>Avg Retries</th><th>Avg Latency</th></tr></thead>
 		<tbody>
 		${metrics.map(m => `
@@ -340,14 +366,33 @@ export class FleetDashboardPanel {
 			</tr>
 		`).join('')}
 		</tbody>
-	</table>`}
+	</table></div>`}
 
 	<div style="margin-top: 16px; text-align: right;">
 		<button data-action="refresh">Refresh</button>
 	</div>
 
+</main>
 	<script nonce="${nonce}">
 		const vscode = acquireVsCodeApi();
+		window.addEventListener('message', ({ data }) => {
+			if (data.type !== 'dashboardUpdate' || typeof data.html !== 'string') { return; }
+			const next = new DOMParser().parseFromString(data.html, 'text/html').getElementById('dashboardContent');
+			if (!next) { return; }
+			const content = document.getElementById('dashboardContent');
+			const active = document.activeElement;
+			const focusKey = active?.dataset.action;
+			const taskId = active?.dataset.taskid;
+			const regionLabel = active?.getAttribute('aria-label');
+			const scroll = [...content.querySelectorAll('.table-scroll')].map(region => region.scrollLeft);
+			const top = window.scrollY;
+			content.replaceChildren(...next.childNodes);
+			const target = [...content.querySelectorAll('[data-action], .table-scroll')].find(element =>
+				focusKey ? element.dataset.action === focusKey && element.dataset.taskid === taskId : regionLabel && element.getAttribute('aria-label') === regionLabel);
+			target?.focus({ preventScroll: true });
+			content.querySelectorAll('.table-scroll').forEach((region, index) => { region.scrollLeft = scroll[index] || 0; });
+			window.scrollTo(0, top);
+		});
 		// Strict CSP blocks inline handlers; delegate clicks from data-action buttons.
 		document.addEventListener('click', (e) => {
 			const btn = e.target.closest('[data-action]');
@@ -367,7 +412,7 @@ export class FleetDashboardPanel {
 interface Alert {
 	type: 'error' | 'warning';
 	message: string;
-	taskId: string;
+	taskId?: string;
 }
 
 function escapeHtml(text: string): string {

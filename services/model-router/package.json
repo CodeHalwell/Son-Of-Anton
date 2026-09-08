@@ -2,12 +2,12 @@
 	"name": "@son-of-anton/model-router",
 	"version": "0.1.0",
 	"description": "Model Proxy Router — routes LLM API calls dynamically across providers",
-	"main": "dist/index.js",
+	"main": "dist/src/index.js",
 	"scripts": {
 		"build": "tsc",
 		"postbuild": "node -e \"const{cpSync}=require('fs');cpSync('_lib','dist/_lib',{recursive:true,force:true});cpSync('_shared','dist/_shared',{recursive:true,force:true})\"",
-		"start": "node dist/index.js",
-		"dev": "tsc --watch & node --watch dist/index.js",
+		"start": "node dist/src/index.js",
+		"dev": "tsc --watch & node --watch dist/src/index.js",
 		"pretest": "npm run build",
 		"test": "node --test dist/test/*.js"
 	},

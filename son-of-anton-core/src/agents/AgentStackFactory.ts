@@ -10,6 +10,9 @@ import { PromptCacheOptimizer } from '../llm/PromptCacheOptimizer';
 import { McpClient } from '../mcp/McpClient';
 import type { ToolExecutionContext } from '../tools/types';
 import { AgentManager } from './AgentManager';
+import { AcpAgent } from './AcpAgent';
+import { AcpRuntime } from '../acp/AcpRuntime';
+import { validateAgent, type AcpAgentDefinition, type AcpPermissionHandler } from '../acp/protocol';
 import { BaseAgent } from './BaseAgent';
 import { CiRetryAgent } from './CiRetryAgent';
 import { CodeGeneratorAgent } from './CodeGeneratorAgent';
@@ -136,6 +139,10 @@ const AGENT_CONFIGS: AgentConfig[] = [
 			{ name: 'phase-status', description: 'Show modernisation progress' },
 		],
 	},
+	{
+		handle: 'anton-review', displayName: 'Anton Review', description: 'Code quality and review specialist',
+		defaultModel: 'sonnet', maxRetries: 3, slashCommands: [],
+	},
 ];
 
 /**
@@ -155,6 +162,7 @@ export interface AgentRegistration {
  */
 export interface AgentStack {
 	readonly orchestrator: OrchestratorAgent;
+	readonly acpRuntime?: AcpRuntime;
 	readonly specialists: ReadonlyMap<AgentHandle, BaseAgent>;
 	readonly registrations: readonly AgentRegistration[];
 	readonly metricsTracker: MetricsTracker;
@@ -202,6 +210,11 @@ export interface AgentStack {
  * lose recorded invocations across an editor restart.
  */
 export function createAgentStack(deps: {
+	acpPermission?: AcpPermissionHandler;
+	acpRuntime?: AcpRuntime;
+	persistMetrics?: boolean;
+	/** Host trust check runs immediately before starting external agents. */
+	canUseAcp?: () => boolean;
 	llmClient: LlmClient;
 	mcpClient: McpClient;
 	agentManager: AgentManager;
@@ -301,60 +314,70 @@ export function createAgentStack(deps: {
 		return config;
 	};
 
-	const codeAgent = new CodeGeneratorAgent(
+
+	const acpRuntime = deps.acpRuntime ?? new AcpRuntime({
+		maxProcesses: configStore?.get<number>('sota.acp.maxProcesses'),
+		maxQueue: configStore?.get<number>('sota.acp.maxQueue'),
+	});
+	const routeAgent = (agent: BaseAgent): BaseAgent => {
+		const id = configStore?.get<string>(`sota.agents.${agent.handle}.acpAgent`);
+		if (!id) { return agent; }
+		const definitions = configStore?.get<AcpAgentDefinition[]>('sota.acp.agents') ?? [];
+		const definition = Array.isArray(definitions) ? definitions.find(entry => entry.id === id) : undefined;
+		// Keep activation available; report invalid routing when the user invokes this specialist.
+		const configured = definition ?? { id, command: '' };
+		return new AcpAgent(acpRuntime, configured, workspaceRoot ?? '', () => {
+			if (!workspaceRoot || !deps.canUseAcp?.()) { throw new Error('ACP agents require a trusted workspace'); }
+			validateAgent(configured);
+			return agent.getAcpInstructions();
+		}, deps.acpPermission, result => agent.interpretAcpResult(result), requireConfig(agent.handle), llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, configStore, projectContext, toolExecutionContext, modelRouter, spendGuard, contextSanitiser);
+	};
+
+	const codeAgent = routeAgent(new CodeGeneratorAgent(
 		requireConfig('anton-code'),
 		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter, spendGuard, contextSanitiser,
-	);
+	));
 
-	const testAgent = new TestWriterAgent(
+	const testAgent = routeAgent(new TestWriterAgent(
 		requireConfig('anton-test'),
 		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter, spendGuard, contextSanitiser,
-	);
+	));
 
-	const securityAgent = new SecurityScannerAgent(
+	const securityAgent = routeAgent(new SecurityScannerAgent(
 		requireConfig('anton-security'),
 		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter, spendGuard, contextSanitiser,
-	);
+	));
 
-	const docsAgent = new DocumentationAgent(
+	const docsAgent = routeAgent(new DocumentationAgent(
 		requireConfig('anton-docs'),
 		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter, spendGuard, contextSanitiser,
-	);
+	));
 
-	const e2eTestAgent = new E2eTestAgent(
+	const e2eTestAgent = routeAgent(new E2eTestAgent(
 		requireConfig('anton-e2e'),
 		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter, spendGuard, contextSanitiser,
-	);
+	));
 
-	const ciRetryAgent = new CiRetryAgent(
+	const ciRetryAgent = routeAgent(new CiRetryAgent(
 		requireConfig('anton-ci'),
 		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter, spendGuard, contextSanitiser,
-	);
+	));
 
-	const prGenerationAgent = new PrGenerationAgent(
+	const prGenerationAgent = routeAgent(new PrGenerationAgent(
 		requireConfig('anton-pr'),
 		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter, spendGuard, contextSanitiser,
-	);
+	));
 
-	const moderniserAgent = new ModerniserAgent(
+	const moderniserAgent = routeAgent(new ModerniserAgent(
 		requireConfig('anton-moderniser'),
 		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter, spendGuard, contextSanitiser,
-	);
+	));
 
-	// The review agent has its own identity for metrics/clarity, defined inline
-	// because it isn't surfaced as a chat participant in its own right.
-	const reviewAgent = new ReviewAgent(
-		{
-			handle: 'anton-review',
-			displayName: 'Anton Review',
-			description: 'Code quality and review specialist',
-			defaultModel: 'sonnet',
-			maxRetries: 3,
-			slashCommands: [],
-		},
+	// Review keeps its structured verdict parser when routed through ACP.
+	const reviewAgent = routeAgent(new ReviewAgent(
+		requireConfig('anton-review'),
 		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter, spendGuard, contextSanitiser,
-	);
-
+	));
 	const orchestrator = new OrchestratorAgent(
 		requireConfig('anton'),
 		llmClient, mcpClient, agentManager, metricsTracker, projectMemory, specialistMemory, undefined, projectContext, toolExecutionContext, modelRouter, spendGuard, contextSanitiser,
@@ -379,6 +402,7 @@ export function createAgentStack(deps: {
 		['anton-ci', ciRetryAgent],
 		['anton-pr', prGenerationAgent],
 		['anton-moderniser', moderniserAgent],
+		['anton-review', reviewAgent],
 	]);
 
 	const registrations: AgentRegistration[] = [
@@ -393,8 +417,10 @@ export function createAgentStack(deps: {
 		{ config: requireConfig('anton-moderniser'), agent: moderniserAgent },
 	];
 
+	let disposal: Promise<void> | undefined;
 	return {
 		orchestrator,
+		acpRuntime,
 		specialists,
 		registrations,
 		metricsTracker,
@@ -403,11 +429,13 @@ export function createAgentStack(deps: {
 		cacheOptimizer,
 		modelRouter,
 		spendGuard,
-		dispose(): void {
+		dispose(): Promise<void> {
+			if (disposal) { return disposal; }
 			specialistMemory.dispose();
-			metricsTracker.persistMetrics(workspaceRoot).catch(err => {
-				console.warn('Failed to persist metrics:', err);
+			disposal = Promise.allSettled([deps.acpRuntime ? Promise.resolve() : acpRuntime.shutdown(), deps.persistMetrics === false ? Promise.resolve() : metricsTracker.persistMetrics(workspaceRoot)]).then(results => {
+				for (const result of results) { if (result.status === 'rejected') { console.warn('Agent stack shutdown failed:', result.reason); } }
 			});
+			return disposal;
 		},
 	};
 }

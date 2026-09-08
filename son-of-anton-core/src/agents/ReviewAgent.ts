@@ -19,6 +19,11 @@ export class ReviewAgent extends BaseAgent {
 		return loadAgentPrompt(this.handle);
 	}
 
+	override interpretAcpResult(result: SubtaskResult): SubtaskResult {
+		const feedback = this.parseReviewFeedback(result.summary);
+		return { ...result, success: feedback.passed, reviewFeedback: feedback, summary: this.formatReviewSummary(feedback) };
+	}
+
 	async execute(context: AgentContext): Promise<SubtaskResult> {
 		const task = this.agentManager.createTask('Review', context.instruction, context.parentTaskId);
 		this.agentManager.startTask(task.id);
@@ -104,7 +109,7 @@ export class ReviewAgent extends BaseAgent {
 		const jsonMatch = llmOutput.match(/```json\s*\n([\s\S]*?)\n\s*```/);
 		if (!jsonMatch) {
 			return {
-				passed: true,
+				passed: false,
 				checks: [{ name: 'parse', passed: false, message: 'Could not parse review output', severity: 'warning' }],
 				suggestions: [],
 				confidence: 'low',
@@ -117,7 +122,7 @@ export class ReviewAgent extends BaseAgent {
 			const checks: ReviewCheck[] = Array.isArray(parsed.checks)
 				? parsed.checks.map((c: Record<string, unknown>) => ({
 					name: String(c.name ?? 'unknown'),
-					passed: Boolean(c.passed),
+					passed: c.passed === true,
 					message: String(c.message ?? ''),
 					severity: this.validateSeverity(String(c.severity ?? 'info')),
 				}))
@@ -134,7 +139,7 @@ export class ReviewAgent extends BaseAgent {
 				: undefined;
 
 			return {
-				passed: Boolean(parsed.passed),
+				passed: parsed.passed === true && !checks.some(check => !check.passed && check.severity === 'error') && !issues.some(issue => issue.severity === 'blocker'),
 				checks,
 				suggestions: Array.isArray(parsed.suggestions)
 					? parsed.suggestions.map(String)
@@ -146,7 +151,7 @@ export class ReviewAgent extends BaseAgent {
 			};
 		} catch {
 			return {
-				passed: true,
+				passed: false,
 				checks: [{ name: 'parse', passed: false, message: 'Malformed review JSON', severity: 'warning' }],
 				suggestions: [],
 				confidence: 'low',

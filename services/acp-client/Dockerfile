@@ -1,7 +1,7 @@
 # Son of Anton — ACP Client
 # Agent Client Protocol client for connecting to any ACP-compatible agent server.
 
-FROM node:20-slim
+FROM node:22-slim
 
 WORKDIR /app
 
@@ -12,10 +12,11 @@ COPY package*.json tsconfig.json ./
 RUN npm ci
 
 COPY src/ ./src/
-COPY _lib/metrics/dist/ ./_lib/metrics/dist/
+COPY _shared/acp/dist/ ./_shared/acp/dist/
 COPY _shared/auth/dist/ ./_shared/auth/dist/
-RUN npx tsc --noCheck
+RUN npm run build
 
+ENV ACP_HOST=0.0.0.0
 EXPOSE 3300
 
 HEALTHCHECK --interval=15s --timeout=5s --retries=5 --start-period=30s \

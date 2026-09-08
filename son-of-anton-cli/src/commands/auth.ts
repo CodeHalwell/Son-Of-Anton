@@ -9,6 +9,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
 import { Command, Option } from 'commander';
+import { ProtectedSecretStore } from 'son-of-anton-core/dist/credentials/ProtectedSecretStore';
 import { SECRET_KEYS } from 'son-of-anton-core/dist/credentials/credentialDetection';
 import { isClaudeCodeAvailable } from 'son-of-anton-core/dist/llm/claudeCodeRunner';
 import { isCodexAvailable } from 'son-of-anton-core/dist/llm/codexRunner';
@@ -94,8 +95,7 @@ function isProviderSignedIn(provider: ProviderId): boolean {
 
 /**
  * Resolve an API key for the provider, checking process env first and then
- * the file-backed secret store written by `bootstrapCredentials` and the
- * IDE-side mirror. The actual value is never returned — only whether one
+ * the protected credential store shared by the CLI and IDE. The actual value is never returned — only whether one
  * exists — so `auth status` can report key presence without leaking secrets.
  */
 async function hasApiKey(provider: ProviderId): Promise<boolean> {
@@ -323,11 +323,11 @@ async function runAuthSave(opts: AuthSaveOptions): Promise<void> {
 		process.exit(SOTA_EXIT_CODES.HARD_FAIL);
 	}
 	if (opts.output === 'json') {
-		process.stdout.write(JSON.stringify({ ok: true, saved: savedEnvVars, path: SOTA_PATHS.secrets }) + '\n');
+		process.stdout.write(JSON.stringify({ ok: true, saved: savedEnvVars, storage: process.env.SOTA_ALLOW_PLAINTEXT_SECRETS === '1' ? SOTA_PATHS.secrets : 'operating system protected store' }) + '\n');
 		return;
 	}
 	const plural = savedEnvVars.length === 1 ? '' : 's';
-	process.stdout.write(`Saved ${savedEnvVars.length} credential${plural} (${savedEnvVars.join(', ')}) to ${SOTA_PATHS.secrets}.\n`);
+	process.stdout.write(`Saved ${savedEnvVars.length} credential${plural} (${savedEnvVars.join(', ')}) to ${process.env.SOTA_ALLOW_PLAINTEXT_SECRETS === '1' ? SOTA_PATHS.secrets : 'the operating system protected store'}.\n`);
 	process.stdout.write('Future `sota` runs will use these without the environment variables set.\n');
 }
 
@@ -346,6 +346,13 @@ export function authCommand(): Command {
 		.addOption(new Option('--output <mode>', 'Output mode: text or json').choices(['text', 'json']).default('text'))
 		.action(async (opts: AuthStatusOptions) => {
 			await runAuthStatus(opts);
+		});
+
+	cmd.command('migrate')
+		.description('Move legacy plaintext credentials into protected storage, verify them, then remove the old file.')
+		.action(async () => {
+			const count = await new ProtectedSecretStore().migrateLegacy(SOTA_PATHS.secrets);
+			process.stdout.write(`Migrated ${count} credentials to protected storage.\n`);
 		});
 
 	cmd.command('save')

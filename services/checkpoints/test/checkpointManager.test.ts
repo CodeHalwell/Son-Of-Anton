@@ -224,16 +224,38 @@ describe('CheckpointManager', () => {
 				taskId: 't',
 				action: 'x',
 				toolCall: 'y',
+				workspaceRoot: await fs.realpath(workspaceRoot),
 				files: [{ path: escaping, contentHash: '', content: null, exists: false }],
 				metadata: {},
 			};
 			await storage.ensureSessionDir('session-x');
 			await storage.saveCheckpoint('session-x', checkpoint as unknown as Parameters<typeof storage.saveCheckpoint>[1]);
-			await manager.restoreCheckpoint('session-x', checkpoint.id);
+			await assert.rejects(manager.restoreCheckpoint('session-x', checkpoint.id), /inside the workspace/);
 			// The out-of-workspace file must still exist.
 			await assert.doesNotReject(fs.access(outside), 'restore must not delete files outside the workspace');
 		} finally {
 			await fs.rm(outside, { force: true });
 		}
 	});
+	test('checkpoint reads and restores cannot follow a symlink to another workspace', async () => {
+		const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'sota-outside-'));
+		try {
+			await fs.writeFile(path.join(outside, 'data.txt'), 'outside');
+			await fs.symlink(outside, path.join(workspaceRoot, 'link'), 'junction');
+			await assert.rejects(manager.createCheckpoint('session-link', {
+				agentId: 'a', taskId: 't', action: 'edit', toolCall: 'write', filePaths: ['link/data.txt'],
+			}), /Symlinks/);
+			await fs.writeFile(path.join(workspaceRoot, 'data.txt'), 'inside');
+			const checkpoint = await manager.createCheckpoint('session-link', {
+				agentId: 'a', taskId: 't', action: 'edit', toolCall: 'write', filePaths: ['data.txt'],
+			});
+			await fs.unlink(path.join(workspaceRoot, 'data.txt'));
+			await fs.symlink(path.join(outside, 'data.txt'), path.join(workspaceRoot, 'data.txt'));
+			await assert.rejects(manager.restoreCheckpoint('session-link', checkpoint.id), /Symlinks/);
+			assert.equal(await fs.readFile(path.join(outside, 'data.txt'), 'utf8'), 'outside');
+			const other = new CheckpointManager(storage, outside);
+			await assert.rejects(other.restoreCheckpoint('session-link', checkpoint.id), /workspace identity/);
+		} finally { await fs.rm(outside, { recursive: true, force: true }); }
+	});
+
 });

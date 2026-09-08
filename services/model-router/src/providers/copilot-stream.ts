@@ -159,6 +159,7 @@ export class CopilotStreamTranslator {
 			return [];
 		}
 		this.stopEmitted = true;
+		if (!this.finishReason) { return [{ type: 'error', code: 'incomplete_stream', message: 'Provider stream ended before completion', retryable: true }, { type: 'message_stop', stopReason: 'error' }]; }
 		return [{
 			type: 'message_stop',
 			stopReason: mapFinishReason(this.finishReason),
@@ -227,15 +228,15 @@ export class CopilotSseParser {
 		const events: ChatCompletionChunk[] = [];
 
 		while (true) {
-			const sep = this.buffer.indexOf('\n\n');
-			if (sep < 0) {
+			const separator = /\r?\n\r?\n/.exec(this.buffer);
+			if (!separator) {
 				break;
 			}
-			const frame = this.buffer.slice(0, sep);
-			this.buffer = this.buffer.slice(sep + 2);
+			const frame = this.buffer.slice(0, separator.index);
+			this.buffer = this.buffer.slice(separator.index + separator[0].length);
 
 			const dataLines: string[] = [];
-			for (const line of frame.split('\n')) {
+			for (const line of frame.split(/\r?\n/)) {
 				if (line.startsWith('data: ')) {
 					dataLines.push(line.slice(6));
 				} else if (line.startsWith('data:')) {
@@ -258,6 +259,7 @@ export class CopilotSseParser {
 			}
 		}
 
+		if (this.buffer.length > 4 * 1024 * 1024) { throw new Error('Provider SSE frame exceeded 4 MiB'); }
 		return events;
 	}
 }

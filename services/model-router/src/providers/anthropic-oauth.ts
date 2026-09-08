@@ -7,6 +7,7 @@ import type {
 	ModelDescriptor,
 	ProviderAdapter,
 	UniformMessage,
+	MessageContent,
 	UniformRequest,
 	UniformTool,
 	UsageObserver,
@@ -248,6 +249,9 @@ export class AnthropicOAuthAdapter implements ProviderAdapter {
 				retryable: true,
 			};
 			yield { type: 'message_stop', stopReason: 'error' };
+		} finally {
+			await reader.cancel().catch(() => {});
+			reader.releaseLock();
 		}
 	}
 }
@@ -312,7 +316,7 @@ function toAnthropicMessages(
 }
 
 function toAnthropicBlocks(
-	content: string | readonly { type: string; text?: string; toolUseId?: string; content?: string; isError?: boolean }[],
+	content: string | readonly MessageContent[],
 ): AnthropicContentBlock[] {
 	if (typeof content === 'string') {
 		return [{ type: 'text', text: content }];
@@ -321,6 +325,8 @@ function toAnthropicBlocks(
 	for (const block of content) {
 		if (block.type === 'text') {
 			out.push({ type: 'text', text: block.text ?? '' });
+		} else if (block.type === 'tool_use') {
+			out.push({ type: 'tool_use', id: block.toolUseId, name: block.name, input: block.input });
 		} else if (block.type === 'tool_result') {
 			out.push({
 				type: 'tool_result',

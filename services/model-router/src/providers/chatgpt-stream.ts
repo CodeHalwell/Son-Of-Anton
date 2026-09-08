@@ -342,16 +342,16 @@ export class ChatGPTSseParser {
 		const events: unknown[] = [];
 
 		while (true) {
-			const sep = this.buffer.indexOf('\n\n');
-			if (sep < 0) {
+			const separator = /\r?\n\r?\n/.exec(this.buffer);
+			if (!separator) {
 				break;
 			}
-			const frame = this.buffer.slice(0, sep);
-			this.buffer = this.buffer.slice(sep + 2);
+			const frame = this.buffer.slice(0, separator.index);
+			this.buffer = this.buffer.slice(separator.index + separator[0].length);
 
 			let eventName: string | undefined;
 			const dataLines: string[] = [];
-			for (const line of frame.split('\n')) {
+			for (const line of frame.split(/\r?\n/)) {
 				if (line.startsWith('event: ')) {
 					eventName = line.slice(7).trim();
 				} else if (line.startsWith('event:')) {
@@ -381,6 +381,7 @@ export class ChatGPTSseParser {
 			events.push(parsed);
 		}
 
+		if (this.buffer.length > 4 * 1024 * 1024) { throw new Error('Provider SSE frame exceeded 4 MiB'); }
 		return events;
 	}
 }

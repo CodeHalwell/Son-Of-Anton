@@ -1,22 +1,10 @@
-/*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
- *--------------------------------------------------------------------------------------------*/
-
-/**
- * WorktreeManager — manages git worktrees for parallel agent execution.
- *
- * Each agent gets its own isolated worktree to make changes without
- * interfering with other agents or the main working directory.
- */
-
-import * as cp from 'child_process';
-import * as path from 'path';
-import * as os from 'os';
-import { promisify } from 'util';
-
-const execFile = promisify(cp.execFile);
-
+/* Copyright (c) Microsoft Corporation. Licensed under the MIT License. */
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { IsolatedWorkspace, type WorkspaceProposal } from 'son-of-anton-core/workspace/IsolatedWorkspace';
+import { GitSnapshotStore } from 'son-of-anton-core/checkpoint/GitSnapshotStore';
 export interface WorktreeInfo {
 	/** Unique agent ID that owns this worktree */
 	agentId: string;
@@ -28,6 +16,7 @@ export interface WorktreeInfo {
 	createdAt: number;
 	/** Files that were changed in this worktree */
 	changedFiles: string[];
+	proposalId: string;
 }
 
 export interface MergeResult {
@@ -47,235 +36,54 @@ export interface WorktreeManagerOptions {
 	tempDir?: string;
 }
 
-const DEFAULT_MAX_CONCURRENT = 2;
 
+/** Active handles are disposable; retained proposals are never deleted on failure or shutdown. */
 export class WorktreeManager {
 	private readonly worktrees = new Map<string, WorktreeInfo>();
-	private readonly repoRoot: string;
-	private readonly maxConcurrent: number;
-	private readonly tempDir: string;
-
-	constructor(options: WorktreeManagerOptions) {
-		this.repoRoot = options.repoRoot;
-		this.maxConcurrent = options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
-		this.tempDir = options.tempDir ?? os.tmpdir();
+	private readonly reservations = new Set<string>();
+	readonly proposals: IsolatedWorkspace;
+	constructor(private readonly options: WorktreeManagerOptions) {
+		this.proposals = new IsolatedWorkspace(join(options.tempDir ?? tmpdir(), 'sota-parallel-proposals'));
 	}
-
-	/**
-	 * Create a new worktree for an agent.
-	 * The worktree is branched from HEAD of the current branch.
-	 */
 	async createWorktree(agentId: string): Promise<WorktreeInfo> {
-		if (this.worktrees.size >= this.maxConcurrent) {
-			throw new Error(
-				`Maximum concurrent worktrees (${this.maxConcurrent}) reached. ` +
-				`Active worktrees: ${[...this.worktrees.keys()].join(', ')}`
-			);
-		}
-
-		if (this.worktrees.has(agentId)) {
-			throw new Error(`Worktree already exists for agent ${agentId}`);
-		}
-
-		const branch = `sota/agent-${agentId}`;
-		const worktreePath = path.join(this.tempDir, `sota-agent-${agentId}`);
-
-		// Create the worktree with a new branch from HEAD
-		await this.git(['worktree', 'add', worktreePath, '-b', branch, 'HEAD']);
-
-		const info: WorktreeInfo = {
-			agentId,
-			branch,
-			worktreePath,
-			createdAt: Date.now(),
-			changedFiles: [],
-		};
-
-		this.worktrees.set(agentId, info);
-		return info;
+		if (this.reservations.has(agentId) || this.worktrees.has(agentId)) { throw new Error('This task already has a worktree'); }
+		if (this.reservations.size + this.worktrees.size >= (this.options.maxConcurrent ?? 2)) { throw new Error('Maximum concurrent worktrees reached'); }
+		this.reservations.add(agentId);
+		try {
+			const proposal = await this.proposals.create(this.options.repoRoot);
+			const info = { agentId, branch: proposal.baseline.ref, worktreePath: proposal.worktree, createdAt: Date.now(), changedFiles: [], proposalId: proposal.id };
+			this.worktrees.set(agentId, info); return info;
+		} finally { this.reservations.delete(agentId); }
 	}
-
-	/**
-	 * Get the worktree info for an agent.
-	 */
-	getWorktree(agentId: string): WorktreeInfo | undefined {
-		return this.worktrees.get(agentId);
-	}
-
-	/**
-	 * List all active worktrees.
-	 */
-	listWorktrees(): WorktreeInfo[] {
-		return [...this.worktrees.values()];
-	}
-
-	/**
-	 * Get the list of files changed in a worktree.
-	 */
+	getWorktree(agentId: string): WorktreeInfo | undefined { return this.worktrees.get(agentId); }
+	listWorktrees(): WorktreeInfo[] { return [...this.worktrees.values()]; }
 	async getChangedFiles(agentId: string): Promise<string[]> {
-		const info = this.worktrees.get(agentId);
-		if (!info) {
-			throw new Error(`No worktree for agent ${agentId}`);
-		}
-
-		const { stdout } = await execFile('git', ['diff', '--name-only', 'HEAD'], {
-			cwd: info.worktreePath,
-		});
-
-		const files = stdout.trim().split('\n').filter(Boolean);
-		info.changedFiles = files;
-		return files;
+		const info = this.worktrees.get(agentId); if (!info) { throw new Error('No worktree for this task'); }
+		const { stdout } = await promisify(execFile)('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames'], { cwd: info.worktreePath, timeout: 30_000, maxBuffer: 8 * 1024 * 1024, env: Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))) });
+		return info.changedFiles = stdout.split('\0').filter(Boolean).map(line => line.slice(3));
 	}
-
-	/**
-	 * Check if two agents' worktrees have overlapping changed files.
-	 * Used for continuous conflict detection during parallel execution.
-	 */
-	async checkOverlap(agentIdA: string, agentIdB: string): Promise<string[]> {
-		const [filesA, filesB] = await Promise.all([
-			this.getChangedFiles(agentIdA),
-			this.getChangedFiles(agentIdB),
-		]);
-
-		const setB = new Set(filesB);
-		return filesA.filter(f => setB.has(f));
+	async checkOverlap(a: string, b: string): Promise<string[]> {
+		const [first, second] = await Promise.all([this.getChangedFiles(a), this.getChangedFiles(b)]); const files = new Set(second); return first.filter(file => files.has(file));
 	}
-
-	/**
-	 * Simulate a three-way merge to predict conflicts before actually merging.
-	 */
+	async finish(agentId: string, failed = false): Promise<WorkspaceProposal> {
+		const info = this.worktrees.get(agentId); if (!info) { throw new Error('No worktree for this task'); }
+		return this.proposals.finish(info.proposalId, failed ? 'failed' : 'review');
+	}
 	async simulateMerge(agentId: string): Promise<MergeResult> {
+		try {
+			const proposal = await this.finish(agentId); const snapshots = new GitSnapshotStore(this.options.repoRoot); const current = await snapshots.capture();
+			try { const conflicts = await this.proposals.conflicts(proposal, current); return { success: !conflicts.length, conflicts, summary: conflicts.length ? 'Current edits conflict with the proposal.' : 'Proposal can be reviewed.' }; }
+			finally { await snapshots.release(current); }
+		} catch (error) { return { success: false, conflicts: [], summary: String(error) }; }
+	}
+	/** Explicit digest from a completed review is required; HEAD and the index remain untouched. */
+	async mergeWorktree(agentId: string, _message: string, reviewedDigest?: string): Promise<MergeResult> {
 		const info = this.worktrees.get(agentId);
-		if (!info) {
-			throw new Error(`No worktree for agent ${agentId}`);
-		}
-
-		try {
-			// Attempt a dry-run merge
-			await this.git(['merge-tree', 'HEAD', 'HEAD', info.branch]);
-			return { success: true, conflicts: [], summary: 'Clean merge predicted.' };
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-
-			// Parse conflict markers from merge-tree output
-			const conflictPattern = /CONFLICT \(content\): Merge conflict in (.+)/g;
-			const conflicts: string[] = [];
-			let match;
-			while ((match = conflictPattern.exec(message)) !== null) {
-				conflicts.push(match[1]);
-			}
-
-			return {
-				success: conflicts.length === 0,
-				conflicts,
-				summary: conflicts.length > 0
-					? `Conflicts predicted in: ${conflicts.join(', ')}`
-					: 'Merge simulation completed with warnings.',
-			};
-		}
+		if (!info || !reviewedDigest) { return { success: false, conflicts: [], summary: 'Review the retained proposal before applying.' }; }
+		try { await this.proposals.apply(info.proposalId, reviewedDigest); return { success: true, conflicts: [], summary: 'Reviewed changes applied with a recovery checkpoint.' }; }
+		catch (error) { return { success: false, conflicts: [], summary: String(error) }; }
 	}
-
-	/**
-	 * Merge a worktree's changes back into the main branch.
-	 * Commits changes in the worktree first, then merges into main.
-	 */
-	async mergeWorktree(agentId: string, commitMessage: string): Promise<MergeResult> {
-		const info = this.worktrees.get(agentId);
-		if (!info) {
-			throw new Error(`No worktree for agent ${agentId}`);
-		}
-
-		try {
-			// Stage and commit changes in the worktree
-			await execFile('git', ['add', '-A'], { cwd: info.worktreePath });
-
-			const { stdout: status } = await execFile('git', ['status', '--porcelain'], {
-				cwd: info.worktreePath,
-			});
-
-			if (status.trim()) {
-				await execFile(
-					'git',
-					['commit', '-m', commitMessage],
-					{ cwd: info.worktreePath }
-				);
-			}
-
-			// Merge the agent branch into the current branch in the main repo
-			const { stdout } = await execFile(
-				'git',
-				['merge', info.branch, '--no-edit'],
-				{ cwd: this.repoRoot }
-			);
-
-			return {
-				success: true,
-				conflicts: [],
-				summary: `Merged ${info.branch}: ${stdout.trim() || 'success'}`,
-			};
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-
-			// Parse conflict files
-			const conflictPattern = /CONFLICT \(content\): Merge conflict in (.+)/g;
-			const conflicts: string[] = [];
-			let match;
-			while ((match = conflictPattern.exec(message)) !== null) {
-				conflicts.push(match[1]);
-			}
-
-			// Abort the failed merge
-			try {
-				await execFile('git', ['merge', '--abort'], { cwd: this.repoRoot });
-			} catch {
-				// May not need aborting if merge didn't start
-			}
-
-			return {
-				success: false,
-				conflicts,
-				summary: `Merge failed: ${message}`,
-			};
-		}
-	}
-
-	/**
-	 * Remove a worktree and delete its branch.
-	 */
-	async removeWorktree(agentId: string): Promise<void> {
-		const info = this.worktrees.get(agentId);
-		if (!info) {
-			return;
-		}
-
-		try {
-			await this.git(['worktree', 'remove', info.worktreePath, '--force']);
-		} catch {
-			// Worktree may already be removed
-		}
-
-		try {
-			await this.git(['branch', '-D', info.branch]);
-		} catch {
-			// Branch may already be deleted
-		}
-
-		this.worktrees.delete(agentId);
-	}
-
-	/**
-	 * Remove all worktrees. Used for cleanup on shutdown.
-	 */
-	async removeAll(): Promise<void> {
-		const agents = [...this.worktrees.keys()];
-		await Promise.all(agents.map(id => this.removeWorktree(id)));
-	}
-
-	/**
-	 * Run a git command in the main repository.
-	 */
-	private async git(args: string[]): Promise<string> {
-		const { stdout } = await execFile('git', args, { cwd: this.repoRoot });
-		return stdout.trim();
-	}
+	/** Release an active handle. Files and checkpoint refs remain available for recovery. */
+	async removeWorktree(agentId: string): Promise<void> { this.worktrees.delete(agentId); }
+	async removeAll(): Promise<void> { this.worktrees.clear(); }
 }

@@ -260,15 +260,15 @@ export class SseParser {
 		// SSE frames are separated by a blank line. Lines within a frame begin
 		// with field names like "data:" / "event:".
 		while (true) {
-			const sep = this.buffer.indexOf('\n\n');
-			if (sep < 0) {
+			const separator = /\r?\n\r?\n/.exec(this.buffer);
+			if (!separator) {
 				break;
 			}
-			const frame = this.buffer.slice(0, sep);
-			this.buffer = this.buffer.slice(sep + 2);
+			const frame = this.buffer.slice(0, separator.index);
+			this.buffer = this.buffer.slice(separator.index + separator[0].length);
 
 			const dataLines: string[] = [];
-			for (const line of frame.split('\n')) {
+			for (const line of frame.split(/\r?\n/)) {
 				if (line.startsWith('data: ')) {
 					dataLines.push(line.slice(6));
 				} else if (line.startsWith('data:')) {
@@ -289,6 +289,7 @@ export class SseParser {
 			}
 		}
 
+		if (this.buffer.length > 4 * 1024 * 1024) { throw new Error('Provider SSE frame exceeded 4 MiB'); }
 		return events;
 	}
 }

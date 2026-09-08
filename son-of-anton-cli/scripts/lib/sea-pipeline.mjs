@@ -41,6 +41,7 @@
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
+import crossSpawn from 'cross-spawn';
 import {
 	chmodSync,
 	copyFileSync,
@@ -56,6 +57,7 @@ import {
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
+import { packageSmoke } from '../package-smoke.mjs';
 import { build as esbuild } from 'esbuild';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -71,7 +73,7 @@ export const CLI_PKG_JSON = resolve(CLI_ROOT, 'package.json');
 // Pin the upstream CLIs we vendor. Bump in lockstep with the local
 // `claude --version` / `codex --version` you want to ship.
 export const CLAUDE_CODE_VERSION = '2.1.138';
-export const CODEX_VERSION = '0.130.0';
+export const CODEX_VERSION = '0.153.4';
 
 // Node version used for the SEA host. Bump in lockstep with the esbuild
 // `target` field below and with PACKAGING.md.
@@ -101,6 +103,8 @@ async function bundleEntry(bundlePath) {
 		target: 'node22',
 		format: 'cjs',
 		external: [],
+		// Prefer the statically linkable ESM distribution over UMD factories with dynamic require.
+		mainFields: ['module', 'main'],
 		minify: false,
 		sourcemap: false,
 		keepNames: true,
@@ -137,9 +141,9 @@ function installVendor(vendorDir, target) {
 		`@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}`,
 		`@openai/codex@${CODEX_VERSION}`,
 	];
-	const r = spawnSync('npm', args, { stdio: 'inherit', cwd: vendorDir });
+	const r = crossSpawn.sync('npm', args, { stdio: 'inherit', cwd: vendorDir });
 	if (r.status !== 0) {
-		console.error('vendor npm install failed');
+		console.error(`vendor npm install failed: ${r.error?.message ?? r.status}`);
 		process.exit(r.status ?? 1);
 	}
 	// Verify the bin shims actually appeared. The optional-dep mechanic
@@ -288,7 +292,7 @@ function rewriteWindowsShim(binDir, name) {
 	if (flavour === 'native') {
 		cmdWrapper = [
 			'@ECHO OFF',
-			'SETLOCAL',
+			'SETLOCAL DisableDelayedExpansion',
 			`"%~dp0\\${script}" %*`,
 			'ENDLOCAL',
 			'EXIT /B %ERRORLEVEL%',
@@ -297,7 +301,7 @@ function rewriteWindowsShim(binDir, name) {
 	} else {
 		cmdWrapper = [
 			'@ECHO OFF',
-			'SETLOCAL',
+			'SETLOCAL DisableDelayedExpansion',
 			`"__SOTA_BIN__" --sota-run-node "%~dp0\\${script}" %*`,
 			'ENDLOCAL',
 			'EXIT /B %ERRORLEVEL%',
@@ -604,9 +608,12 @@ function ensureNodeForPlatform(spec) {
 
 function extractNodeArchive(archivePath, destDir, target) {
 	if (target.nodeArchiveName.endsWith('.zip')) {
-		const r = spawnSync('unzip', ['-q', '-o', archivePath, '-d', destDir], { stdio: 'inherit' });
+		// Windows ships bsdtar with ZIP support; a separate Unix unzip is not required.
+		const r = process.platform === 'win32'
+			? spawnSync('tar.exe', ['-xf', archivePath, '-C', destDir], { stdio: 'inherit' })
+			: spawnSync('unzip', ['-q', '-o', archivePath, '-d', destDir], { stdio: 'inherit' });
 		if (r.status !== 0) {
-			console.error('unzip failed for Windows Node tarball');
+			console.error(`Windows Node archive extraction failed: ${r.error?.message ?? r.status}`);
 			process.exit(r.status ?? 1);
 		}
 		return;
@@ -677,9 +684,9 @@ function inject(target, paths) {
 	if (target.exeFormat === 'macho') {
 		postjectArgs.push('--macho-segment-name', 'NODE_SEA');
 	}
-	const r = spawnSync('npx', postjectArgs, { stdio: 'inherit', cwd: CLI_ROOT });
+	const r = crossSpawn.sync('npx', postjectArgs, { stdio: 'inherit', cwd: CLI_ROOT });
 	if (r.status !== 0) {
-		console.error('postject failed');
+		console.error(`postject failed: ${r.error?.message ?? r.status}`);
 		process.exit(r.status ?? 1);
 	}
 }
@@ -897,7 +904,7 @@ function hasSigntoolOnPath() {
 }
 
 // --- Step 10 --------------------------------------------------------------
-function smoke(target, paths) {
+async function smoke(target, paths) {
 	const sizeMb = (statSync(paths.binary).size / 1024 / 1024).toFixed(2);
 	if (!target.matchesHost) {
 		log('10/10', `skip smoke (cross-build); produced ${relative(CLI_ROOT, paths.binary)} (${sizeMb} MiB)`);
@@ -911,6 +918,7 @@ function smoke(target, paths) {
 		console.error('smoke test failed');
 		process.exit(r.status ?? 1);
 	}
+	await packageSmoke(paths.binary);
 	log('done', `${relative(CLI_ROOT, paths.binary)} (${sizeMb} MiB)`);
 }
 
@@ -947,6 +955,5 @@ export async function runPipeline(target) {
 	// dist-bundle/ smaller and avoids developers shipping the loose tree
 	// alongside the binary by accident.
 	rmSync(paths.vendorDir, { recursive: true, force: true });
-	smoke(target, paths);
+	await smoke(target, paths);
 }
-

@@ -11,6 +11,8 @@ import { detectUncertainty, UNCERTAINTY_ESCALATION_THRESHOLD } from '../llm/conf
 import { MODEL_METADATA } from '../llm/modelMetadata';
 import { ModelRouter } from '../llm/ModelRouter';
 import { McpClient, McpToolResult } from '../mcp/McpClient';
+import { bridgeMcpToolsIntoRegistry } from '../mcp/McpToolBridge';
+import { BUILTIN_TOOLS, ToolRegistry } from '../tools/registry';
 import { isPersonalityEnabled } from '../personality/personalityConfig';
 import { formatSignOff, pickSignOffQuote } from '../personality/specialistQuotes';
 import { buildTodoTools } from '../tools/todoTools';
@@ -76,6 +78,8 @@ const SUGGESTIONS_SENTINEL_INSTRUCTION = [
  * Context provided to specialist agents for each subtask.
  */
 export interface AgentContext {
+	/** Cancel the downstream agent when the parent stops or its deadline expires. */
+	signal?: AbortSignal;
 	instruction: string;
 	scopeFiles: string[];
 	graphContext: string;
@@ -238,6 +242,12 @@ export abstract class BaseAgent {
 	get defaultModel(): ModelId {
 		return this.config.defaultModel;
 	}
+
+	/** Preserve this specialist's role and project instructions when routing through ACP. */
+	getAcpInstructions(): string { return this.buildSystemPrompt(this.getRoleDescription()); }
+
+	/** Specialist-specific result interpretation also applies to external ACP execution. */
+	interpretAcpResult(result: SubtaskResult): SubtaskResult { return result; }
 
 	/**
 	 * Resolve the effective model for a per-turn LLM call, applying
@@ -998,7 +1008,7 @@ export abstract class BaseAgent {
 
 			let text = '';
 			let completion: LlmStreamComplete | undefined;
-			const pendingCalls: Array<{ id: string; name: string; input: Record<string, unknown> }> = [];
+			const pendingCalls: Array<{ id: string; name: string; input: Record<string, unknown>; thoughtSignature?: string }> = [];
 
 			for await (const event of this.llmClient.streamRequest({
 				model: args.model,
@@ -1018,7 +1028,7 @@ export abstract class BaseAgent {
 					text += event.token;
 					args.onToken?.(event.token);
 				} else if (event.type === 'tool-call') {
-					pendingCalls.push({ id: event.id, name: event.name, input: event.input });
+					pendingCalls.push(event);
 				} else if (event.type === 'complete') {
 					completion = event;
 				} else if (event.type === 'error') {
@@ -1075,7 +1085,7 @@ export abstract class BaseAgent {
 				assistantContent.push({ type: 'text', text });
 			}
 			for (const call of pendingCalls) {
-				assistantContent.push({ type: 'tool_use', id: call.id, name: call.name, input: call.input });
+				assistantContent.push({ type: 'tool_use', id: call.id, name: call.name, input: call.input, ...(call.thoughtSignature ? { thoughtSignature: call.thoughtSignature } : {}) });
 			}
 			messages.push({ role: 'assistant', content: assistantContent });
 
@@ -1319,14 +1329,19 @@ export abstract class BaseAgent {
 	 * base default already matches what every current specialist needs.
 	 */
 	protected getAgenticToolDefinitions(): ReadonlyArray<ToolDefinition> {
-		// Lazily imported to avoid pulling tool definitions into modules that
-		// don't need them. The const re-export from son-of-anton-core's
-		// `tools/registry` is a stable surface.
-		// eslint-disable-next-line @typescript-eslint/no-require-imports
-		const { BUILTIN_TOOLS } = require('../tools/registry') as typeof import('../tools/registry');
 		return BUILTIN_TOOLS
 			.filter((t: Tool) => t.definition.name !== 'emit_ui_block')
 			.map((t: Tool) => t.definition);
+	}
+
+	/** Snapshot discovered tools once per turn so definitions and execution agree. */
+	protected async createAgenticToolRegistry(signal?: AbortSignal): Promise<ToolRegistry> {
+		signal?.throwIfAborted();
+		const allowed = new Set(this.getAgenticToolDefinitions().map(tool => tool.name));
+		const registry = new ToolRegistry(BUILTIN_TOOLS.filter(tool => allowed.has(tool.definition.name)));
+		await bridgeMcpToolsIntoRegistry(this.mcpClient, registry, { requireApproval: true });
+		signal?.throwIfAborted();
+		return registry;
 	}
 
 	/**
@@ -1386,6 +1401,7 @@ export abstract class BaseAgent {
 
 		const controller = new AbortController();
 		const cancelSubscription = cancellation.onCancellationRequested(() => controller.abort());
+		if (cancellation.isCancellationRequested) { controller.abort(); }
 
 		try {
 			const turnModel: ModelId = modelOverride ?? this.defaultModel;
@@ -1395,7 +1411,8 @@ export abstract class BaseAgent {
 				conversationId,
 			});
 			const systemPrompt = systemPromptParts.map(p => p.text).join('\n\n---\n\n');
-			const tools = this.getAgenticToolDefinitions();
+			const registry = await this.createAgenticToolRegistry(controller.signal);
+			const tools = registry.definitions();
 
 			let fullText = '';
 			const result = await this.runToolLoop({
@@ -1414,16 +1431,14 @@ export abstract class BaseAgent {
 				},
 				executeTool: async (call) => {
 					emit({ type: 'tool-call', id: call.id, name: call.name, input: call.input, status: 'running' });
-					// eslint-disable-next-line @typescript-eslint/no-require-imports
-					const { BUILTIN_TOOLS } = require('../tools/registry') as typeof import('../tools/registry');
-					const tool = BUILTIN_TOOLS.find(t => t.definition.name === call.name);
+					const tool = registry.get(call.name);
 					if (!tool) {
 						const message = `Unknown tool: ${call.name}`;
 						emit({ type: 'tool-call', id: call.id, name: call.name, input: call.input, status: 'error', output: message });
 						return { result: message, isError: true };
 					}
 					try {
-						const r = await tool.execute(call.input, toolExecutionContext);
+						const r = await tool.execute(call.input, { ...toolExecutionContext, signal: controller.signal });
 						const status = r.isError ? 'error' : 'done';
 						emit({ type: 'tool-call', id: call.id, name: call.name, input: call.input, status, output: r.content });
 						return { result: r.content, isError: !!r.isError };

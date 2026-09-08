@@ -496,7 +496,7 @@ describe('withFailover', () => {
 		]);
 	});
 
-	test('fails over when adapter yields retryable error event before message_stop', async () => {
+	test('terminates when adapter yields an error after visible content', async () => {
 		const primaryEvents: AgentEvent[] = [
 			{ type: 'text_delta', text: 'partial...' },
 			{ type: 'error', code: 'STREAM_RESET', message: 'upstream reset', retryable: true },
@@ -511,7 +511,7 @@ describe('withFailover', () => {
 		];
 
 		const events = await collect(withFailover(entries, makeRequest(), neverAborted()));
-		assert.deepStrictEqual(events, [...primaryEvents, ...fallbackEvents]);
+		assert.deepStrictEqual(events, [primaryEvents[0], { ...primaryEvents[1], retryable: false }, { type: 'message_stop', stopReason: 'error' }]);
 	});
 
 	test('does NOT fail over on retryable error when it is the last adapter', async () => {
@@ -523,7 +523,7 @@ describe('withFailover', () => {
 		];
 
 		const events = await collect(withFailover(entries, makeRequest(), neverAborted()));
-		assert.deepStrictEqual(events, primaryEvents);
+		assert.deepStrictEqual(events, [{ ...primaryEvents[0], retryable: false }, { type: 'message_stop', stopReason: 'error' }]);
 	});
 
 	test('stops after message_stop; does not consume subsequent adapters', async () => {

@@ -13,6 +13,7 @@ const fs = require('fs');
 // VS Code host.  Only the runtime values actually called in test setup are
 // implemented; all others are stubs that throw if invoked unexpectedly.
 const vscodeMock = {
+	l10n: { t: (message, ...args) => message.replace(/\{(\d+)\}/g, (_, index) => String(args[Number(index)] ?? '')) },
 	EventEmitter: class EventEmitter {
 		constructor() {
 			this._listeners = [];
@@ -25,6 +26,7 @@ const vscodeMock = {
 		dispose() { this._listeners = []; }
 	},
 	workspace: {
+		textDocuments: [],
 		isTrusted: true,
 		workspaceFolders: undefined,
 		getConfiguration: () => ({
@@ -42,9 +44,16 @@ const vscodeMock = {
 	},
 	commands: { registerCommand: () => ({ dispose: () => {} }), executeCommand: async () => undefined },
 	Uri: {
+		from: (components) => ({ ...components, fsPath: components.path, toString: () => `${components.scheme}:${components.path}?${components.query || ''}` }),
 		parse: (s) => ({ toString: () => s, scheme: 'https', fsPath: s }),
 		file: (p) => ({ fsPath: p, scheme: 'file', toString: () => p }),
 		joinPath: (base, ...segments) => ({ fsPath: path.join(base.fsPath, ...segments), scheme: 'file' }),
+	},
+	Range: class Range {
+		constructor(startLine, startCharacter, endLine, endCharacter) {
+			this.start = { line: startLine, character: startCharacter };
+			this.end = { line: endLine, character: endCharacter };
+		}
 	},
 	ThemeIcon: class ThemeIcon { constructor(id) { this.id = id; } },
 	TreeItem: class TreeItem { constructor(label, state) { this.label = label; this.collapsibleState = state; } },

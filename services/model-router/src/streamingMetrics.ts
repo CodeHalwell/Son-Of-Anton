@@ -38,16 +38,16 @@ interface ExtractedUsage {
 function applyUsageFields(extracted: ExtractedUsage, acc: { inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number }): void {
 	const { eventType, fields } = extracted;
 	if (eventType === 'message_start') {
-		acc.inputTokens += fields.input_tokens ?? 0;
-		acc.cacheReadInputTokens += fields.cache_read_input_tokens ?? 0;
-		acc.cacheCreationInputTokens += fields.cache_creation_input_tokens ?? 0;
+		acc.inputTokens = fields.input_tokens ?? 0;
+		acc.cacheReadInputTokens = fields.cache_read_input_tokens ?? 0;
+		acc.cacheCreationInputTokens = fields.cache_creation_input_tokens ?? 0;
 		return;
 	}
 	if (fields.output_tokens !== undefined) {
 		acc.outputTokens = fields.output_tokens;
 	}
 	if (fields.input_tokens !== undefined) {
-		acc.inputTokens += fields.input_tokens;
+		acc.inputTokens = fields.input_tokens;
 	}
 }
 
@@ -70,17 +70,7 @@ function extractUsageFromEvent(event: unknown): ExtractedUsage | undefined {
 	return undefined;
 }
 
-/**
- * Wraps an AsyncIterable<Buffer> (a streaming HTTP response body) and
- * passes each chunk through unchanged while parsing Anthropic SSE events
- * as a side effect. When the stream ends, `onUsage` is called with the
- * accumulated token counts extracted from `message_start` and `message_delta`
- * events.
- *
- * Works as a no-op for non-Anthropic providers: their SSE payloads contain
- * neither `message_start` nor `message_delta` event types, so all usage
- * counts remain zero and `onUsage` is still called (with zeros) at stream end.
- */
+/** Forward provider bytes unchanged and report Anthropic/OpenAI usage once, including cancellation. */
 export async function* passthroughCollectUsage(
 	chunks: AsyncIterable<Buffer>,
 	onUsage: (summary: StreamUsageSummary) => void,
@@ -93,21 +83,25 @@ export async function* passthroughCollectUsage(
 		cacheCreationInputTokens: 0,
 	};
 
-	for await (const chunk of chunks) {
-		const events = parser.feed(chunk.toString('utf-8'));
+	const decoder = new TextDecoder();
+	const collect = (events: unknown[]): void => {
 		for (const event of events) {
+			if ((event as { type?: string })?.type === 'error' || (event as { error?: object })?.error) { throw new Error('Provider stream reported an error'); }
 			const extracted = extractUsageFromEvent(event);
-			if (extracted) {
-				applyUsageFields(extracted, acc);
+			if (extracted) { applyUsageFields(extracted, acc); }
+			const usage = (event as { usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } } })?.usage;
+			if (typeof usage?.prompt_tokens === 'number') {
+				acc.inputTokens = usage.prompt_tokens;
+				acc.outputTokens = usage.completion_tokens ?? acc.outputTokens;
+				acc.cacheReadInputTokens = usage.prompt_tokens_details?.cached_tokens ?? 0;
 			}
 		}
-		yield chunk;
-	}
-
-	onUsage({
-		inputTokens: acc.inputTokens,
-		outputTokens: acc.outputTokens,
-		cacheReadInputTokens: acc.cacheReadInputTokens,
-		cacheCreationInputTokens: acc.cacheCreationInputTokens,
-	});
+	};
+	try {
+		for await (const chunk of chunks) {
+			collect(parser.feed(decoder.decode(chunk, { stream: true })));
+			yield chunk;
+		}
+		collect(parser.feed(decoder.decode() + '\n\n'));
+	} finally { onUsage({ ...acc }); }
 }

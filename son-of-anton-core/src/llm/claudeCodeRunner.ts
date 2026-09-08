@@ -120,6 +120,12 @@ export async function* runClaudeCode(options: ClaudeCodeRunOptions): AsyncGenera
 		'--include-partial-messages',
 		'--max-turns', '1',
 		'--tools', '',
+		// This process is a model transport. Son of Anton owns tool discovery;
+		// inheriting the CLI's MCP/skill catalog can exceed the context window
+		// before the first user turn, even with built-in tools disabled.
+		'--strict-mcp-config',
+		'--mcp-config', '{"mcpServers":{}}',
+		'--disable-slash-commands',
 		'--model', options.modelId,
 		'-p',
 	];
@@ -128,6 +134,11 @@ export async function* runClaudeCode(options: ClaudeCodeRunOptions): AsyncGenera
 	// auth (the whole point of routing through the CLI). Keep everything else.
 	const env: NodeJS.ProcessEnv = { ...process.env };
 	delete env.ANTHROPIC_API_KEY;
+	// Keep CLI-owned OAuth, but prevent a second customization stack from
+	// attaching global instructions/hooks to the host's explicit model prompt.
+	// Older CLIs ignore this environment option; the explicit MCP/skill flags
+	// above still bound their tool context.
+	env.CLAUDE_CODE_SAFE_MODE = '1';
 	env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC ?? '1';
 	env.DISABLE_NON_ESSENTIAL_MODEL_CALLS = env.DISABLE_NON_ESSENTIAL_MODEL_CALLS ?? '1';
 

@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 export interface Checkpoint {
+	workspaceRoot?: string;
 	id: string;
 	timestamp: number;
 	agentId: string;

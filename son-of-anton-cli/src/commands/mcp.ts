@@ -4,10 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Command, Option } from 'commander';
-import * as http from 'node:http';
-import * as https from 'node:https';
 import { URL } from 'node:url';
 import { McpServerConnection } from 'son-of-anton-core/dist/mcp/McpServerConnection';
+import { McpHttpTransport } from 'son-of-anton-core/dist/mcp/McpHttpTransport';
 import { McpStdioTransport } from 'son-of-anton-core/dist/mcp/McpStdioTransport';
 import { buildCliHost } from '../cliHost';
 import { SOTA_EXIT_CODES } from '../headless';
@@ -39,7 +38,6 @@ type McpServerEntry = McpStdioServerEntry | McpHttpServerEntry;
 const MCP_SERVERS_KEY = 'mcp.servers';
 const SOTA_MCP_SERVERS_KEY = 'sota.mcp.servers';
 
-const HTTP_PROBE_TIMEOUT_MS = 5_000;
 const STDIO_PROBE_TIMEOUT_MS = 8_000;
 
 /**
@@ -147,119 +145,23 @@ interface DoctorReport {
 	readonly error?: string;
 }
 
-/**
- * Probe a single stdio MCP server by spawning it, performing the initialize
- * handshake, listing tools, then disposing. Always resolves — failures are
- * captured in the returned {@link DoctorReport.error}.
- */
-async function probeStdioServer(entry: McpStdioServerEntry, cwdFallback: string | undefined): Promise<DoctorReport> {
-	const transport = new McpStdioTransport({
-		command: entry.command,
-		args: [...entry.args],
-		env: entry.env ? { ...entry.env } : undefined,
-		cwd: entry.cwd ?? cwdFallback,
-	});
-	const connection = new McpServerConnection({ name: entry.name, transport });
-	const timer = new Promise<DoctorReport>(resolve => {
-		setTimeout(() => {
-			resolve({
-				name: entry.name,
-				transport: 'stdio',
-				ok: false,
-				error: `probe timed out after ${STDIO_PROBE_TIMEOUT_MS}ms`,
-			});
-		}, STDIO_PROBE_TIMEOUT_MS).unref();
-	});
-	const probe = (async (): Promise<DoctorReport> => {
-		try {
-			await connection.connect();
-			const tools = await connection.listTools(true);
-			const warnings: string[] = [];
-			const toolNames: string[] = [];
-			for (const tool of tools) {
-				toolNames.push(tool.name);
-				if (!tool.inputSchema) {
-					warnings.push(`tool '${tool.name}' is missing inputSchema`);
-				}
-			}
-			return {
-				name: entry.name,
-				transport: 'stdio',
-				ok: true,
-				tools: toolNames,
-				warnings: warnings.length > 0 ? warnings : undefined,
-			};
-		} catch (err) {
-			return {
-				name: entry.name,
-				transport: 'stdio',
-				ok: false,
-				error: err instanceof Error ? err.message : String(err),
-			};
-		} finally {
-			try { connection.dispose(); } catch { /* swallow on shutdown */ }
-		}
-	})();
-	return Promise.race([probe, timer]);
-}
-
-/**
- * Probe an HTTP MCP server with a HEAD-then-GET fallback. We don't speak the
- * MCP-over-HTTP RPC dialect from the CLI yet, so reachability + status code
- * is the most we can verify; tool enumeration is left as a known gap and
- * surfaced as a warning so users aren't misled.
- */
-async function probeHttpServer(entry: McpHttpServerEntry): Promise<DoctorReport> {
-	let parsed: URL;
+/** Negotiate MCP and enumerate real tools for both local and remote servers. */
+async function probeServer(entry: McpServerEntry, cwdFallback?: string): Promise<DoctorReport> {
+	let connection: McpServerConnection | undefined;
+	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
-		parsed = new URL(entry.url);
-	} catch {
-		return {
-			name: entry.name,
-			transport: 'http',
-			ok: false,
-			error: `invalid URL '${entry.url}'`,
-		};
-	}
-	const lib = parsed.protocol === 'https:' ? https : http;
-	return new Promise<DoctorReport>(resolve => {
-		const req = lib.request(parsed, {
-			method: 'GET',
-			headers: entry.headers ? { ...entry.headers } : undefined,
-			timeout: HTTP_PROBE_TIMEOUT_MS,
-		}, res => {
-			res.resume();
-			const status = res.statusCode ?? 0;
-			if (status >= 200 && status < 400) {
-				resolve({
-					name: entry.name,
-					transport: 'http',
-					ok: true,
-					tools: [],
-					warnings: ['HTTP MCP tool listing not implemented — reachability only'],
-				});
-				return;
-			}
-			resolve({
-				name: entry.name,
-				transport: 'http',
-				ok: false,
-				error: `${status} ${res.statusMessage ?? 'error'}`.trim(),
-			});
-		});
-		req.on('timeout', () => {
-			req.destroy(new Error(`probe timed out after ${HTTP_PROBE_TIMEOUT_MS}ms`));
-		});
-		req.on('error', err => {
-			resolve({
-				name: entry.name,
-				transport: 'http',
-				ok: false,
-				error: err instanceof Error ? err.message : String(err),
-			});
-		});
-		req.end();
-	});
+		const transport = entry.transport === 'http' ? new McpHttpTransport(entry) : new McpStdioTransport({ command: entry.command, args: [...entry.args], env: entry.env ? { ...entry.env } : undefined, cwd: entry.cwd ?? cwdFallback });
+		connection = new McpServerConnection({ name: entry.name, transport });
+		const active = connection;
+		const tools = await Promise.race([
+			(async () => { await active.connect(); return active.listTools(true); })(),
+			new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`probe timed out after ${STDIO_PROBE_TIMEOUT_MS}ms`)), STDIO_PROBE_TIMEOUT_MS); }),
+		]);
+		const warnings = tools.filter(tool => !tool.inputSchema).map(tool => `tool '${tool.name}' is missing inputSchema`);
+		return { name: entry.name, transport: entry.transport ?? 'stdio', ok: true, tools: tools.map(tool => tool.name), warnings: warnings.length ? warnings : undefined };
+	} catch (error) {
+		return { name: entry.name, transport: entry.transport ?? 'stdio', ok: false, error: error instanceof Error ? error.message : 'MCP connection failed' };
+	} finally { if (timer) { clearTimeout(timer); } connection?.dispose(); }
 }
 
 function formatReport(report: DoctorReport): string {
@@ -348,7 +250,7 @@ export function mcpCommand(): Command {
 			const host = buildCliHost();
 			const existing = readSotaServers(host);
 			await writeSotaServers(host, upsertServer(existing, entry));
-			process.stdout.write(JSON.stringify(entry, null, 2) + '\n');
+			process.stdout.write(`Configured MCP server '${name}'.\n`);
 		});
 
 	cmd.command('add-http <name> <url>')
@@ -357,7 +259,8 @@ export function mcpCommand(): Command {
 		.action(async (name: string, url: string, opts: { header: Record<string, string> }) => {
 			try {
 				// Eager validation so misuse fails fast rather than at probe time.
-				new URL(url);
+				const parsed = new URL(url);
+				if (!['https:', 'http:'].includes(parsed.protocol) || parsed.username || parsed.password) { throw new Error('Unsupported endpoint'); }
 			} catch {
 				process.stderr.write(`error: invalid URL '${url}'\n`);
 				process.exit(SOTA_EXIT_CODES.HARD_FAIL);
@@ -372,7 +275,7 @@ export function mcpCommand(): Command {
 			const host = buildCliHost();
 			const existing = readSotaServers(host);
 			await writeSotaServers(host, upsertServer(existing, entry));
-			process.stdout.write(JSON.stringify(entry, null, 2) + '\n');
+			process.stdout.write(`Configured MCP server '${name}'.\n`);
 		});
 
 	cmd.command('doctor')
@@ -391,9 +294,7 @@ export function mcpCommand(): Command {
 				return;
 			}
 			const reports = await Promise.all(sotaServers.map(s => {
-				return s.transport === 'http'
-					? probeHttpServer(s)
-					: probeStdioServer(s, cwdFallback);
+				return probeServer(s, cwdFallback);
 			}));
 			if (opts.output === 'json') {
 				process.stdout.write(JSON.stringify(reports, null, 2) + '\n');

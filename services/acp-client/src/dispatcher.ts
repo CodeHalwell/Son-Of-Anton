@@ -3,7 +3,6 @@
 
 import type {
 	ACPClient,
-	Session,
 	SessionConfig,
 	SessionEvent,
 	AgentDescriptor,
@@ -31,7 +30,9 @@ export interface TaskAssignment {
 	/** Context to provide. */
 	context?: SessionConfig['context'];
 	/** MCP servers to make available. */
-	mcpServers?: string[];
+	mcpServers?: SessionConfig['mcpServers'];
+	cwd?: string;
+	requestPermissions?: boolean;
 	/** Maximum tokens for the session. */
 	maxTokens?: number;
 	/** Timeout in milliseconds. */
@@ -58,20 +59,34 @@ export class ACPDispatcher {
 	constructor(private readonly acpClient: ACPClient) {}
 
 	/** Dispatch a task to an ACP agent and wait for completion. */
-	async dispatchTask(assignment: TaskAssignment): Promise<TaskResult> {
-		if (assignment.protocol !== 'acp') {
-			throw new Error(`ACPDispatcher only handles ACP protocol, got: ${assignment.protocol}`);
-		}
-
+	async dispatchTask(assignment: TaskAssignment, signal?: AbortSignal, onEvent?: (event: SessionEvent) => void): Promise<TaskResult> {
+		if (assignment.protocol !== 'acp') { throw new Error('Dispatch requires protocol acp'); }
+		if (!assignment.taskId || typeof assignment.taskId !== 'string' || !assignment.task || typeof assignment.task !== 'string') { throw new Error('Dispatch requires taskId and task'); }
 		const session = await this.acpClient.createSession(assignment.agentId, {
-			task: assignment.task,
-			context: assignment.context,
-			tools: assignment.mcpServers,
-			maxTokens: assignment.maxTokens,
-			timeout: assignment.timeout,
+			cwd: assignment.cwd, mcpServers: assignment.mcpServers, timeout: assignment.timeout,
+			requestPermissions: assignment.requestPermissions, maxTokens: assignment.maxTokens,
 		});
-
-		return this.waitForCompletion(assignment.taskId, session);
+		const events: SessionEvent[] = [];
+		let bytes = 0;
+		let status: TaskResult['status'] = 'failed';
+		const handler = (event: SessionEvent) => {
+			bytes += Buffer.byteLength(JSON.stringify(event));
+			if (bytes > 8 * 1024 * 1024 || events.length >= 20_000) { throw new Error('ACP dispatch event limit exceeded'); }
+			events.push(event); onEvent?.(event);
+			if (event.type === 'complete') { status = 'completed'; }
+		};
+		// Subscribe before prompting: agents are allowed to finish immediately.
+		this.acpClient.onSessionEvent(session.id, handler);
+		try {
+			await this.acpClient.sendMessage(session.id, assignment.task, assignment.context, signal);
+		} catch (error) {
+			if (signal?.aborted) { status = 'terminated'; }
+			else if (!events.some(event => event.type === 'error')) { throw error; }
+		} finally {
+			this.acpClient.offSessionEvent(session.id, handler);
+			await this.acpClient.terminateSession(session.id);
+		}
+		return { taskId: assignment.taskId, sessionId: session.id, status, events };
 	}
 
 	/** Find the best available agent for a set of required capabilities. */
@@ -113,25 +128,4 @@ export class ACPDispatcher {
 		return candidates[0];
 	}
 
-	private waitForCompletion(taskId: string, session: Session): Promise<TaskResult> {
-		return new Promise<TaskResult>((resolve) => {
-			const events: SessionEvent[] = [];
-
-			const handler = (event: SessionEvent) => {
-				events.push(event);
-
-				if (event.type === 'complete' || event.type === 'error') {
-					this.acpClient.offSessionEvent(session.id, handler);
-					resolve({
-						taskId,
-						sessionId: session.id,
-						status: event.type === 'complete' ? 'completed' : 'failed',
-						events,
-					});
-				}
-			};
-
-			this.acpClient.onSessionEvent(session.id, handler);
-		});
-	}
 }

@@ -2,6 +2,7 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
+import { applyImageCapability, serializeOpenAIMessages, serializeGoogleMessages, parseToolArguments } from './messageSerialization';
 import { BedrockRuntimeClient, InvokeModelWithResponseStreamCommand } from '@aws-sdk/client-bedrock-runtime';
 import { fromIni, fromNodeProviderChain } from '@aws-sdk/credential-providers';
 import type { AwsCredentialIdentity, AwsCredentialIdentityProvider } from '@smithy/types';
@@ -231,7 +232,7 @@ type Provider =
 export type LlmContentPart =
 	| { type: 'text'; text: string }
 	| { type: 'image'; mimeType: string; base64Data: string }
-	| { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
+	| { type: 'tool_use'; id: string; name: string; input: Record<string, unknown>; thoughtSignature?: string }
 	| { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean };
 
 /**
@@ -325,7 +326,7 @@ const MULTIMODAL_MODELS: ReadonlySet<ModelId> = new Set<ModelId>([
  * target model can't accept. Surfaced at the END of the text so the user's
  * own prose stays at the top of the prompt.
  */
-const IMAGE_STRIPPED_NOTE = '[image attachment was not sent: model does not support multimodal input]';
+
 
 /**
  * True when the model accepts image content parts. Centralised so each
@@ -350,26 +351,10 @@ export function isOpenAIReasoningModel(model: ModelId): boolean {
 	return /^(?:o1|o3|o4|gpt-5)/.test(model);
 }
 
-/**
- * Whether a model can drive the native agentic tool loop, i.e. its provider
- * serializer round-trips multi-turn `tool_use` / `tool_result` message parts.
- * Only the Anthropic (`streamAnthropic`) and Bedrock Converse (`streamBedrock`)
- * serializers forward the tool definitions and parse `tool_use` back; the
- * OpenAI-compatible and Gemini serializers reject those parts, so a tool-driving
- * run against them fails after the first tool call. Claude Code is deliberately
- * excluded too: its adapter launches the CLI with `--tools '' --max-turns 1`, so
- * it never emits the `tool-call` events `runToolLoop` waits for and would end a
- * code-editing request with prose only. Callers should fall back to a single-shot
- * turn when this is `false` rather than entering the loop.
- */
+/** Native providers round-trip tool messages; subscription CLI adapters own their own harness. */
 export function supportsAgenticToolLoop(model: ModelId): boolean {
-	switch (providerForModel(model)) {
-		case 'anthropic':
-		case 'bedrock':
-			return true;
-		default:
-			return false;
-	}
+	const provider = providerForModel(model);
+	return provider !== 'claude-code' && provider !== 'codex' && (provider !== 'bedrock' || model.startsWith('bedrock-claude-'));
 }
 
 /** Throw a standard `AbortError` if the given signal is already aborted. */
@@ -380,44 +365,13 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 }
 
 /**
- * Normalise an `LlmMessageContent` into a structured part array. Strings are
- * promoted to a single text part. Empty strings still produce a part so
- * downstream serialisers don't have to special-case the role.
- */
-function normaliseContent(content: LlmMessageContent): ReadonlyArray<LlmContentPart> {
-	if (typeof content === 'string') {
-		return [{ type: 'text', text: content }];
-	}
-	return content;
-}
-
-/**
- * Strip image parts when the target model is text-only, replacing them with
- * a trailing text note so the user knows what happened. When there is no
- * image content, the input is returned untouched (cheap fast path).
- */
-function applyImageCapability(content: LlmMessageContent, supportsImages: boolean): ReadonlyArray<LlmContentPart> {
-	const parts = normaliseContent(content);
-	if (supportsImages) {
-		return parts;
-	}
-	const hasImage = parts.some(p => p.type === 'image');
-	if (!hasImage) {
-		return parts;
-	}
-	const textOnly: LlmContentPart[] = parts.filter(p => p.type === 'text');
-	textOnly.push({ type: 'text', text: IMAGE_STRIPPED_NOTE });
-	return textOnly;
-}
-
-/**
  * Anthropic content-block shape. Discriminated by `type`. Image blocks carry
  * a `source.type: 'base64'` envelope around the actual MIME + bytes.
  */
 type AnthropicContentBlock =
 	| { type: 'text'; text: string }
 	| { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
-	| { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
+	| { type: 'tool_use'; id: string; name: string; input: Record<string, unknown>; thoughtSignature?: string }
 	| { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean };
 
 /**
@@ -508,82 +462,6 @@ function serialiseAnthropicContent(
 }
 
 /**
- * OpenAI content-part shape. Discriminated by `type`. Image parts wrap the
- * payload in an `image_url` object whose `url` is a data URL — the API
- * accepts public URLs OR `data:` URLs interchangeably.
- */
-type OpenAIContentPart =
-	| { type: 'text'; text: string }
-	| { type: 'image_url'; image_url: { url: string } };
-
-/**
- * Serialise an `LlmMessageContent` into OpenAI's content-part array. Same
- * string passthrough behaviour as Anthropic so historical single-text
- * messages stay byte-identical on the wire.
- */
-function serialiseOpenAIContent(
-	content: LlmMessageContent,
-	supportsImages: boolean,
-): string | ReadonlyArray<OpenAIContentPart> {
-	if (typeof content === 'string') {
-		return content;
-	}
-	const parts = applyImageCapability(content, supportsImages);
-	const out: OpenAIContentPart[] = [];
-	for (const part of parts) {
-		if (part.type === 'text') {
-			out.push({ type: 'text', text: part.text });
-		} else if (part.type === 'image') {
-			out.push({
-				type: 'image_url',
-				image_url: { url: `data:${part.mimeType};base64,${part.base64Data}` },
-			});
-		} else {
-			// tool_use / tool_result blocks aren't representable in OpenAI's
-			// chat-completion content-part schema. The agent harness's tool
-			// loop is currently Anthropic-only — if a tool round-trip message
-			// arrives here, the caller has misrouted it.
-			throw new Error(`OpenAI provider does not yet support content part of type "${(part as { type: string }).type}". Route tool-loop messages through an Anthropic-compatible model.`);
-		}
-	}
-	return out;
-}
-
-/**
- * Google Gemini content-part shape. Each part is either text or an
- * `inline_data` envelope carrying a base64 payload and its MIME type.
- */
-type GoogleContentPart =
-	| { text: string }
-	| { inline_data: { mime_type: string; data: string } };
-
-/**
- * Serialise an `LlmMessageContent` into Gemini's `parts` array. Gemini has
- * no string-shorthand on the wire — it always wants an array — so we always
- * return an array regardless of whether the input was a plain string.
- */
-function serialiseGoogleParts(
-	content: LlmMessageContent,
-	supportsImages: boolean,
-): ReadonlyArray<GoogleContentPart> {
-	const parts = applyImageCapability(content, supportsImages);
-	const out: GoogleContentPart[] = [];
-	for (const part of parts) {
-		if (part.type === 'text') {
-			out.push({ text: part.text });
-		} else if (part.type === 'image') {
-			out.push({ inline_data: { mime_type: part.mimeType, data: part.base64Data } });
-		} else {
-			// Same constraint as OpenAI — Gemini's tool-call shape isn't wired
-			// in our serialiser yet; tool-loop messages must route through an
-			// Anthropic-compatible model.
-			throw new Error(`Gemini provider does not yet support content part of type "${(part as { type: string }).type}". Route tool-loop messages through an Anthropic-compatible model.`);
-		}
-	}
-	return out;
-}
-
-/**
  * Local declaration of a tool definition consumed by Anthropic-compatible
  * providers. A parallel module under `../tools/types.ts` is being introduced
  * by another work stream; this inline copy keeps LlmClient unblocked and
@@ -653,6 +531,7 @@ export interface LlmStreamToken {
  * outstanding requests.
  */
 export interface LlmStreamToolCall {
+	thoughtSignature?: string;
 	type: 'tool-call';
 	id: string;
 	name: string;
@@ -730,7 +609,7 @@ export const GOOGLE_OAUTH_PROVIDER_ID = 'google-oauth';
  * Adding a third provider in future is a matter of adding another branch here
  * plus a corresponding stream method below.
  */
-function providerForModel(model: ModelId): Provider {
+export function providerForModel(model: ModelId): Provider {
 	switch (model) {
 		case 'opus':
 		case 'sonnet':
@@ -1729,6 +1608,7 @@ export class LlmClient {
 	 * in Son of Anton settings.
 	 */
 	private async *streamClaudeCode(options: LlmRequestOptions): AsyncGenerator<LlmStreamEvent> {
+		if (options.tools?.length) { yield { type: 'error', error: 'Claude Code text transport cannot execute host tools. Assign this specialist to its ACP adapter in Agent Settings, or choose a model with native tool support.' }; return; }
 		const { runClaudeCode, isClaudeCodeAvailable } = await import('./claudeCodeRunner.js');
 		if (!isClaudeCodeAvailable()) {
 			yield {
@@ -1991,19 +1871,9 @@ export class LlmClient {
 							if (entry) {
 								toolUseByIndex.delete(event.index);
 								const joined = entry.jsonChunks.join('');
-								let parsedInput: Record<string, unknown> = {};
-								if (joined.length > 0) {
-									try {
-										const parsed = JSON.parse(joined);
-										if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-											parsedInput = parsed as Record<string, unknown>;
-										} else {
-											console.warn(`LlmClient: tool_use input JSON for tool '${entry.name}' did not parse to an object; defaulting to {}.`);
-										}
-									} catch (parseErr) {
-										console.warn(`LlmClient: failed to parse tool_use input JSON for tool '${entry.name}'; defaulting to {}.`, parseErr);
-									}
-								}
+								let parsedInput: Record<string, unknown>;
+								try { parsedInput = parseToolArguments(joined, entry.name); }
+								catch (error) { yield { type: 'error', error: error instanceof Error ? error.message : String(error) }; return; }
 								yield { type: 'tool-call', id: entry.id, name: entry.name, input: parsedInput };
 							}
 						} else if (event.type === 'content_block_delta' && event.delta?.text) {
@@ -2101,7 +1971,7 @@ export class LlmClient {
 			...(isReasoning ? { max_completion_tokens: tokenLimit } : { max_tokens: tokenLimit }),
 			messages: [
 				systemMessage,
-				...options.messages.map(m => ({ role: m.role, content: serialiseOpenAIContent(m.content, supportsImages) })),
+				...serializeOpenAIMessages(options.messages, supportsImages),
 			],
 			stream: true,
 			// Request a final usage chunk so we can populate token counts.
@@ -2241,19 +2111,7 @@ export class LlmClient {
 			for (let i = 0; i < orderedIndexes.length; i++) {
 				const idx = orderedIndexes[i];
 				const entry = toolCallsByIndex.get(idx)!;
-				let parsedInput: Record<string, unknown> = {};
-				if (entry.argsBuffer.length > 0) {
-					try {
-						const parsed = JSON.parse(entry.argsBuffer);
-						if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-							parsedInput = parsed as Record<string, unknown>;
-						} else {
-							console.warn(`LlmClient: OpenAI tool_call arguments for '${entry.name}' did not parse to an object; defaulting to {}.`);
-						}
-					} catch (parseErr) {
-						console.warn(`LlmClient: failed to parse OpenAI tool_call arguments for '${entry.name}'; defaulting to {}.`, parseErr);
-					}
-				}
+				const parsedInput = parseToolArguments(entry.argsBuffer, entry.name);
 				yield {
 					type: 'tool-call',
 					id: entry.id ?? `openai_call_${i}`,
@@ -2351,7 +2209,7 @@ export class LlmClient {
 			...(isReasoningFamily ? { max_completion_tokens: tokenLimit } : {}),
 			messages: [
 				systemMessage,
-				...options.messages.map(m => ({ role: m.role, content: serialiseOpenAIContent(m.content, supportsImages) })),
+				...serializeOpenAIMessages(options.messages, supportsImages),
 			],
 			stream: true,
 			stream_options: { include_usage: true },
@@ -2484,19 +2342,7 @@ export class LlmClient {
 			for (let i = 0; i < orderedIndexes.length; i++) {
 				const idx = orderedIndexes[i];
 				const entry = toolCallsByIndex.get(idx)!;
-				let parsedInput: Record<string, unknown> = {};
-				if (entry.argsBuffer.length > 0) {
-					try {
-						const parsed = JSON.parse(entry.argsBuffer);
-						if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-							parsedInput = parsed as Record<string, unknown>;
-						} else {
-							console.warn(`LlmClient: Foundry tool_call arguments for '${entry.name}' did not parse to an object; defaulting to {}.`);
-						}
-					} catch (parseErr) {
-						console.warn(`LlmClient: failed to parse Foundry tool_call arguments for '${entry.name}'; defaulting to {}.`, parseErr);
-					}
-				}
+				const parsedInput = parseToolArguments(entry.argsBuffer, entry.name);
 				yield {
 					type: 'tool-call',
 					id: entry.id ?? `foundry_call_${i}`,
@@ -2546,6 +2392,10 @@ export class LlmClient {
 	 * extraction and usage accounting mirror `streamAnthropic` line-for-line.
 	 */
 	private async *streamBedrock(options: LlmRequestOptions): AsyncGenerator<LlmStreamEvent> {
+		if (!options.model.startsWith('bedrock-claude-')) {
+			yield { type: 'error', error: 'The Bedrock adapter currently supports Claude models. Select a bedrock-claude model or use an OpenAI-compatible endpoint for this model family.' };
+			return;
+		}
 		const config = await this.getBedrockConfig();
 		const modelId = config.modelInvocationId(options.model);
 		if (!modelId) {
@@ -2707,19 +2557,9 @@ export class LlmClient {
 					if (entry) {
 						toolUseByIndex.delete(event.index);
 						const joined = entry.jsonChunks.join('');
-						let parsedInput: Record<string, unknown> = {};
-						if (joined.length > 0) {
-							try {
-								const parsed = JSON.parse(joined);
-								if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-									parsedInput = parsed as Record<string, unknown>;
-								} else {
-									console.warn(`LlmClient: tool_use input JSON for tool '${entry.name}' did not parse to an object; defaulting to {}.`);
-								}
-							} catch (parseErr) {
-								console.warn(`LlmClient: failed to parse tool_use input JSON for tool '${entry.name}'; defaulting to {}.`, parseErr);
-							}
-						}
+						let parsedInput: Record<string, unknown>;
+						try { parsedInput = parseToolArguments(joined, entry.name); }
+						catch (error) { yield { type: 'error', error: error instanceof Error ? error.message : String(error) }; return; }
 						yield { type: 'tool-call', id: entry.id, name: entry.name, input: parsedInput };
 					}
 				} else if (event.type === 'content_block_delta' && event.delta && typeof event.delta.text === 'string' && event.delta.text.length > 0) {
@@ -2802,10 +2642,7 @@ export class LlmClient {
 		// Map our 'assistant' role to Gemini's 'model' role; everything else
 		// stays 'user'. System prompt lives in a separate top-level field.
 		const supportsImages = modelSupportsImages(options.model);
-		const contents = options.messages.map(m => ({
-			role: m.role === 'assistant' ? 'model' : 'user',
-			parts: serialiseGoogleParts(m.content, supportsImages),
-		}));
+		const contents = serializeGoogleMessages(options.messages, supportsImages);
 		const body: Record<string, unknown> = {
 			contents,
 			systemInstruction: options.systemPrompt
@@ -2907,12 +2744,12 @@ export class LlmClient {
 								if (part && part.functionCall && typeof part.functionCall.name === 'string') {
 									sawFunctionCall = true;
 									const args = part.functionCall.args;
-									const input: Record<string, unknown> = (args && typeof args === 'object' && !Array.isArray(args))
-										? args as Record<string, unknown>
-										: {};
+									if (args !== undefined && (!args || typeof args !== 'object' || Array.isArray(args))) { yield { type: 'error', error: 'Google returned malformed tool arguments' }; return; }
+									const input = (args ?? {}) as Record<string, unknown>;
 									yield {
 										type: 'tool-call',
-										id: `gemini_call_${toolCallIndex++}`,
+										id: typeof part.functionCall.id === 'string' ? part.functionCall.id : `gemini_call_${Date.now()}_${toolCallIndex++}`,
+										thoughtSignature: typeof part.thoughtSignature === 'string' ? part.thoughtSignature : undefined,
 										name: part.functionCall.name,
 										input,
 									};
@@ -3003,7 +2840,7 @@ export class LlmClient {
 			max_tokens: options.maxTokens ?? 4096,
 			messages: [
 				systemMessage,
-				...options.messages.map(m => ({ role: m.role, content: serialiseOpenAIContent(m.content, supportsImages) })),
+				...serializeOpenAIMessages(options.messages, supportsImages),
 			],
 			stream: true,
 		};
@@ -3120,17 +2957,7 @@ export class LlmClient {
 			for (let i = 0; i < orderedIndexes.length; i++) {
 				const idx = orderedIndexes[i];
 				const entry = toolCallsByIndex.get(idx)!;
-				let parsedInput: Record<string, unknown> = {};
-				if (entry.argsBuffer.length > 0) {
-					try {
-						const parsed = JSON.parse(entry.argsBuffer);
-						if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-							parsedInput = parsed as Record<string, unknown>;
-						}
-					} catch {
-						// Defaults to {}.
-					}
-				}
+				const parsedInput = parseToolArguments(entry.argsBuffer, entry.name);
 				yield {
 					type: 'tool-call',
 					id: entry.id ?? `${config.provider}_call_${i}`,
@@ -3429,6 +3256,7 @@ export class LlmClient {
 	 * settings. Mirrors `streamClaudeCode`.
 	 */
 	private async *streamCodex(options: LlmRequestOptions): AsyncGenerator<LlmStreamEvent> {
+		if (options.tools?.length) { yield { type: 'error', error: 'Codex text transport cannot execute host tools. Assign this specialist to its ACP adapter in Agent Settings, or choose a model with native tool support.' }; return; }
 		const { runCodex, isCodexAvailable } = await import('./codexRunner.js');
 		if (!isCodexAvailable()) {
 			yield {

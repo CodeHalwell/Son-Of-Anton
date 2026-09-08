@@ -1,6 +1,6 @@
 # Son of Anton — Backend Services
-# Start all services: docker compose up -d
-# Tear down everything: docker compose down -v
+# Start optional services: docker compose --profile services up -d
+# Stop optional services, preserving data: docker compose --profile services down
 #
 # SECURITY: every published port is bound to 127.0.0.1 so the services (and the
 # FalkorDB/Qdrant data stores) are reachable only from the local host, not from
@@ -13,6 +13,7 @@
 
 services:
   falkordb:
+    profiles: [services]
     image: falkordb/falkordb:latest
     container_name: soa-falkordb
     environment:
@@ -35,6 +36,7 @@ services:
     restart: unless-stopped
 
   qdrant:
+    profiles: [services]
     image: qdrant/qdrant:latest
     container_name: soa-qdrant
     environment:
@@ -54,6 +56,7 @@ services:
     restart: unless-stopped
 
   postgres:
+    profiles: [services]
     image: postgres:16
     container_name: soa-postgres
     environment:
@@ -69,6 +72,7 @@ services:
     restart: unless-stopped
 
   indexer:
+    profiles: [services]
     build:
       context: ./services/indexer
       dockerfile: Dockerfile
@@ -109,6 +113,7 @@ services:
     restart: unless-stopped
 
   lsif:
+    profiles: [services]
     build:
       context: ./services/lsif
       dockerfile: Dockerfile
@@ -136,6 +141,7 @@ services:
     restart: unless-stopped
 
   mcp-gateway:
+    profiles: [services]
     build:
       context: ./services/mcp-gateway
       dockerfile: Dockerfile
@@ -178,6 +184,7 @@ services:
     restart: unless-stopped
 
   mcp-database:
+    profiles: [services]
     build:
       context: ./son-of-anton-mcp/servers/database
       dockerfile: Dockerfile
@@ -204,6 +211,7 @@ services:
     restart: unless-stopped
 
   mcp-deployment:
+    profiles: [services]
     build:
       context: ./son-of-anton-mcp/servers/deployment
       dockerfile: Dockerfile
@@ -224,6 +232,7 @@ services:
     restart: unless-stopped
 
   mcp-tickets:
+    profiles: [services]
     build:
       context: ./son-of-anton-mcp/servers/tickets
       dockerfile: Dockerfile
@@ -295,6 +304,7 @@ services:
     restart: unless-stopped
 
   spec-pipeline:
+    profiles: [services]
     build:
       context: ./services/spec-pipeline
       dockerfile: Dockerfile
@@ -316,6 +326,7 @@ services:
     restart: unless-stopped
 
   mcp-playwright:
+    profiles: [services]
     build:
       context: ./son-of-anton-mcp/servers/playwright
       dockerfile: Dockerfile
@@ -341,6 +352,7 @@ services:
     restart: unless-stopped
 
   background-tasks:
+    profiles: [services]
     build:
       context: ./services/background-tasks
       dockerfile: Dockerfile
@@ -380,6 +392,7 @@ services:
     restart: unless-stopped
 
   visual-regression:
+    profiles: [services]
     build:
       context: ./services/visual-regression
       dockerfile: Dockerfile
@@ -402,6 +415,7 @@ services:
     restart: unless-stopped
 
   model-router:
+    profiles: [services]
     build:
       context: ./services/model-router
       dockerfile: Dockerfile
@@ -420,6 +434,7 @@ services:
     restart: unless-stopped
 
   checkpoints:
+    profiles: [services]
     build:
       context: ./services/checkpoints
       dockerfile: Dockerfile
@@ -442,6 +457,7 @@ services:
     restart: unless-stopped
 
   walkthrough:
+    profiles: [services]
     build:
       context: ./services/walkthrough
       dockerfile: Dockerfile
@@ -467,6 +483,7 @@ services:
     restart: unless-stopped
 
   acp-client:
+    profiles: [services]
     build:
       context: ./services/acp-client
       dockerfile: Dockerfile
@@ -474,10 +491,13 @@ services:
     ports:
       - "127.0.0.1:${ACP_PORT:-3300}:3300"
     environment:
-      - ACP_PORT=${ACP_PORT:-3300}
+      - ACP_PORT=3300
+      - ACP_HOST=0.0.0.0
+      - PROJECT_PATH=/workspace
+      - ACP_MAX_PROCESSES=${ACP_MAX_PROCESSES:-4}
+      - ACP_MAX_QUEUE=${ACP_MAX_QUEUE:-32}
       - ACP_CONFIG_PATH=/workspace/.son-of-anton/agents/acp-agents.json
       - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
-      - PROJECT_PATH=/workspace
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:ro
     healthcheck:
@@ -489,6 +509,7 @@ services:
     restart: unless-stopped
 
   build-dag:
+    profiles: [services]
     build:
       context: ./services/build-dag
       dockerfile: Dockerfile
@@ -516,6 +537,7 @@ services:
     restart: unless-stopped
 
   context-sanitiser:
+    profiles: [services]
     build:
       context: ./services/context-sanitiser
       dockerfile: Dockerfile

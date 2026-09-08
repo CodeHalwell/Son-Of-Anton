@@ -82,7 +82,7 @@ jobs:
       - name: Setup Node 22
         uses: actions/setup-node@v4
         with:
-          node-version: '22.20.0'
+          node-version-file: .nvmrc
 
       # The repo has a top-level package.json (the VS Code fork) and a
       # nested son-of-anton-cli/package.json (the CLI). Both need install:
@@ -92,10 +92,23 @@ jobs:
         run: npm ci
         shell: bash
 
+      - name: Install core deps
+        run: npm ci
+        working-directory: son-of-anton-core
+        shell: bash
+
       - name: Install CLI deps
         run: npm ci
         working-directory: son-of-anton-cli
         shell: bash
+
+      - name: Compile and test shared runtime and upgrade recovery
+        shell: bash
+        run: |
+          npm --prefix son-of-anton-core run build
+          npm --prefix son-of-anton-cli run build
+          node --test son-of-anton-core/dist/acp/*.test.js son-of-anton-core/dist/workspace/*.test.js
+          node --test son-of-anton-cli/dist/test/updateInstall.test.js
 
       # --- macOS-only signing prep ------------------------------------------
       - name: Decode notary API key (macOS)

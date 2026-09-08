@@ -44,6 +44,7 @@ export interface ModelRoutesConfig {
 }
 
 export interface RoutingContext {
+	maxLatencyMs?: number;
 	agentRole: string;
 	taskType?: string;
 	taskId?: string;
@@ -91,6 +92,7 @@ export interface ModelPricing {
 }
 
 export interface UnifiedResponse {
+	toolCalls?: Array<{ id: string; name: string; input: Record<string, unknown> }>;
 	content: string;
 	model: string;
 	inputTokens: number;

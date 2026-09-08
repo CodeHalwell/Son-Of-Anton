@@ -143,6 +143,10 @@ export interface ToolExecutionResult {
 }
 
 export interface ToolExecutionContext {
+	/** Per-turn cancellation, including external MCP tool requests. */
+	readonly signal?: AbortSignal;
+	/** Host approval for external tools. Missing handlers deny side effects. */
+	readonly requestMcpApproval?: (tool: ToolDefinition, input: Record<string, unknown>, signal?: AbortSignal) => Promise<boolean>;
 	readonly workspaceRoot: string | undefined;
 	readonly readFile: (relPath: string) => Promise<string>;
 	readonly readDir: (relPath: string) => Promise<ReadonlyArray<{ name: string; isDirectory: boolean }>>;

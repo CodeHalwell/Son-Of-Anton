@@ -319,6 +319,9 @@ export class CopilotAdapter implements ProviderAdapter {
 				retryable: true,
 			};
 			yield { type: 'message_stop', stopReason: 'error' };
+		} finally {
+			await reader.cancel().catch(() => {});
+			reader.releaseLock();
 		}
 	}
 
@@ -404,6 +407,11 @@ function toChatCompletionsMessages(
 			continue;
 		}
 
+		if (m.role === 'assistant') {
+			const calls = m.content.filter((block): block is Extract<MessageContent, { type: 'tool_use' }> => block.type === 'tool_use');
+			out.push({ role: 'assistant', content: flattenText(m.content) || null, ...(calls.length ? { tool_calls: calls.map(call => ({ id: call.toolUseId, type: 'function' as const, function: { name: call.name, arguments: JSON.stringify(call.input) } })) } : {}) });
+			continue;
+		}
 		const textParts: string[] = [];
 		for (const block of m.content) {
 			if (block.type === 'text') {

@@ -1,6 +1,7 @@
 // Copyright (c) Son-Of-Anton. All rights reserved.
 // Licensed under the MIT License.
 
+import { FailoverChain } from './failover/failoverChain.js';
 import type { AgentEvent, ModelDescriptor, ProviderAdapter, UniformRequest } from './providers/types.js';
 
 interface ErrnoLike {
@@ -73,6 +74,7 @@ export class FailoverAdapter implements ProviderAdapter {
 				return;
 			}
 
+			let hadContent = false;
 			try {
 				const available = await target.adapter.isAvailable();
 				if (!available && !isLast) {
@@ -80,11 +82,10 @@ export class FailoverAdapter implements ProviderAdapter {
 				}
 
 				const modifiedReq: UniformRequest = { ...req, model: target.model };
-				let hadContent = false;
 				let shouldFailover = false;
 
 				for await (const event of target.adapter.send(modifiedReq, signal)) {
-					if (event.type === 'text_delta' || event.type === 'tool_use_start') {
+					if (event.type === 'text_delta' || event.type.startsWith('tool_use_') || event.type === 'thinking_delta') {
 						hadContent = true;
 					}
 
@@ -107,7 +108,7 @@ export class FailoverAdapter implements ProviderAdapter {
 					return;
 				}
 			} catch (err) {
-				if (isLast) {
+				if (isLast || hadContent || signal.aborted) {
 					yield {
 						type: 'error',
 						code: 'connection_error',
@@ -184,60 +185,10 @@ export async function* withFailover(
 	req: UniformRequest,
 	signal: AbortSignal,
 ): AsyncIterable<AgentEvent> {
-	if (entries.length === 0) {
+	if (!entries.length) {
 		yield { type: 'error', code: 'NO_PROVIDERS', message: 'No providers configured', retryable: false };
 		yield { type: 'message_stop', stopReason: 'error' };
 		return;
 	}
-
-	for (let i = 0; i < entries.length; i++) {
-		const { adapter, model } = entries[i];
-		const isLast = i === entries.length - 1;
-		const entryReq: UniformRequest = { ...req, model };
-
-		try {
-			let completed = false;
-			let shouldTryNext = false;
-
-			for await (const event of adapter.send(entryReq, signal)) {
-				yield event;
-
-				if (event.type === 'message_stop') {
-					completed = true;
-					break;
-				}
-
-				// A retryable error mid-stream: finish this event, try next provider.
-				if (event.type === 'error' && event.retryable && !isLast) {
-					shouldTryNext = true;
-					break;
-				}
-			}
-
-			if (completed || (isLast && !shouldTryNext)) {
-				return;
-			}
-			// continue to next provider
-		} catch (err) {
-			if (signal.aborted) {
-				yield { type: 'error', code: 'cancelled', message: 'Request cancelled', retryable: false };
-				yield { type: 'message_stop', stopReason: 'error' };
-				return;
-			}
-
-			if (!isLast && isFailoverError(err)) {
-				continue;
-			}
-
-			const castErr = err as ErrnoLike;
-			yield {
-				type: 'error',
-				code: castErr.code ?? 'PROVIDER_ERROR',
-				message: castErr.message,
-				retryable: false,
-			};
-			yield { type: 'message_stop', stopReason: 'error' };
-			return;
-		}
-	}
+	yield* new FailoverChain(entries, undefined, undefined, isFailoverError).send(req, signal);
 }
