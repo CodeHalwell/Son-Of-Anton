@@ -2794,7 +2794,7 @@ export class ChatSession {
 		// Allow attachment-only messages: when the user types nothing but has
 		// attached context (e.g. just the current file), we still want to send.
 		const hasAttachments = Array.isArray(message.attachments) && message.attachments.length > 0;
-		const hasMentions = Array.isArray(message.mentions) && message.mentions.length > 0;
+		const hasMentions = (Array.isArray(message.mentions) && message.mentions.length > 0) || (Array.isArray(message.mentionsKinded) && message.mentionsKinded.length > 0);
 		// Image attachments are validated separately so a malformed entry doesn't
 		// silently get embedded in the prompt; sanitisation lives below.
 		const incomingImages: ImageAttachmentPayload[] = Array.isArray(message.images)
@@ -3895,7 +3895,7 @@ export class ChatSession {
 		}
 		if (hasAttachments && attachments) {
 			for (const id of attachments) {
-				const block = this.resolveAttachment(id);
+				const block = await this.resolveAttachment(id);
 				if (block) {
 					sections.push(block);
 				}
@@ -4020,7 +4020,7 @@ export class ChatSession {
 	 * containing the actual content (file body, selection, etc.). Returns
 	 * `undefined` for unknown ids so callers can skip them silently.
 	 */
-	private resolveAttachment(id: string): string | undefined {
+	private async resolveAttachment(id: string): Promise<string | undefined> {
 		const editor = vscode.window.activeTextEditor;
 		switch (id) {
 			case 'current-file': {
@@ -4052,12 +4052,8 @@ export class ChatSession {
 				const content = editor.document.getText(editor.selection);
 				return `**Attached selection** (\`${filename}\` lines ${startLine}-${endLine}):\n\n\`\`\`${language}\n${content}\n\`\`\``;
 			}
-			case 'terminal-output': {
-				// VS Code's stable API doesn't expose terminal scrollback to
-				// extensions, so we surface a graceful hint rather than a
-				// silent no-op. The user can paste the relevant lines manually.
-				return '_(Terminal output capture is not yet supported. Please paste any relevant terminal output into the message manually.)_';
-			}
+			case 'terminal-output':
+				return this.workspaceContext?.resolveTerminalMention() ?? vscode.l10n.t('Terminal context is unavailable. Reload the window and try again.');
 			default:
 				return undefined;
 		}
@@ -4946,14 +4942,14 @@ export class ChatSession {
 							<svg class="settings-section-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1"/><path d="M5 7l2 2-2 2M9 11h3"/></svg>
 							<h4>Terminal</h4>
 						</div>
-						<p class="settings-section-blurb">Tune how much terminal output Anton can read at a time.</p>
+						<p class="settings-section-blurb" data-ui-text="terminalCaptureHelp"></p>
 						<label class="settings-field">
 							<span class="settings-field-label">Output line cap — <span class="settings-slider-value" id="terminalOutputLinesValue">100</span></span>
 							<input class="settings-input settings-slider" type="range" min="20" max="500" step="10" data-setting-number="sota.terminal.outputLineCap" id="settingsTerminalLineCap" />
 						</label>
 						<label class="settings-toggle">
 							<input type="checkbox" data-setting="sota.terminal.shellIntegration" />
-							<span>Shell integration (advisory)</span>
+							<span data-ui-text="captureTerminalOutput"></span>
 						</label>
 					</section>
 

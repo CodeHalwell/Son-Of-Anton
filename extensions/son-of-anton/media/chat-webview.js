@@ -2869,6 +2869,7 @@
 				const chip = document.createElement('span');
 				chip.className = 'context-chip';
 				chip.textContent = ATTACH_LABELS[id] || id;
+				if (id === 'terminal-output') { chip.title = uiText('terminalAttachmentHelp'); }
 				const remove = document.createElement('button');
 				remove.className = 'context-chip-remove';
 				remove.title = 'Remove';
@@ -2937,7 +2938,7 @@
 					displayLabel = '@url ' + trimmed;
 					titleText = mention.url;
 				} else if (mention.kind === 'terminal') {
-					titleText = 'Terminal buffer capture not yet supported \u2014 paste output manually.';
+					titleText = uiText('terminalAttachmentHelp');
 				} else if (mention.path) {
 					chip.dataset.path = mention.path;
 				}

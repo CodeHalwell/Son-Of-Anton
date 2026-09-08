@@ -954,6 +954,7 @@ button {
    when populated with the new structure (a sidebar nav + a content pane). */
 .chat-settings-view-tabbed {
 	display: grid;
+	align-content: start;
 	grid-template-columns: 180px minmax(0, 1fr);
 	gap: var(--sota-pad-loose);
 	padding: var(--sota-pad-loose) 0;

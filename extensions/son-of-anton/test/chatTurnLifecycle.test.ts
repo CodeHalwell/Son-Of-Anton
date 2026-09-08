@@ -18,7 +18,7 @@ interface TestSession {
 	setupMessageHandler(): void;
 	currentModel: ModelId;
 	handleConversationDeleted(id: string): void;
-	handleSendMessage(message: { text: string; conversationId?: string; includeWorkspaceContext?: boolean }): Promise<void>;
+	handleSendMessage(message: { text: string; conversationId?: string; includeWorkspaceContext?: boolean; mentionsKinded?: Array<{ kind: string }> }): Promise<void>;
 	switchConversation(id: string): void;
 	clearConversation(): void;
 	abortInFlight(): void;
@@ -188,6 +188,13 @@ suite('Chat turn ownership', () => {
 		request.release(); await request.done;
 		assert.equal(collected, 0);
 		assert.equal(fixture.conversations.get('first')?.[0]?.content, 'plain question');
+	});
+
+	test('a kinded mention alone dispatches an attachment-only turn', async () => {
+		const fixture = createSession();
+		await fixture.session.handleSendMessage({ text: '', mentionsKinded: [{ kind: 'terminal' }], includeWorkspaceContext: false });
+		assert.equal(fixture.conversations.get('first')?.[0]?.role, 'user');
+		assert.ok(fixture.messages.some(message => message.type === 'requestStarted'));
 	});
 
 	test('context failures end the loading state with a visible error', async () => {

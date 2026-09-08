@@ -143,6 +143,35 @@ test('chat: responsive welcome, provider search, keyboard tabs and composer', as
 	for (const width of [280, 400, 800]) { await page.setViewportSize({ width, height: 900 }); await assertNoPageOverflow(page); }
 });
 
+test('terminal attachments explain capture and terminal settings save real preferences', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	await page.locator('#attachBtn').click();
+	await page.locator('[data-attach="terminal-output"]').click();
+	assert.match(await page.locator('#contextChips .context-chip').getAttribute('title'), /latest command and output/);
+	await page.locator('#sendBtn').click();
+	const sent = await page.evaluate(() => sentMessages.find(message => message.type === 'sendMessage'));
+	assert.deepEqual(sent.attachments, ['terminal-output']);
+	await post(page, { type: 'requestSettled', cancelled: false });
+	await page.getByRole('tab', { name: 'Settings tab', exact: true }).click();
+	await page.locator('#settingsTab-terminal').click();
+	await post(page, { type: 'settingsState', settings: { 'sota.terminal.shellIntegration': true, 'sota.terminal.outputLineCap': 100 } });
+	assert.match(await page.locator('#settingsSubtab-terminal').innerText(), /running commands[\s\S]*16 KiB/);
+	await page.getByRole('checkbox', { name: 'Capture Terminal Output', exact: true }).uncheck();
+	await page.locator('#settingsTerminalLineCap').focus();
+	await page.locator('#settingsTerminalLineCap').press('ArrowRight');
+	const changes = await page.evaluate(() => sentMessages.filter(message => message.type === 'settingChange'));
+	assert.ok(changes.some(message => message.settingId === 'sota.terminal.shellIntegration' && message.value === false));
+	assert.ok(changes.some(message => message.settingId === 'sota.terminal.outputLineCap' && message.value === 110));
+	for (const width of [280, 400, 800]) {
+		await page.setViewportSize({ width, height: 900 });
+		const tabHeights = await page.locator('.settings-subtab').evaluateAll(tabs => tabs.map(tab => tab.getBoundingClientRect().height));
+		assert.ok(tabHeights.every(height => height <= 44), 'Settings tabs should remain compact at every width');
+		await assertNoPageOverflow(page);
+	}
+	await page.setViewportSize({ width: 400, height: 900 });
+	await screenshot(page, 'terminal-capture-settings');
+});
+
 test('chat: batched streaming preserves reading position, text, and composer focus', async t => {
 	const page = await openSurface(t, 'chat', 420);
 	await page.locator('#messageInput').fill('Review this implementation');
