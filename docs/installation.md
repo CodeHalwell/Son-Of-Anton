@@ -35,7 +35,7 @@ Keep the previous installer while evaluating an update. If the application fails
 
 Open [Build and install Son of Anton IDE](https://github.com/CodeHalwell/Son-Of-Anton/actions/workflows/ide-distribution.yml). **Run workflow** builds native macOS arm64, macOS x64, Windows x64 and Linux x64 installers, tests installation and activation, and keeps the verified downloads as Actions artifacts for 14 days.
 
-Select **Create a draft GitHub release** to stage a release after every platform passes. The tag is `ide-v` followed by the root `package.json` version. An `ide-v*` tag push also runs this pipeline. Existing releases are never overwritten, and a tag pointing at another commit is rejected. Review the draft's installation reports and signing status, then publish it to make the downloads visible on the repository's Releases page. Pull requests can build and test artifacts but cannot publish releases.
+Select **Create a draft GitHub release** to stage a release after every platform passes. The tag is `ide-v` followed by the root `package.json` version. A new `ide-v*` tag push also runs this pipeline. Tags that already have a release skip rebuilding, including the tag created when a draft is published. Existing releases are never overwritten, and a tag pointing at another commit is rejected. Review the draft's installation reports and signing status, then publish it to make the downloads visible on the repository's Releases page. Pull requests can build and test artifacts but cannot publish releases.
 
 Configure repository secrets for signed production builds:
 

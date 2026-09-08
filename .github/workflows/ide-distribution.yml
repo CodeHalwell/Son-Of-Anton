@@ -2,7 +2,7 @@ name: Build and install Son of Anton IDE
 
 on:
   push:
-    branches: [main, codex/ide-distribution]
+    branches: [main]
     tags: ['ide-v*']
     paths:
       - 'src/**'
@@ -46,8 +46,43 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
+  prepare:
+    name: Check whether installers need building
+    runs-on: ubuntu-22.04
+    outputs:
+      build: ${{ steps.release.outputs.build }}
+    steps:
+      - name: Skip tags that already have a release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          (async () => {
+            let build = true;
+            if (process.env.GITHUB_REF.startsWith('refs/tags/ide-v')) {
+              const tag = process.env.GITHUB_REF.slice('refs/tags/'.length);
+              const url = new URL(`/repos/${process.env.GITHUB_REPOSITORY}/releases/tags/${encodeURIComponent(tag)}`, process.env.GITHUB_API_URL);
+              const response = await fetch(url, {
+                headers: { Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json' },
+                signal: AbortSignal.timeout(30000)
+              });
+              if (response.status === 200) {
+                build = false;
+                console.log('This tag already has a release. Its existing downloads are preserved.');
+              } else if (response.status !== 404) {
+                throw new Error(`Release lookup failed with HTTP ${response.status}`);
+              }
+            }
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `build=${build}\n`);
+          })().catch(error => { console.error(error); process.exitCode = 1; });
+          NODE
+
   build:
     name: IDE installer (${{ matrix.target }})
+    needs: prepare
+    if: needs.prepare.outputs.build == 'true'
     strategy:
       fail-fast: false
       matrix:
