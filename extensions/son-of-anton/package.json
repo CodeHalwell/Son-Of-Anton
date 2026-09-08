@@ -678,7 +678,7 @@
 					"default": true,
 					"markdownDescription": "Anton occasionally surfaces a dry observation while you work. Fires at most once per editor window, only after recent activity, and never while you're idle."
 				},
-				"sota.personality.antonIsWatching.frequency": {
+				"sota.personality.antonIsWatchingFrequency": {
 					"type": "string",
 					"default": "normal",
 					"enum": [

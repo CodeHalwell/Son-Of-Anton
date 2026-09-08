@@ -69,7 +69,8 @@ try {
 	await cp(path.join(root, 'scripts/ide-install-tests.cjs'), path.join(helper, 'tests.cjs'));
 	const workspace = path.join(directory, 'workspace'); await mkdir(workspace); await writeFile(path.join(workspace, 'README.md'), '# Disposable installation verification\n');
 	const reportPath = path.join(directory, 'result.json');
-	const args = ['--user-data-dir', path.join(directory, 'profile'), '--extensions-dir', path.join(directory, 'extensions'), '--disable-telemetry', '--disable-updates', '--skip-release-notes', '--extensionDevelopmentPath', helper, '--extensionTestsPath', path.join(helper, 'tests.cjs'), workspace];
+	// This credential-free fixture must not open or alter the developer's OS keychain.
+	const args = ['--user-data-dir', path.join(directory, 'profile'), '--extensions-dir', path.join(directory, 'extensions'), '--use-inmemory-secretstorage', '--disable-telemetry', '--disable-updates', '--skip-release-notes', '--extensionDevelopmentPath', helper, '--extensionTestsPath', path.join(helper, 'tests.cjs'), workspace];
 	if (process.platform === 'linux' && process.getuid?.() === 0) { args.push('--no-sandbox'); }
 	if (process.env.SOTA_INSTALL_INSPECT) { args.push('--inspect-brk-extensions=9334'); }
 	await new Promise((resolve, reject) => {

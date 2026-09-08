@@ -36,7 +36,7 @@ suite('Native settings confirmations', () => {
 			await session.handleResetAllSettings();
 			await session.handleMcpServerDelete({ name: 'remove' });
 			if (approve) {
-				assert.ok(updates.includes('personality.antonIsWatching.frequency'));
+				assert.ok(updates.includes('personality.antonIsWatchingFrequency'));
 				assert.ok(updates.every(key => !/apiKey|credentials|secret/i.test(key)));
 				assert.deepEqual(remaining.map(server => server.name), ['keep']);
 			} else {

@@ -2165,8 +2165,8 @@ export class ChatSession {
 			'sota.personality.asciiArt': cfg.get<boolean>('personality.asciiArt', true),
 			'sota.personality.easterEggs': cfg.get<boolean>('personality.easterEggs', true),
 			'sota.personality.antonIsWatching': cfg.get<boolean>('personality.antonIsWatching', true),
-			'sota.personality.antonIsWatching.frequency': cfg.get<string>(
-				'personality.antonIsWatching.frequency',
+			'sota.personality.antonIsWatchingFrequency': cfg.get<string>(
+				'personality.antonIsWatchingFrequency',
 				'normal',
 			),
 			'sota.terminal.shellIntegration': cfg.get<boolean>('terminal.shellIntegration', true),
@@ -2289,7 +2289,7 @@ export class ChatSession {
 			'personality.asciiArt',
 			'personality.easterEggs',
 			'personality.antonIsWatching',
-			'personality.antonIsWatching.frequency',
+			'personality.antonIsWatchingFrequency',
 			'chat.includeWorkspaceContext',
 			'chat.autoApproveSafeOperations',
 			'autoApprove.read',
@@ -4886,7 +4886,7 @@ export class ChatSession {
 						<p class="settings-toggle-example">A periodic dry observation surfaced once per window — never while you're idle.</p>
 						<label class="settings-field" id="settingsAntonIsWatchingFrequencyField">
 							<span class="settings-field-label">Frequency</span>
-							<select class="settings-input" data-setting-select="sota.personality.antonIsWatching.frequency">
+							<select class="settings-input" data-setting-select="sota.personality.antonIsWatchingFrequency">
 								<option value="rare">Rare (2-4 hour window)</option>
 								<option value="normal">Normal (30 min - 4 hour window)</option>
 								<option value="often">Often (10 min - 2 hour window)</option>

@@ -68,7 +68,7 @@ export function pickAntonMessage(rng: () => number = Math.random): string {
  * "Anton is watching" observation either as an animated overlay inside
  * the chat webview (when one is open) or as a plain notification (when
  * none is). Random delay within a window keyed off the
- * `sota.personality.antonIsWatching.frequency` setting.
+ * `sota.personality.antonIsWatchingFrequency` setting.
  *
  * Activity gate: requires at least one `onDidChangeTextDocument` event in
  * the last 5 minutes — so we never fire while the user is away from the
@@ -78,7 +78,7 @@ export function pickAntonMessage(rng: () => number = Math.random): string {
  * Honors three settings:
  *   - `sota.personality.enabled` (master toggle, off => never fires)
  *   - `sota.personality.antonIsWatching` (per-feature toggle)
- *   - `sota.personality.antonIsWatching.frequency` (rare | normal | often)
+ *   - `sota.personality.antonIsWatchingFrequency` (rare | normal | often)
  */
 export class AntonIsWatching implements vscode.Disposable {
 	private readonly disposables: vscode.Disposable[] = [];
@@ -104,7 +104,7 @@ export class AntonIsWatching implements vscode.Disposable {
 			return;
 		}
 		const cfg = vscode.workspace.getConfiguration('sota');
-		const freq = cfg.get<string>('personality.antonIsWatching.frequency', 'normal');
+		const freq = cfg.get<string>('personality.antonIsWatchingFrequency', 'normal');
 		const [minMs, maxMs] = windowForFrequency(freq);
 		const delay = minMs + Math.random() * (maxMs - minMs);
 		if (this.timer) {
