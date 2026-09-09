@@ -37,7 +37,7 @@ export interface DiscoveredProvider {
 	models: DiscoveredModel[];
 	error?: string;
 	truncated?: boolean;
-	/** The entire configured mapping was read successfully; this does not verify management access or inference entitlement. */
+	/** The entire supported configured model inventory was read successfully; this does not verify management access or inference entitlement. */
 	configurationComplete?: boolean;
 }
 export interface ProviderDiscoverySnapshot {
@@ -87,6 +87,8 @@ const providers: ProviderSpec[] = [
 ];
 const storageKey = 'sota.providerDiscovery.v1';
 const ttlMs = 60 * 60 * 1000;
+type ConfiguredInventoryProvider = 'foundry' | 'bedrock' | 'zai';
+function isConfiguredInventoryProvider(id: CatalogProvider): id is ConfiguredInventoryProvider { return id === 'foundry' || id === 'bedrock' || id === 'zai'; }
 
 /** Read-only discovery: no CLI execution, tool enabling, model loading, sign-in or inference requests. */
 export class ProviderDiscovery {
@@ -111,15 +113,15 @@ export class ProviderDiscovery {
 		if (local.length) { this.cachedIncludeLocal = local.some(provider => provider.catalogStatus !== 'disabled'); }
 		// Local mappings are authoritative now, even if a cached discovery snapshot
 		// is still inside its TTL. Never replay removed configured routes on restart.
-		const configured = this.configuredProviders().filter(provider => provider.id === 'foundry' || provider.id === 'bedrock');
+		const configured = this.configuredProviders().filter(provider => isConfiguredInventoryProvider(provider.id));
 		for (const provider of configured) {
 			const retainedIds = new Set(provider.models.map(model => model.id));
-			registerDiscoveredModels(this.previousConfiguredModels(provider.id as 'foundry' | 'bedrock').filter(model => retainedIds.has(model.id)));
+			registerDiscoveredModels(this.previousConfiguredModels(provider.id as ConfiguredInventoryProvider).filter(model => retainedIds.has(model.id)));
 		}
-		this.value = { ...this.value, providers: [...this.value.providers.filter(provider => provider.id !== 'foundry' && provider.id !== 'bedrock'), ...configured] };
+		this.value = { ...this.value, providers: [...this.value.providers.filter(provider => !isConfiguredInventoryProvider(provider.id)), ...configured] };
 		for (const provider of this.value.providers) {
 			const owned = provider.models.filter(model => model.provider === provider.id);
-			if ((provider.id === 'foundry' || provider.id === 'bedrock') && provider.configurationComplete === true) { replaceDiscoveredModels({ provider: provider.id }, owned); }
+			if (isConfiguredInventoryProvider(provider.id) && provider.configurationComplete === true) { replaceDiscoveredModels({ provider: provider.id }, owned); }
 			else { registerDiscoveredModels(owned); }
 		}
 	}
@@ -193,45 +195,57 @@ export class ProviderDiscovery {
 				discovered.push(await this.scanProvider(spec, includeLocal));
 			}
 		}));
-		discovered.push(...this.configuredProviders());
+		// Z.AI's row is scanned above so its credential source can be reported independently.
+		discovered.push(...this.configuredProviders().filter(provider => provider.id !== 'zai'));
 		this.controller.signal.throwIfAborted();
 		this.value = { version: 1, updatedAt: Date.now(), software, providers: discovered.sort((a, b) => a.name.localeCompare(b.name)) };
 		for (const provider of discovered) {
 			// ACP catalogs are owned by session negotiation, never replayed from a
 			// provider snapshot. Failed or bounded HTTP listings are not authoritative.
 			if (provider.id === 'acp' || provider.catalogStatus === 'error') { continue; }
-			if (!provider.truncated && (provider.catalogStatus === 'ready' || ((provider.id === 'foundry' || provider.id === 'bedrock') && provider.configurationComplete === true))) { replaceDiscoveredModels({ provider: provider.id }, provider.models); }
+			if (!provider.truncated && (provider.catalogStatus === 'ready' || (isConfiguredInventoryProvider(provider.id) && provider.configurationComplete === true))) { replaceDiscoveredModels({ provider: provider.id }, provider.models); }
 			else { registerDiscoveredModels(provider.models); }
 		}
 		await this.deps.state?.update(storageKey, this.value);
 		return this.snapshot();
 	}
 
-	private previousConfiguredModels(id: 'foundry' | 'bedrock'): DiscoveredModel[] {
+	private previousConfiguredModels(id: ConfiguredInventoryProvider): DiscoveredModel[] {
 		return (this.value.providers.find(provider => provider.id === id)?.models ?? []).filter(model => {
 			try { return model.provider === id && model.id === discoveredModelId(id, model.model); }
 			catch { return false; }
 		});
 	}
 
+	private configuredInventory(id: ConfiguredInventoryProvider, name: string, setting: string): DiscoveredProvider {
+		let models: DiscoveredModel[] = []; let configurationComplete = false;
+		try {
+			const raw = this.deps.config.get<unknown>(setting);
+			let entries: Array<[string, unknown]>;
+			if (id === 'zai') {
+				if (raw !== undefined && (!Array.isArray(raw) || raw.length > 1000)) { throw new Error('Invalid configured inventory'); }
+				entries = Array.from((raw ?? []) as unknown[], wireId => ['', wireId]);
+			} else {
+				if (raw !== undefined && (typeof raw !== 'string' || raw.length > 1024 * 1024)) { throw new Error('Invalid configured inventory'); }
+				const map: unknown = typeof raw === 'string' && raw.trim() ? JSON.parse(raw) : {};
+				if (!object(map) || Object.keys(map).length > 1000) { throw new Error('Invalid configured inventory'); }
+				entries = Object.entries(map);
+			}
+			for (const [label, wireId] of entries) {
+				if (typeof wireId !== 'string' || !wireId.trim() || wireId.length > 512) { throw new Error('Invalid configured model ID'); }
+				models.push({ id: discoveredModelId(id, wireId), provider: id, model: wireId, label: id === 'zai' ? wireId : `${label} · ${wireId}`, chat: id === 'bedrock' ? wireId.includes('anthropic.claude') : 'unknown', tools: 'unknown', images: 'unknown', fetchedAt: Date.now() });
+			}
+			configurationComplete = true;
+		} catch { models = this.previousConfiguredModels(id); }
+		return { id, name, credentialSource: 'none', configurationComplete, catalogStatus: configurationComplete ? id === 'zai' ? 'catalog-unavailable' : models.length ? 'configuration-only' : 'not-configured' : 'error', inferenceStatus: 'not-tested', models,
+			error: configurationComplete ? undefined : id === 'zai' ? 'Could not read the configured model inventory. Use an array of at most 1000 exact model IDs. Previously discovered models are retained.' : 'Could not read the configured model inventory. Use a JSON object mapping names to model IDs, with at most 1000 entries. Previously discovered models are retained.',
+			catalogScope: id === 'foundry' ? 'Configured deployments only. Account-wide deployment discovery requires Azure management access.' : id === 'bedrock' ? 'Configured invocation IDs only. Account-wide model discovery requires AWS management access and an explicitly configured region/profile.' : 'This provider does not document an account model-list endpoint. Add exact model IDs to sota.zaiModels; API and Coding Plan endpoints have separate entitlements.' };
+	}
+
 	private configuredProviders(): DiscoveredProvider[] {
 		const rows: DiscoveredProvider[] = [];
-		for (const [id, name, setting] of [['foundry', 'Microsoft Foundry / Azure OpenAI', 'foundryDeployments'], ['bedrock', 'Amazon Bedrock', 'bedrockModelMap']] as const) {
-			let models: DiscoveredModel[] = []; let configurationComplete = false;
-			try {
-				const raw = this.deps.config.get<string>(setting);
-				if (raw !== undefined && (typeof raw !== 'string' || raw.length > 1024 * 1024)) { throw new Error('Invalid configured inventory'); }
-				const map: unknown = raw?.trim() ? JSON.parse(raw) : {};
-				if (!object(map) || Object.keys(map).length > 1000) { throw new Error('Invalid configured inventory'); }
-				for (const [label, wireId] of Object.entries(map)) {
-					if (typeof wireId !== 'string' || !wireId.trim() || wireId.length > 512) { throw new Error('Invalid configured model ID'); }
-					models.push({ id: discoveredModelId(id, wireId), provider: id, model: wireId, label: `${label} · ${wireId}`, chat: id === 'bedrock' ? wireId.includes('anthropic.claude') : 'unknown', tools: 'unknown', images: 'unknown', fetchedAt: Date.now() });
-				}
-				configurationComplete = true;
-			} catch { models = this.previousConfiguredModels(id); }
-			rows.push({ id, name, credentialSource: 'none', configurationComplete, catalogStatus: configurationComplete ? models.length ? 'configuration-only' : 'not-configured' : 'error', inferenceStatus: 'not-tested', models,
-				error: configurationComplete ? undefined : 'Could not read the configured model inventory. Use a JSON object mapping names to model IDs, with at most 1000 entries. Previously discovered models are retained.',
-				catalogScope: id === 'foundry' ? 'Configured deployments only. Account-wide deployment discovery requires Azure management access.' : 'Configured invocation IDs only. Account-wide model discovery requires AWS management access and an explicitly configured region/profile.' });
+		for (const [id, name, setting] of [['foundry', 'Microsoft Foundry / Azure OpenAI', 'foundryDeployments'], ['bedrock', 'Amazon Bedrock', 'bedrockModelMap'], ['zai', 'Z.AI / GLM', 'zaiModels']] as const) {
+			rows.push(this.configuredInventory(id, name, setting));
 		}
 		rows.push({ id: 'claude-code', name: 'Claude Code Subscription', credentialSource: 'none', catalogStatus: 'adapter-required', inferenceStatus: 'not-tested', models: [], catalogScope: 'Subscription models are advertised by the configured ACP adapter during a trusted session; Anthropic API access is separate.' });
 		rows.push({ id: 'codex', name: 'Codex Subscription', credentialSource: 'none', catalogStatus: 'adapter-required', inferenceStatus: 'not-tested', models: [], catalogScope: 'Subscription models are advertised by a configured ACP adapter. A Codex sign-in is not an OpenAI API key.' });
@@ -264,16 +278,16 @@ export class ProviderDiscovery {
 	private async scanProvider(spec: ProviderSpec, includeLocal: boolean): Promise<DiscoveredProvider> {
 		const result: DiscoveredProvider = { id: spec.id, name: spec.name, credentialSource: 'none', catalogStatus: 'not-configured', inferenceStatus: 'not-tested', models: [] };
 		if (spec.local && !includeLocal) { result.catalogStatus = 'disabled'; return result; }
+		if (spec.configuredModelsSetting && isConfiguredInventoryProvider(spec.id)) {
+			// Local inventory authority does not depend on API credentials or network access.
+			const configured = this.configuredInventory(spec.id, spec.name, spec.configuredModelsSetting);
+			try { configured.credentialSource = (await this.credential(spec)).source; }
+			catch { configured.error ??= 'Could not read this provider’s credential. Check sign-in before running a request.'; }
+			return configured;
+		}
 		try {
 			const credential = await this.credential(spec);
 			result.credentialSource = credential.source;
-			if (spec.configuredModelsSetting) {
-				const configured = this.deps.config.get<string[]>(spec.configuredModelsSetting, []);
-				result.catalogStatus = 'catalog-unavailable';
-				result.catalogScope = 'This provider does not document an account model-list endpoint. Add exact model IDs to sota.zaiModels; API and Coding Plan endpoints have separate entitlements.';
-				result.models = (Array.isArray(configured) ? configured : []).slice(0, 1000).flatMap(model => { const value = parseModel(spec, { id: model }); return value ? [value] : []; });
-				return result;
-			}
 			if (!credential.value && !spec.local) { return result; }
 			const configured = spec.baseSetting && this.deps.config.get<string>(spec.baseSetting);
 			const base = (typeof configured === 'string' && configured.trim() ? configured.trim() : spec.base).replace(/\/+$/, '');

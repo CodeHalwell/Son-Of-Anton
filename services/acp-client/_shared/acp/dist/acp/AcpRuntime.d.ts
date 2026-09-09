@@ -22,6 +22,11 @@ export interface AcpTurn {
     onUpdate?: (update: AcpUpdate) => void;
     onPermission?: AcpPermissionHandler;
 }
+export interface AcpRecoveryStorageIssue {
+    phase: 'read' | 'before-prompt' | 'after-prompt';
+    code: 'EACCES' | 'EPERM' | 'EROFS' | 'ENOSPC' | 'EDQUOT' | 'unavailable';
+    contextLimited: boolean;
+}
 /** Shared process budget, fair bounded queue, conversation isolation and idle process reuse. */
 export declare class AcpRuntime {
     private readonly workers;
@@ -34,6 +39,7 @@ export declare class AcpRuntime {
     private readonly executions;
     private readonly capabilities;
     private readonly sessionStore?;
+    private readonly onRecoveryStorageIssue;
     private completed;
     private failed;
     private reused;
@@ -45,6 +51,7 @@ export declare class AcpRuntime {
         maxQueue?: number;
         idleTimeoutMs?: number;
         sessionStore?: AcpSessionStore;
+        onRecoveryStorageIssue?: (issue: AcpRecoveryStorageIssue) => void | Promise<void>;
     });
     run(turn: AcpTurn): Promise<AcpPromptResult>;
     snapshot(): {
@@ -63,6 +70,7 @@ export declare class AcpRuntime {
     forgetConversation(conversationId: string): Promise<void>;
     shutdown(): Promise<void>;
     private key;
+    private reportRecoveryStorageIssue;
     private retire;
     private pump;
     private execute;

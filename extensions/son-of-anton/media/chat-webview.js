@@ -3093,7 +3093,7 @@
 		function isCurrentModelUnavailable() {
 			if (!currentModel.startsWith('catalog:') || !providerCatalogSnapshot) return false;
 			const provider = providerCatalogSnapshot.providers.find(entry => entry.id === currentModel.split(':')[1]);
-			const configuredInventory = provider && ['foundry', 'bedrock'].includes(provider.id) && provider.configurationComplete === true && ['configuration-only', 'not-configured'].includes(provider.catalogStatus);
+			const configuredInventory = provider && provider.configurationComplete === true && (provider.id === 'zai' ? provider.catalogStatus === 'catalog-unavailable' : ['foundry', 'bedrock'].includes(provider.id) && ['configuration-only', 'not-configured'].includes(provider.catalogStatus));
 			return Boolean(provider && !provider.truncated && (provider.catalogStatus === 'ready' || configuredInventory) && !provider.models.some(model => model.id === currentModel && model.chat !== false));
 		}
 		function updateModelLabel() {

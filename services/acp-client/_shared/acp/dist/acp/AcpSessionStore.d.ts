@@ -11,7 +11,11 @@ export interface AcpSessionRecord {
 export declare class AcpSessionStore {
     private readonly storage;
     private writes;
+    private readonly pendingRecords;
+    private fallbackEvicted;
     constructor(storage: MementoStore);
+    /** A prolonged outage exhausted the bounded host context; stored records require conservative recovery. */
+    get recoveryContextLimited(): boolean;
     get(key: string): AcpSessionRecord | undefined;
     save(key: string, record: AcpSessionRecord): Promise<void>;
     forgetConversation(conversationId: string): Promise<void>;

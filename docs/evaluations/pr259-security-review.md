@@ -4,6 +4,8 @@ The review addressed CodeQL's model-label property injection finding with `Map` 
 
 The impact classifier now uses separate directory and filename predicates, with path-boundary tests for POSIX and Windows. File checkpoints inspect an opened descriptor before reading, compare its identity with the path before and after bounded reads, reject symlinks, and reject substitutions or growth. CodeQL marked these findings and the model-property injection finding fixed on the PR; analysis of review commit `4baa6856bdf` contained only the two configured-provider flows below.
 
+The later completed analysis of review commit `0df18b9914c` (analysis `1747318169`, merge commit `54d229a5a53adde11bb8c42355c98404e5bfb2f9`) reported zero results without analysis errors or warnings. GitHub marked all five earlier alerts fixed on the PR. The provider-boundary rationale below remains documented; no alert was suppressed or dismissed.
+
 ## Provider catalog network boundary
 
 CodeQL alerts [787](https://github.com/CodeHalwell/Son-Of-Anton/security/code-scanning/787) and [788](https://github.com/CodeHalwell/Son-Of-Anton/security/code-scanning/788) trace the CLI's JSON settings reader into the catalog request URL and authorization header. These are intentional uses of a user's configured provider endpoint and credential. The alerts have not been suppressed or dismissed.

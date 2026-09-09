@@ -68,17 +68,32 @@ export class EditorOverlay {
 	}
 }
 
-/** File-level paths are evidence from native graph traversal, never guessed symbol callers or coverage. */
+/**
+ * Keep one acyclic witness per dependency edge, including alternate routes to an
+ * already discovered file. Query each file once, using its shortest BFS witness;
+ * enumerating every equivalent root path would grow exponentially in diamonds.
+ */
 export function dependencyImpact(engine: CodegraphEngine, target: string, depth: number): { fileBased: true; paths: string[][]; truncated: boolean } {
 	const queue = [[target]], seen = new Set([target]), paths: string[][] = [];
-	while (queue.length && seen.size < 200) {
-		const chain = queue.shift()!;
+	const maxNodes = 200, maxPaths = 1000, maxExaminedEdges = 10_000;
+	let truncated = false, examinedEdges = 0;
+	for (let index = 0; index < queue.length; index++) {
+		const chain = queue[index];
 		if (chain.length > depth) { continue; }
+		const callers = new Set<string>();
 		for (const caller of engine.impactAnalysis(chain[0], 1)) {
-			if (seen.has(caller)) { continue; }
-			seen.add(caller); const next = [caller, ...chain]; paths.push(next); queue.push(next);
-			if (seen.size >= 200) { break; }
+			if (++examinedEdges > maxExaminedEdges) { return { fileBased: true, paths, truncated: true }; }
+			if (callers.has(caller) || chain.includes(caller)) { continue; }
+			callers.add(caller);
+			const discovered = seen.has(caller);
+			if (!discovered && seen.size >= maxNodes) { truncated = true; continue; }
+			if (paths.length >= maxPaths) { return { fileBased: true, paths, truncated: true }; }
+			const next = [caller, ...chain]; paths.push(next);
+			if (!discovered) {
+				seen.add(caller);
+				if (next.length <= depth) { queue.push(next); }
+			}
 		}
 	}
-	return { fileBased: true, paths, truncated: queue.length > 0 && seen.size >= 200 };
+	return { fileBased: true, paths, truncated };
 }

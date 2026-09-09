@@ -1234,21 +1234,21 @@ test('provider catalogs isolate special object keys and retire removed picker me
 	assert.equal(await page.locator('#sendBtn').isDisabled(), false);
 });
 
-test('configured inventories retire removed deployments without treating invalid settings as an empty inventory', async t => {
+test('configured inventories retire removed deployments and Z.AI models without treating invalid settings as an empty inventory', async t => {
 	const page = await openSurface(t, 'chat', 400);
-	for (const provider of ['foundry', 'bedrock']) {
+	for (const provider of ['foundry', 'bedrock', 'zai']) {
 		const model = { id: `catalog:${provider}:deployment`, model: 'deployment', label: `${provider} deployment`, chat: true };
-		const snapshot = (models, state = {}) => ({ updatedAt: Date.now(), software: [], providers: [{ id: provider, name: provider, credentialSource: 'configuration', catalogStatus: 'configuration-only', configurationComplete: true, inferenceStatus: 'not-verified', models, ...state }] });
+		const snapshot = (models, state = {}) => ({ updatedAt: Date.now(), software: [], providers: [{ id: provider, name: provider, credentialSource: 'none', catalogStatus: provider === 'zai' ? 'catalog-unavailable' : 'configuration-only', configurationComplete: true, inferenceStatus: 'not-verified', models, ...state }] });
 		await post(page, { type: 'providerCatalog', snapshot: snapshot([model]) });
 		await post(page, { type: 'loadConversation', conversationId: provider, lastModel: model.id, messages: [] });
 		assert.equal(await page.locator('#unavailableModelNotice').isVisible(), false);
-		for (const state of [{ catalogStatus: 'error', configurationComplete: false }, { configurationComplete: false }, { truncated: true }]) {
+		for (const state of [{ catalogStatus: 'error', configurationComplete: false }, { catalogStatus: 'error', configurationComplete: true }, { catalogStatus: 'disabled' }, { catalogStatus: provider === 'zai' ? 'configuration-only' : 'catalog-unavailable' }, { configurationComplete: false }, { truncated: true }]) {
 			await post(page, { type: 'providerCatalog', snapshot: snapshot([], state) });
 			assert.equal(await page.locator('#sendBtn').isDisabled(), false);
 		}
 		await post(page, { type: 'providerCatalog', snapshot: snapshot([]) });
 		assert.equal(await page.locator('#unavailableModelNotice').isVisible(), true);
-		await post(page, { type: 'providerCatalog', snapshot: snapshot([], { catalogStatus: 'not-configured' }) });
+		await post(page, { type: 'providerCatalog', snapshot: snapshot([], { catalogStatus: provider === 'zai' ? 'catalog-unavailable' : 'not-configured' }) });
 		await page.locator('#messageInput').fill('Keep the selected deployment'); await page.locator('#messageInput').press('Enter');
 		assert.deepEqual({ send: await page.locator('#sendBtn').isDisabled(), queue: await page.locator('#queueMessageBtn').isDisabled(), redirect: await page.locator('#redirectMessageBtn').isDisabled(), requests: await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').length) }, { send: true, queue: true, redirect: true, requests: 0 });
 		assert.match(await page.locator('#modelChip').innerText(), new RegExp(`catalog:${provider}:deployment`));

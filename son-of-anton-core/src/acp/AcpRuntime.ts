@@ -35,6 +35,12 @@ export interface AcpTurn {
 interface Worker { key: string; connection: AcpConnection; busy: boolean; lastUsed: number; ready: boolean }
 interface Job { key: string; turn: AcpTurn; controller: AbortController; finish(error?: Error, result?: AcpPromptResult): void; abort(): void }
 
+export interface AcpRecoveryStorageIssue {
+	phase: 'read' | 'before-prompt' | 'after-prompt';
+	code: 'EACCES' | 'EPERM' | 'EROFS' | 'ENOSPC' | 'EDQUOT' | 'unavailable';
+	contextLimited: boolean;
+}
+
 /** Shared process budget, fair bounded queue, conversation isolation and idle process reuse. */
 export class AcpRuntime {
 	private readonly workers = new Map<string, Worker>();
@@ -47,6 +53,7 @@ export class AcpRuntime {
 	private readonly executions = new Map<Job, Promise<void>>();
 	private readonly capabilities = new Map<string, AcpCapabilities>();
 	private readonly sessionStore?: AcpSessionStore;
+	private readonly onRecoveryStorageIssue: (issue: AcpRecoveryStorageIssue) => void | Promise<void>;
 	private completed = 0;
 	private failed = 0;
 	private reused = 0;
@@ -54,8 +61,9 @@ export class AcpRuntime {
 	readonly maxQueue: number;
 	readonly idleTimeoutMs: number;
 
-	constructor(options: { maxProcesses?: number; maxQueue?: number; idleTimeoutMs?: number; sessionStore?: AcpSessionStore } = {}) {
+	constructor(options: { maxProcesses?: number; maxQueue?: number; idleTimeoutMs?: number; sessionStore?: AcpSessionStore; onRecoveryStorageIssue?: (issue: AcpRecoveryStorageIssue) => void | Promise<void> } = {}) {
 		this.sessionStore = options.sessionStore;
+		this.onRecoveryStorageIssue = options.onRecoveryStorageIssue ?? (issue => console.warn('[acp] Crash recovery storage is unavailable; agent execution can continue.', issue));
 		this.maxProcesses = bounded(options.maxProcesses, 4, 1, 32);
 		this.maxQueue = bounded(options.maxQueue, 32, 1, 256);
 		this.idleTimeoutMs = bounded(options.idleTimeoutMs, 300_000, 1_000, 3_600_000);
@@ -154,6 +162,14 @@ export class AcpRuntime {
 		return JSON.stringify([turn.conversationId, turn.cwd, fingerprint]);
 	}
 
+	private reportRecoveryStorageIssue(phase: AcpRecoveryStorageIssue['phase'], error: unknown): void {
+		// Storage errors may embed paths, transcripts or secrets. Emit no raw error
+		// properties beyond this closed set of diagnostic codes.
+		const rawCode = object(error) ? error.code : undefined;
+		const code = rawCode === 'EACCES' || rawCode === 'EPERM' || rawCode === 'EROFS' || rawCode === 'ENOSPC' || rawCode === 'EDQUOT' ? rawCode : 'unavailable';
+		try { void Promise.resolve(this.onRecoveryStorageIssue({ phase, code, contextLimited: this.sessionStore?.recoveryContextLimited === true })).catch(() => {}); } catch { /* Diagnostics must not fail execution. */ }
+	}
+
 	private retire(worker: Worker): void {
 		if (this.workers.get(worker.key) === worker) { this.workers.delete(worker.key); }
 		const stop = worker.connection.stop();
@@ -227,7 +243,8 @@ export class AcpRuntime {
 		};
 		try {
 			const fresh = !worker.ready;
-			const saved = this.sessionStore?.get(job.key);
+			let saved: AcpSessionRecord | undefined;
+			try { saved = this.sessionStore?.get(job.key); } catch (error) { this.reportRecoveryStorageIssue('read', error); }
 			let resumed = false;
 			if (fresh) {
 				await worker.connection.initialize(job.controller.signal);
@@ -261,7 +278,7 @@ export class AcpRuntime {
 			const context = [job.turn.initialContext, restore].filter(Boolean).join('\n\n');
 			const text = fresh && !resumed && context ? `${context}\n\n${job.turn.text}` : job.turn.text;
 			record = { version: 1, conversationId: job.turn.conversationId, sessionId: worker.connection.remoteSessionId!, state: 'running', transcript: [...(saved?.transcript ?? []), `User: ${job.turn.text}${job.turn.images?.length ? `\n[${job.turn.images.length} image attachment(s); image bytes are not retained in recovery context]` : ''}\nAssistant: [turn interrupted before completion]`], updatedAt: Date.now() };
-			await this.sessionStore?.save(job.key, record);
+			try { await this.sessionStore?.save(job.key, record); } catch (error) { this.reportRecoveryStorageIssue('before-prompt', error); }
 			promptStarted = true;
 			const result = await worker.connection.prompt(text, {
 				images: job.turn.images, signal: job.controller.signal, timeoutMs: 3_600_000,
@@ -299,7 +316,7 @@ export class AcpRuntime {
 		} finally {
 			if (record && promptStarted) {
 				record.transcript[record.transcript.length - 1] = `User: ${job.turn.text}${job.turn.images?.length ? `\n[${job.turn.images.length} image attachment(s); reattach if needed]` : ''}\nAssistant: ${response}\nTurn: ${record.state}${toolStates.size ? `\nReported tools (never replay): ${[...toolStates.values()].join('; ')}` : ''}`;
-				try { await this.sessionStore?.save(job.key, record); } catch { /* The pre-prompt running record remains conservative recovery evidence. */ }
+				try { await this.sessionStore?.save(job.key, record); } catch (error) { this.reportRecoveryStorageIssue('after-prompt', error); }
 			}
 			worker.busy = false; worker.lastUsed = Date.now(); this.active.delete(job);
 			job.finish(failure, completedResult);
