@@ -139,10 +139,33 @@ class AcpConnection {
     }
     async selectModel(models, signal) {
         this.modelsAdvertised = Array.isArray(models);
-        this.modelsTruncated = Array.isArray(models) && models.length > 500;
-        this.availableModels = Array.isArray(models) ? models.filter(model => (0, protocol_1.object)(model) && (0, protocol_1.isValidAcpModelId)(model.modelId) && typeof model.name === 'string').slice(0, 500).map(model => ({ id: model.modelId, name: model.name.slice(0, 200) })) : [];
+        this.modelsTruncated = false;
+        this.availableModels = [];
+        const exposed = new Set();
+        let selectedAdvertised = false;
+        if (Array.isArray(models)) {
+            for (const model of models) {
+                if (!(0, protocol_1.object)(model) || !(0, protocol_1.isValidAcpModelId)(model.modelId) || typeof model.name !== 'string') {
+                    continue;
+                }
+                // Selection uses the complete validated advertisement. Only the
+                // discovery/UI inventory and its deduplication set are capped.
+                if (model.modelId === this.definition.modelId) {
+                    selectedAdvertised = true;
+                }
+                if (exposed.has(model.modelId)) {
+                    continue;
+                }
+                if (this.availableModels.length >= 500) {
+                    this.modelsTruncated = true;
+                    continue;
+                }
+                exposed.add(model.modelId);
+                this.availableModels.push({ id: model.modelId, name: model.name.slice(0, 200) });
+            }
+        }
         if (this.definition.modelId) {
-            if (!this.availableModels.some(model => model.id === this.definition.modelId)) {
+            if (!selectedAdvertised) {
                 throw new Error('The ACP adapter does not advertise the selected model. Refresh its catalog or choose another model.');
             }
             await this.peer.request('session/set_model', { sessionId: this.sessionId, modelId: this.definition.modelId }, { signal });

@@ -2,7 +2,7 @@
 const readline = require('node:readline');
 const fs = require('node:fs');
 const send = value => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\n');
-const availableModels = process.env.FIXTURE_MODEL_IDS
+const availableModels = process.env.FIXTURE_MODEL_ROWS_FILE ? JSON.parse(fs.readFileSync(process.env.FIXTURE_MODEL_ROWS_FILE, 'utf8')) : process.env.FIXTURE_MODEL_IDS
 	? JSON.parse(process.env.FIXTURE_MODEL_IDS).map(modelId => ({ modelId, name: 'Custom fixture' }))
 	: process.env.FIXTURE_MODELS ? [{ modelId: 'fixture-fast', name: 'Fast fixture' }, { modelId: 'fixture-deep', name: 'Deep fixture' }] : undefined;
 const models = availableModels ? { models: { availableModels } } : {};
