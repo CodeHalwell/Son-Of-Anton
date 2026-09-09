@@ -207,7 +207,8 @@ export class AgentBridge {
 	 * Run the orchestrator end-to-end for `userMessage`. Streams orchestrator
 	 * progress as `token` events (the markdown shim) and structured
 	 * plan/subtask events through the dedicated `structuredEmit` channel.
-	 * Concludes with a `final` event carrying the accumulated text.
+	 * Concludes with `final` on success or `error` on failure. Cancellation
+	 * does not emit a successful terminal event.
 	 */
 	async runOrchestrator(
 		userMessage: string,
@@ -216,7 +217,10 @@ export class AgentBridge {
 		opts?: RunOrchestratorOptions,
 	): Promise<void> {
 		const conversationId = opts?.conversationId;
+		let failed = false;
 		const tappedEmit = (event: AgentEvent): void => {
+			if (failed || cancellation.isCancellationRequested) { return; }
+			if (event.type === 'error') { failed = true; }
 			emit(event);
 			this._onDidEmitEvent.fire({ conversationId, event });
 		};
@@ -261,7 +265,7 @@ export class AgentBridge {
 
 	/**
 	 * Drive a one-off `/approve` cycle against the orchestrator's most
-	 * recently-proposed plan, without going through `runOrchestrator`. Used
+	 * recently-proposed plan. Used
 	 * by the task board's "drag from Ready -> In Progress" affordance — the
 	 * board is just a UI layer over the existing approval flow, but
 	 * dispatching from the board shouldn't replay the user's natural-
@@ -272,30 +276,7 @@ export class AgentBridge {
 		emit: (event: AgentEvent) => void,
 		cancellation: vscode.CancellationToken,
 	): Promise<void> {
-		const tappedEmit = (event: AgentEvent): void => {
-			emit(event);
-			this._onDidEmitEvent.fire({ conversationId, event });
-		};
-		if (!await this.ensureWorkspaceTrust()) {
-			tappedEmit({ type: 'error', message: 'Trust required to run agents in this workspace.' });
-			return;
-		}
-		const stream = createShimResponseStream(tappedEmit);
-		const request = createShimChatRequest('', 'approve');
-		const chatContext = createShimChatContext();
-		try {
-			await this.stack.orchestrator.handleChatRequest(
-				request,
-				chatContext,
-				stream,
-				cancellation,
-				tappedEmit,
-			);
-			tappedEmit({ type: 'final', text: stream.getBuffer() });
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			tappedEmit({ type: 'error', message });
-		}
+		await this.runOrchestrator('', emit, cancellation, { command: 'approve', conversationId });
 	}
 
 	/**

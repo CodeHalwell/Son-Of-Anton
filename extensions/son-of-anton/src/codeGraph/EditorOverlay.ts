@@ -8,6 +8,7 @@ import type { McpClient } from 'son-of-anton-core/mcp/McpClient';
 import type { CodeGraphBackend } from './CodeGraphBackend';
 
 interface DocumentOverlay { path: string; version: number; language: string; text: string; outlineAvailable: boolean; symbols: { name: string; kind: string; start: number; end: number }[] }
+type OutlineSymbol = vscode.DocumentSymbol | vscode.SymbolInformation;
 const SUPPORTED_LANGUAGES = new Set(['javascript', 'javascriptreact', 'typescript', 'typescriptreact', 'python', 'rust', 'go', 'java', 'c', 'cpp', 'csharp', 'ruby', 'php', 'swift', 'kotlin', 'scala', 'vue', 'svelte']);
 
 /** Synchronize dirty editor buffers to the already-running bundled graph; no unsaved content is persisted. */
@@ -34,25 +35,34 @@ export function registerEditorOverlay(context: vscode.ExtensionContext, client: 
 			if (generation !== revision || disposed) { return; }
 			const version = document.version, text = document.getText();
 			let timeout: ReturnType<typeof setTimeout> | undefined;
-			let provided: vscode.DocumentSymbol[] | undefined;
+			let provided: OutlineSymbol[] | undefined;
 			try {
 				provided = await Promise.race([
-					vscode.commands.executeCommand<vscode.DocumentSymbol[]>('vscode.executeDocumentSymbolProvider', document.uri),
+					vscode.commands.executeCommand<OutlineSymbol[]>('vscode.executeDocumentSymbolProvider', document.uri),
 					new Promise<undefined>(resolve => { timeout = setTimeout(() => resolve(undefined), 1500); }),
 				]);
 			} catch { /* Text matching remains available when a language server has no outline. */ }
 			finally { if (timeout) { clearTimeout(timeout); } }
 			if (generation !== revision || document.version !== version || !document.isDirty || document.isClosed || disposed) { return; }
 			const symbols: DocumentOverlay['symbols'] = [];
-			const visit = (entries: vscode.DocumentSymbol[]): void => {
+			const visit = (entries: OutlineSymbol[]): void => {
 				for (const symbol of entries) {
-					if (symbols.length >= 1000 || !symbol.range) { break; }
-					symbols.push({ name: symbol.name, kind: vscode.SymbolKind[symbol.kind] ?? String(symbol.kind), start: Buffer.byteLength(text.slice(0, document.offsetAt(symbol.range.start))), end: Buffer.byteLength(text.slice(0, document.offsetAt(symbol.range.end))) });
-					if (symbol.children?.length) { visit(symbol.children); }
+					if (symbols.length >= 1000) { break; }
+					if (!symbol || typeof symbol !== 'object') { continue; }
+					// The command may return flat SymbolInformation, DocumentSymbol, or hybrid objects with children.
+					const location = 'location' in symbol ? symbol.location : undefined;
+					const range = ('range' in symbol ? symbol.range : undefined) ?? location?.range;
+					if (range?.start && range.end && (!location || location.uri?.toString() === document.uri.toString())) {
+						const start = document.offsetAt(range.start), end = document.offsetAt(range.end);
+						if (start <= end) {
+							symbols.push({ name: symbol.name, kind: vscode.SymbolKind[symbol.kind] ?? String(symbol.kind), start: Buffer.byteLength(text.slice(0, start)), end: Buffer.byteLength(text.slice(0, end)) });
+						}
+					}
+					if ('children' in symbol && Array.isArray(symbol.children)) { visit(symbol.children); }
 				}
 			};
 			if (Array.isArray(provided)) { visit(provided); }
-			snapshots.push({ path: document.uri.fsPath, version, language: document.languageId, text, symbols, outlineAvailable: Array.isArray(provided) });
+			snapshots.push({ path: document.uri.fsPath, version, language: document.languageId, text, symbols, outlineAvailable: Array.isArray(provided) && (provided.length === 0 || symbols.length > 0) });
 		}
 		if (generation !== revision || disposed) { return; }
 		const sent = await client.notifyServer('code-graph', 'notifications/son-of-anton/editor-overlay', { workspace: root, revision: generation, documents: snapshots }, command);

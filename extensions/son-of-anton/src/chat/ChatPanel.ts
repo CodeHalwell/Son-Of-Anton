@@ -3784,6 +3784,7 @@ export class ChatSession {
 		let finalText: string | undefined;
 		let errorText: string | undefined;
 		let spendCapAborted = false;
+		const orchestratorRoute = specialistId === 'anton' || approveOverride || rejectOverride;
 		const emit = (event: AgentEvent): void => {
 			if (!this.ownsTurn(owner) || controller.signal.aborted) return;
 			this.handleAgentEvent(event);
@@ -3825,7 +3826,7 @@ export class ChatSession {
 			// owns the active plan, and the `command='approve' | 'reject'`
 			// branches skip the orchestrator's message-as-prompt handling and
 			// act on the queued plan directly.
-			if (specialistId === 'anton' || approveOverride || rejectOverride) {
+			if (orchestratorRoute) {
 				// Forward the composer's model pick onto the orchestrator so the
 				// orchestrator's planning LLM call routes through the user's
 				// chosen provider. Without this the orchestrator silently
@@ -3843,7 +3844,7 @@ export class ChatSession {
 			}
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
-			if (!controller.signal.aborted) post({ type: 'streamError', error: message });
+			if (!controller.signal.aborted) errorText = message;
 		} finally {
 			cancellationSource.dispose();
 			controller.signal.removeEventListener('abort', cancel);
@@ -3858,7 +3859,7 @@ export class ChatSession {
 		// Token usage telemetry is currently captured per-LLM-call inside the
 		// agent stack; we publish the cumulative LlmClient counters here so the
 		// status bar at the bottom of the chat reflects the full session.
-		const acpRoute = model.startsWith('catalog:acp:') || (this.agentBridge?.getCapabilities?.(specialistId, model).transport === 'acp') || (!model.startsWith('catalog:') && (this.agentBridge?.isAcpAgent?.(specialistId) ?? false));
+		const acpRoute = !orchestratorRoute && (model.startsWith('catalog:acp:') || (this.agentBridge?.getCapabilities?.(specialistId, model).transport === 'acp') || (!model.startsWith('catalog:') && (this.agentBridge?.isAcpAgent?.(specialistId) ?? false)));
 		const unmetered = acpRoute || this.turnUsageUnavailable(model);
 		const usage = this.llmClient.getTokenUsage();
 		const cost = this.estimatedSessionCost(model);
@@ -3894,12 +3895,13 @@ export class ChatSession {
 		// multiple turns even when no `CostReporter` is wired in.
 		this.recordSessionTurn(turnInputDelta + turnOutputDelta, turnCostDelta, unmetered);
 
-		const persisted = (finalText && finalText.length > 0) ? finalText : assembled;
+		const persisted = ((finalText && finalText.length > 0) ? finalText : assembled)
+			|| (errorText ? vscode.l10n.t('Error: {0}', errorText) : '');
 		if (persisted) {
 			this.conversation.push({
 				role: 'assistant',
 				content: persisted,
-				execution: { route: acpRoute ? 'acp' : specialistId === 'anton' ? 'orchestrator' : 'native', outcome: owner.failed ? 'failed' : controller.signal.aborted ? 'cancelled' : 'completed', latencyMs: Date.now() - this.streamStartedAt, inputTokens: unmetered ? undefined : turnInputDelta, outputTokens: unmetered ? undefined : turnOutputDelta, estimatedCostUsd: unmetered || MODEL_METADATA[model]?.pricingStatus === 'unknown' ? undefined : turnCostDelta },
+				execution: { route: acpRoute ? 'acp' : orchestratorRoute ? 'orchestrator' : 'native', outcome: owner.failed ? 'failed' : controller.signal.aborted ? 'cancelled' : 'completed', latencyMs: Date.now() - this.streamStartedAt, inputTokens: unmetered ? undefined : turnInputDelta, outputTokens: unmetered ? undefined : turnOutputDelta, estimatedCostUsd: unmetered || MODEL_METADATA[model]?.pricingStatus === 'unknown' ? undefined : turnCostDelta },
 				usageUnavailable: unmetered,
 				specialistId,
 				model,

@@ -8,6 +8,14 @@ import { ChatTurnQueue } from '../src/chat/ChatTurnQueue';
 import { ChatSession, type ChatMessage } from '../src/chat/ChatPanel';
 import type { LlmStreamEvent, ModelId } from 'son-of-anton-core/llm/LlmClient';
 import type { AgentEvent } from '../src/chat/agentEvents';
+import { AgentBridge } from '../src/chat/AgentBridge';
+import { OrchestratorAgent } from 'son-of-anton-core/agents/OrchestratorAgent';
+import { AgentManager } from 'son-of-anton-core/agents/AgentManager';
+import { MetricsTracker } from 'son-of-anton-core/agents/MetricsTracker';
+import { ProjectMemory } from 'son-of-anton-core/agents/ProjectMemory';
+import type { AgentStack } from 'son-of-anton-core/agents/AgentStackFactory';
+import type { ConversationStore } from '../src/chat/ConversationStore';
+import { registerResponseFeedback } from '../src/chat/ResponseFeedback';
 
 function deferred() {
 	let resolve!: () => void;
@@ -71,7 +79,16 @@ function createSession() {
 		return { done: session.handleSendMessage({ text, ...extra }), ready: ready.promise, release: release.resolve, emit: (event: AgentEvent) => emitters.get(text)?.(event) };
 	}
 	session.setupMessageHandler();
-	return { session, messages, conversations, models, receive: (message: Parameters<typeof receive>[0]) => receive(message), send };
+	return { session, messages, conversations, models, store, receive: (message: Parameters<typeof receive>[0]) => receive(message), send };
+}
+
+function realOrchestratorBridge(run: (emit?: (text: string) => void) => Promise<void>) {
+	const manager = new AgentManager(null as never);
+	const orchestrator = new OrchestratorAgent({ handle: 'anton', displayName: 'Anton', description: 'Test', defaultModel: 'sonnet', maxRetries: 1, slashCommands: [] }, null as never, null as never, manager, new MetricsTracker(), new ProjectMemory());
+	Object.assign(orchestrator, { appendQuote() {}, gatherGraphContext: async () => '', callLlm: async (_task: string, _model: string, _system: string, _prompt: string, emit?: (text: string) => void) => { await run(emit); return { text: '', tokenUsage: { inputTokens: 0, outputTokens: 0, cachedTokens: 0, naiveInputTokens: 0 } }; } });
+	const bridge = new AgentBridge({ orchestrator, specialists: new Map() } as unknown as AgentStack);
+	const events: AgentEvent[] = []; bridge.onDidEmitEvent(({ event }) => events.push(event));
+	return { bridge, events };
 }
 
 async function withNativeSession(
@@ -102,6 +119,55 @@ async function* requestNativeTool(name: string): AsyncGenerator<LlmStreamEvent> 
 }
 
 suite('Chat turn ownership', () => {
+	test('approval and rejection record orchestrator execution even with an ACP specialist selected', async () => {
+		for (const command of ['approve', 'reject']) {
+			const f = createSession(); let dispatched: string | undefined;
+			Object.assign(f.session, { currentSpecialistId: 'anton-code', currentModel: 'claude-code-opus', agentBridge: {
+				hasAgent: () => true, getCapabilities: () => ({ transport: 'acp' }),
+				runOrchestrator: async (_prompt: string, emit: (event: AgentEvent) => void, _token: vscode.CancellationToken, options: { command?: string }) => { dispatched = options.command; emit({ type: 'token', token: 'Plan handled' }); emit({ type: 'final', text: 'Plan handled' }); },
+			} });
+			await f.session.handleSendMessage({ text: `/${command}`, includeWorkspaceContext: false });
+			assert.deepEqual({ dispatched, route: f.conversations.get('first')?.at(-1)?.execution?.route }, { dispatched: command, route: 'orchestrator' });
+		}
+	});
+
+	test('real orchestration failures remain failed through bridge, persistence and evaluation export', async () => {
+		for (const scenario of [{ mode: 'act', partial: '' }, { mode: 'act', partial: 'Useful partial response' }, { mode: 'plan', partial: '' }] as const) {
+			const f = createSession(); const runtime = realOrchestratorBridge(async emit => { if (scenario.partial) { emit?.(scenario.partial); } throw new Error('Provider unavailable'); });
+			Object.assign(f.session, { agentBridge: runtime.bridge, currentMode: scenario.mode });
+			let exportCommand!: () => Promise<void>; let exported = '';
+			const originals = { register: vscode.commands.registerCommand, open: vscode.workspace.openTextDocument, show: vscode.window.showTextDocument };
+			try {
+				await f.session.handleSendMessage({ text: 'hello', includeWorkspaceContext: false });
+				const response = f.conversations.get('first')?.at(-1);
+				assert.deepEqual({ role: response?.role, outcome: response?.execution?.outcome, route: response?.execution?.route, terminal: runtime.events.filter(event => event.type === 'error' || event.type === 'final'), errors: f.messages.filter(message => message.type === 'streamError').map(message => message.error), completed: f.messages.some(message => message.type === 'messageComplete') }, { role: 'assistant', outcome: 'failed', route: 'orchestrator', terminal: [{ type: 'error', message: 'Provider unavailable' }], errors: ['Provider unavailable'], completed: false });
+				assert.equal(response?.content, scenario.partial || (scenario.mode === 'plan' ? '**Analyzing request and querying code graph...**\n\n' : 'Error: Provider unavailable'));
+				response!.feedback = 'down';
+				Object.assign(vscode.commands, { registerCommand: (_id: string, handler: typeof exportCommand) => { exportCommand = handler; return { dispose() {} }; } });
+				Object.assign(vscode.workspace, { openTextDocument: async (options: { content: string }) => { exported = options.content; return {}; } });
+				Object.assign(vscode.window, { showTextDocument: async () => {} });
+				registerResponseFeedback({ subscriptions: [] } as unknown as vscode.ExtensionContext, f.store as unknown as ConversationStore);
+				await exportCommand();
+				const report = JSON.parse(exported);
+				assert.deepEqual({ outcomes: report.outcomes, execution: report.examples[0].execution.outcome }, { outcomes: { completed: 0, cancelled: 0, failed: 1, unrecorded: 0 }, execution: 'failed' });
+			} finally {
+				runtime.bridge.dispose();
+				Object.assign(vscode.commands, { registerCommand: originals.register }); Object.assign(vscode.workspace, { openTextDocument: originals.open }); Object.assign(vscode.window, { showTextDocument: originals.show });
+			}
+		}
+	});
+
+	test('real orchestration cancellation retains a cancelled partial answer with no error or final event', async () => {
+		const f = createSession(); const started = deferred(); const release = deferred();
+		const runtime = realOrchestratorBridge(async emit => { emit?.('Partial answer'); started.resolve(); await release.promise; throw new DOMException('Aborted', 'AbortError'); });
+		Object.assign(f.session, { agentBridge: runtime.bridge });
+		try {
+			const pending = f.session.handleSendMessage({ text: 'hello', includeWorkspaceContext: false }); await started.promise; f.session.abortInFlight(); release.resolve(); await pending;
+			const response = f.conversations.get('first')?.at(-1);
+			assert.deepEqual({ content: response?.content, outcome: response?.execution?.outcome, terminal: runtime.events.filter(event => event.type === 'error' || event.type === 'final'), errors: f.messages.filter(message => message.type === 'streamError'), completed: f.messages.some(message => message.type === 'messageComplete') }, { content: 'Partial answer', outcome: 'cancelled', terminal: [], errors: [], completed: false });
+		} finally { release.resolve(); runtime.bridge.dispose(); }
+	});
+
 	test('native zero-tool budget rejects provider-requested tools before execution or approval', async () => {
 		await withNativeSession({ 'agents.maxToolCalls': 0 }, () => requestNativeTool('write_file'), async fixture => {
 			await fixture.session.handleSendMessage({ text: 'Request a write', includeWorkspaceContext: false });
