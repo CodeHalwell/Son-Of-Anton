@@ -10,7 +10,7 @@ The subsequent analysis of `2e7de85d5bf` (analysis `1747912351`, merge `4e1b074d
 
 Analysis `1748197929` of review commit `0c64c36550b` (merge `5130a252e4b229f3caea9be94d60bba599c941b5`) confirmed those corrections with zero results and no analysis errors or warnings. All nine prior PR alerts are marked fixed.
 
-The later analysis `1748949827` of review commit `5f45144eb12` (merge `cae67cefdb2c9eca03b13f33a018a4b3802d3e0e`, completed September 9, 2026) also reported zero results with no errors or warnings. The merge parents were verified against that exact PR revision and main; all nine alerts remained fixed.
+The later analysis `1749156061` of review commit `9dd0e693fd2` (merge `7209fe4440d51b53e473534d0d5c680e816cc8cb`, completed September 9, 2026) also reported zero results with no errors or warnings. The merge parents were verified against that exact PR revision and main; all nine alerts remained fixed.
 
 ## Provider catalog network boundary
 

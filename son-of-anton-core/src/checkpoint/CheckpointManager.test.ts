@@ -10,6 +10,7 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { CheckpointIndexStorage } from './CheckpointIndexStorage';
 import { CheckpointManager, type Checkpoint } from './CheckpointManager';
 import { FileSnapshotStore, type FileSnapshot } from './FileSnapshotStore';
 import type { ConfigStore, MementoStore } from '../host';
@@ -25,12 +26,15 @@ async function captureFailureFixture(t: import('node:test').TestContext) {
 	const values = new Map<string, unknown>();
 	const faults: { beforeWrite?: (checkpoints: Checkpoint[]) => Promise<void>; warn?: (message: string) => void } = {};
 	const warnings: string[] = [];
-	const state: MementoStore = { get: <T>(key: string, fallback?: T) => (values.get(key) ?? fallback) as T, update: async (key, value) => { await faults.beforeWrite?.(value as Checkpoint[]); values.set(key, value); } };
+	const state: MementoStore = { get: <T>(key: string, fallback?: T) => (values.get(key) ?? fallback) as T, update: async (key, value) => { values.set(key, value); } };
 	const config: ConfigStore = { get: <T>(key: string, fallback?: T) => (key === 'checkpoints.maxCount' ? 1 : fallback) as T };
 	const manager = new CheckpointManager({ load: () => ({ messages: [], summary: {} }), update() {} }, state, {
 		storageRoot: join(directory, 'storage'), getWorkspaceRoot: () => root, config, confirmRestore: async () => true,
 		notifier: { info() {}, warn: message => { warnings.push(message); faults.warn?.(message); }, error: message => assert.fail(message) },
 	});
+	const index = (manager as unknown as { indexStore(): CheckpointIndexStorage }).indexStore() as unknown as { write(value: { checkpoints: Checkpoint[] }): Promise<void> };
+	const write = index.write.bind(index); index.write = async value => { await faults.beforeWrite?.(value.checkpoints); await write(value); };
+
 	t.after(() => manager.dispose());
 	return { manager, faults, warnings, root, state, config, directory };
 }
@@ -165,8 +169,9 @@ test('checkpoint capture and history use one index when Windows host path casing
 	assert.equal(manager.get(checkpoint.id)?.id, checkpoint.id);
 	await manager.attachToBranch(checkpoint.id, 'branch');
 	assert.equal(manager.list('branch')[0]?.id, checkpoint.id);
-	const persistedKeys = [...values.keys()];
-	assert.equal(persistedKeys.length, 1);
+	const indexFolders = await fs.readdir(join(directory, 'storage', 'index-v1'));
+	assert.deepEqual(indexFolders, [createHash('sha256').update(canonicalRoot).digest('hex')]);
+	assert.equal(values.size, 0, 'new checkpoints never write the per-window legacy index');
 	// Opening the same workspace with either spelling retains the existing history.
 	const reopened = new CheckpointManager(conversations, state, host); t.after(() => reopened.dispose());
 	for (workspaceRoot of [canonicalRoot, hostRoot]) {
@@ -177,7 +182,8 @@ test('checkpoint capture and history use one index when Windows host path casing
 	await reopened.restore(checkpoint.id, { conversationToo: false, conversationId: 'branch' });
 	assert.equal(await fs.readFile(join(root, 'file'), 'utf8'), 'one');
 	assert.equal(reopened.listAll().length, 2);
-	assert.deepEqual([...values.keys()], persistedKeys);
+	assert.deepEqual(await fs.readdir(join(directory, 'storage', 'index-v1')), indexFolders);
+	assert.equal(values.size, 0);
 });
 
 
@@ -291,4 +297,15 @@ test('failed Git restore indexing preserves staged and working files, HEAD and s
 	await manager.restore(target.id, { conversationToo: false }); const recovery = manager.list('parent').find(checkpoint => checkpoint.id !== target.id); assert.ok(recovery?.snapshot);
 	assert.equal(git('rev-parse', 'HEAD'), before.head); assert.equal(git('stash', 'list'), before.stash); git('gc', '--prune=now');
 	await manager.restore(recovery.id, { conversationToo: false }); assert.deepEqual(await inspect(), before);
+});
+
+
+test('failed Git capture index commits release only the new retained ref', async t => {
+	const { manager, faults, root } = await captureFailureFixture(t);
+	const git = (...args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+	git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.invalid'); git('add', '.'); git('commit', '-qm', 'initial');
+	const retained = await manager.capture('original', 0, 'keep'); assert.ok(retained?.snapshot); const refs = git('for-each-ref', '--format=%(refname)', 'refs/son-of-anton/checkpoints/');
+	faults.beforeWrite = async () => { throw new Error('index unavailable'); };
+	for (let attempt = 0; attempt < 2; attempt++) { await assert.rejects(manager.capture('failed', 0, 'discard'), /index unavailable/); assert.equal(git('for-each-ref', '--format=%(refname)', 'refs/son-of-anton/checkpoints/'), refs); }
+	assert.equal(manager.get(retained.id)?.snapshot?.ref, retained.snapshot.ref);
 });

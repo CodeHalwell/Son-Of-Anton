@@ -1520,3 +1520,22 @@ test('active turn reload rebinds saved rows and stale host acceptance cannot rep
 	await page.locator('.msg-assistant').last().getByRole('button', { name: 'Mark Response as Helpful', exact: true }).click();
 	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'feedback', conversationId: identity.conversationId, messageIndex: 3, responseId: 'local-reference', value: 'up' });
 });
+
+test('checkpoint snapshots clear unavailable controls and ignore resets from other conversations', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	await post(page, { type: 'loadConversation', conversationId: 'checkpoint-current', messages: [{ role: 'user', content: 'Keep this history', timestamp: 1 }] });
+	const checkpoint = { checkpointId: 'retained-checkpoint', turnIndex: 0, capturedAt: Date.now(), summary: 'Before change' };
+	await post(page, { type: 'checkpointsLoaded', conversationId: 'checkpoint-current', reset: true, checkpoints: [checkpoint] });
+	assert.equal(await page.locator('.checkpoint-stripe').count(), 1);
+	await page.locator('.checkpoint-stripe-label').click(); assert.equal(await page.locator('.checkpoint-stripe-popover').isVisible(), true);
+	await post(page, { type: 'checkpointsLoaded', conversationId: 'old-conversation', reset: true, checkpoints: [] });
+	await post(page, { type: 'checkpointsLoaded', reset: true, checkpoints: [] });
+	assert.equal(await page.locator('.checkpoint-stripe').count(), 1);
+	await post(page, { type: 'checkpointsLoaded', conversationId: 'checkpoint-current', reset: true, checkpoints: [] });
+	assert.equal(await page.locator('.checkpoint-stripe').count(), 0); assert.equal(await page.locator('.checkpoint-stripe-popover').isVisible(), false);
+	assert.match(await page.locator('.msg-user').innerText(), /Keep this history/);
+	await post(page, { type: 'checkpointsLoaded', conversationId: 'checkpoint-current', reset: true, checkpoints: [checkpoint] });
+	await page.locator('.checkpoint-stripe-label').click(); await page.locator('.checkpoint-stripe-popover [data-action="restoreWorkspace"]').click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'checkpointRestoreWorkspace', checkpointId: checkpoint.checkpointId });
+	await assertNoPageOverflow(page);
+});

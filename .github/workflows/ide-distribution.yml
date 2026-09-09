@@ -183,7 +183,7 @@ jobs:
           node --test scripts/test/ide-release.test.mjs scripts/test/ide-package.test.mjs
       - name: Shared history and provider boundary regressions
         working-directory: extensions/son-of-anton
-        run: npm test -- --grep '^(Chat transcript write ownership|Conversation revision compare-and-swap|Conversation branch failure recovery|Provider Finder configuration boundary) ' --fail-zero
+        run: npm test -- --grep '^(Chat transcript write ownership|Conversation revision compare-and-swap|Conversation branch failure recovery|Provider Finder configuration boundary|Conversation history activation|Chat checkpoint index recovery) ' --fail-zero
       - name: Graph watcher regressions
         run: node --test services/code-graph/mcp-server/test/incremental.test.mjs
       - name: Build native code graph

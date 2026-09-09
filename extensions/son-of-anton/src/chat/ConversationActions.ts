@@ -64,7 +64,11 @@ export class ConversationActions {
 			index = (await vscode.window.showQuickPick(choices, { title: vscode.l10n.t('Branch Conversation'), placeHolder: vscode.l10n.t('Choose the last message to include. Files will stay in their current state.') }))?.messageIndex;
 		}
 		if (index === undefined) { return undefined; }
-		const checkpointId = this.retainCheckpoint && this.dropCheckpoint ? this.checkpointAt?.(record.summary.id, index + 1) : undefined;
+		let checkpointId: string | undefined;
+		if (this.retainCheckpoint && this.dropCheckpoint) {
+			try { checkpointId = this.checkpointAt?.(record.summary.id, index + 1); }
+			catch (error) { console.warn('[chat] branch checkpoint unavailable:', error); }
+		}
 		const branch = this.store.branch(record.summary.id, index, { checkpointId, workspaceState: checkpointId ? 'checkpoint-available' : 'unlinked' });
 		if (branch) {
 			try {

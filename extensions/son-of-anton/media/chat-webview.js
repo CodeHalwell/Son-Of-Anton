@@ -4642,7 +4642,13 @@
 					}
 					break;
 				case 'checkpointsLoaded':
+					if ((message.reset === true || message.conversationId) && message.conversationId !== activeConversationId) break;
 					if (Array.isArray(message.checkpoints)) {
+						if (message.reset === true) {
+							closeCheckpointPopover();
+							checkpointsByTurnIndex.clear();
+							messageList.querySelectorAll('.checkpoint-stripe').forEach(stripe => stripe.remove());
+						}
 						for (const cp of message.checkpoints) {
 							if (!cp || typeof cp.turnIndex !== 'number') continue;
 							const entry = {

@@ -236,7 +236,15 @@ export class ConversationStore implements vscode.Disposable {
 				await context.workspaceState.update(MIGRATION_FLAG_KEY, true);
 			}
 		});
-		void this.ready.catch(error => { this.writeFailure = error instanceof Error ? error : new Error(String(error)); });
+		const refreshAfterMigration = (): void => {
+			if (!this.disposed) {
+				try { this._onDidChange.fire(); } catch { /* Notification failures must not change migration's result. */ }
+			}
+		};
+		void this.ready.then(refreshAfterMigration, error => {
+			this.writeFailure = error instanceof Error ? error : new Error(String(error));
+			refreshAfterMigration();
+		});
 	}
 
 	private reportRecoveryIssue(issue: ConversationRecoveryIssue): void {
@@ -349,7 +357,10 @@ export class ConversationStore implements vscode.Disposable {
 			await operation(); this.failedWrites.delete(id);
 		}).catch(error => {
 			const failure = error instanceof Error ? error : new Error(String(error)); this.failedWrites.set(id, failure);
-			void vscode.window.showErrorMessage(vscode.l10n.t('Conversation history could not be saved: {0}', failure.message));
+			if (!this.disposed) {
+				try { void Promise.resolve(vscode.window.showErrorMessage(vscode.l10n.t('Conversation history could not be saved: {0}', failure.message))).catch(() => {}); }
+				catch { /* Preserve the write failure even if the closing host cannot report it. */ }
+			}
 		});
 	}
 

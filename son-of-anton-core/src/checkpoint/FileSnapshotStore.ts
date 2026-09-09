@@ -5,6 +5,7 @@
 import * as fs from 'node:fs/promises';
 import type { Stats } from 'node:fs';
 import * as path from 'node:path';
+import { withCheckpointLock } from './ProcessFileLock';
 import { createHash, randomUUID } from 'node:crypto';
 
 export interface FileSnapshot {
@@ -26,8 +27,7 @@ function sameFile(left: Stats, right: Stats): boolean {
 
 /** Complete bounded snapshots for scratch folders. Dependencies and VCS internals are explicitly outside their scope. */
 export class FileSnapshotStore {
-	private static readonly locks = new Map<string, Promise<void>>();
-	constructor(private readonly root: string, private readonly storage: string) {}
+	constructor(private readonly root: string, private readonly storage: string, private readonly report: (message: string) => void = () => {}) {}
 	private directory(snapshot: FileSnapshot): string { return path.join(this.storage, createHash('sha256').update(snapshot.workspaceRoot).digest('hex'), snapshot.id); }
 	private async identity(): Promise<{ workspaceRoot: string; rootIdentity: string; storageRoot: string }> {
 		const workspaceRoot = await fs.realpath(this.root); const stat = await fs.stat(workspaceRoot);
@@ -113,10 +113,9 @@ export class FileSnapshotStore {
 	 * before mutation; markRetained must run at that commit even if later work fails.
 	 */
 	async restore(snapshot: FileSnapshot, confirm: (files: readonly string[]) => Promise<boolean>, retainRecovery?: (recovery: FileSnapshot, markRetained: () => void) => Promise<void>): Promise<FileSnapshot | undefined> {
-		const key = (await this.identity()).workspaceRoot; const previous = FileSnapshotStore.locks.get(key) ?? Promise.resolve();
-		let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
-		const queued = previous.then(() => gate); FileSnapshotStore.locks.set(key, queued); await previous;
-		try {
+		const identity = await this.identity();
+		const directory = path.join(identity.storageRoot, 'restore-locks', createHash('sha256').update(identity.workspaceRoot).digest('hex'));
+		return withCheckpointLock(directory, async () => {
 			const target = await this.validate(snapshot); const recovery = await this.capture(); const before = await this.validate(recovery); let mutationStarted = false; let recoveryRetained = false; let restoreFailure: unknown;
 			try {
 				const files = this.changed(target, before); if (!await confirm(files)) { return undefined; }
@@ -146,7 +145,7 @@ export class FileSnapshotStore {
 					}
 				}
 			}
-		} finally { release(); if (FileSnapshotStore.locks.get(key) === queued) { FileSnapshotStore.locks.delete(key); } }
+		}, this.report);
 	}
 	private async verifyAncestors(file: string, root: string): Promise<void> {
 		const parts = file.split('/'); let parent = root;

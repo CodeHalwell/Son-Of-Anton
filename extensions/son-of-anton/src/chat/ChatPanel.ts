@@ -1432,12 +1432,13 @@ export class ChatSession {
 		if (!this.checkpointManager) {
 			return;
 		}
-		const checkpoints = this.checkpointManager.list(this.currentConversationId);
-		if (checkpoints.length === 0) {
-			return;
-		}
+		let checkpoints: ReturnType<CheckpointManager['list']> = [];
+		try { checkpoints = this.checkpointManager.list(this.currentConversationId); }
+		catch (error) { console.warn('[chat] checkpoint replay unavailable:', error); }
 		this.webview.postMessage({
 			type: 'checkpointsLoaded',
+			conversationId: this.currentConversationId,
+			reset: true,
 			checkpoints: checkpoints.map(cp => ({
 				checkpointId: cp.id,
 				turnIndex: cp.turnIndex,
@@ -2843,7 +2844,12 @@ export class ChatSession {
 		if (!this.checkpointManager) {
 			return;
 		}
-		const checkpoint = this.checkpointManager.get(checkpointId);
+		let checkpoint: ReturnType<CheckpointManager['get']>;
+		try { checkpoint = this.checkpointManager.get(checkpointId); }
+		catch (error) {
+			void vscode.window.showErrorMessage(vscode.l10n.t('Checkpoint comparison failed: {0}', error instanceof Error ? error.message : String(error)));
+			return;
+		}
 		if (!checkpoint || !checkpoint.gitSha) {
 			vscode.window.showWarningMessage('Checkpoint missing — unable to open diff.');
 			return;
@@ -2903,11 +2909,8 @@ export class ChatSession {
 		try {
 			await this.checkpointManager.restore(checkpointId, { conversationToo, conversationId: this.currentConversationId });
 		} catch (err) {
-			// CheckpointManager already surfaces a message via
-			// `showErrorMessage`; we just need to avoid letting the rejection
-			// propagate up into the message handler's unhandled rejection
-			// path.
 			console.warn(`[chat] checkpoint restore failed: ${err instanceof Error ? err.message : String(err)}`);
+			void vscode.window.showErrorMessage(vscode.l10n.t('Checkpoint restore failed: {0}', err instanceof Error ? err.message : String(err)));
 			return;
 		}
 		if (conversationToo) {

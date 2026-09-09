@@ -616,7 +616,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	});
 
 	// Shared durable history remains usable in memory if its migration needs recovery.
-	const conversationStore = await activateConversationHistory(context);
+	const conversationStore = activateConversationHistory(context);
 	activeConversationStore = conversationStore;
 	registerResponseFeedback(context, conversationStore);
 
