@@ -35,13 +35,11 @@ function compareVersions(candidate: string, installed: string): number | undefin
 	return 0;
 }
 
-/** Verify identity before advertising an update; source dates alone cannot identify the installed release. */
+/** Versions determine update/rollback direction; publication dates only order the verified choices. */
 export async function verifiedReleaseCandidates(releases: IdeRelease[], installed: InstalledBuild, target: string, channel: ReleaseChannel, rollback: boolean, readManifest: (release: IdeRelease) => Promise<string>): Promise<ReleaseCandidate[]> {
-	const installedAt = installed.date ? Date.parse(installed.date) : NaN;
 	const installedCommit = /^[a-f\d]{40}$/i.test(installed.commit ?? '') ? installed.commit!.toLowerCase() : undefined;
-	const candidates = eligibleReleases(releases.slice(0, MAX_RELEASE_CANDIDATES), channel).filter(release => rollback
-		? Number.isFinite(installedAt) && Date.parse(release.published_at) < installedAt
-		: compareVersions(release.tag_name.slice('ide-v'.length), installed.version) === 1 && (!Number.isFinite(installedAt) || Date.parse(release.published_at) > installedAt));
+	const candidates = eligibleReleases(releases.slice(0, MAX_RELEASE_CANDIDATES), channel)
+		.filter(release => compareVersions(release.tag_name.slice('ide-v'.length), installed.version) === (rollback ? -1 : 1));
 	const verified: ReleaseCandidate[] = [];
 	let readable = 0, firstFailure: unknown;
 	// One bounded batch at a time preserves release order and limits metadata request concurrency.

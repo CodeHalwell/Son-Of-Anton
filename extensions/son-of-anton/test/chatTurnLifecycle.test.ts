@@ -6,7 +6,8 @@ import { strict as assert } from 'node:assert';
 import * as vscode from 'vscode';
 import { ChatTurnQueue } from '../src/chat/ChatTurnQueue';
 import { ChatSession, type ChatMessage } from '../src/chat/ChatPanel';
-import type { LlmStreamEvent, ModelId } from 'son-of-anton-core/llm/LlmClient';
+import { LlmClient, type LlmStreamEvent, type ModelId, type ToolDefinition } from 'son-of-anton-core/llm/LlmClient';
+import { discoveredModelId, getDiscoveredModel, registerDiscoveredModels, type CapabilityAvailability } from 'son-of-anton-core/llm/DiscoveredModels';
 import type { AgentEvent } from '../src/chat/agentEvents';
 import { AgentBridge } from '../src/chat/AgentBridge';
 import { OrchestratorAgent } from 'son-of-anton-core/agents/OrchestratorAgent';
@@ -29,7 +30,7 @@ interface TestSession {
 	currentSpecialistId: string;
 	currentMode: string;
 	handleConversationDeleted(id: string): void;
-	handleSendMessage(message: { text: string; conversationId?: string; includeWorkspaceContext?: boolean; mentionsKinded?: NonNullable<ChatMessage['request']>['mentionsKinded']; attachments?: string[]; model?: ModelId; chatMode?: 'plan' | 'act' }): Promise<void>;
+	handleSendMessage(message: { text: string; conversationId?: string; includeWorkspaceContext?: boolean; mentionsKinded?: NonNullable<ChatMessage['request']>['mentionsKinded']; attachments?: string[]; model?: ModelId; chatMode?: 'plan' | 'act'; images?: Array<{ mime: string; base64: string }> }): Promise<void>;
 	switchConversation(id: string): void;
 	clearConversation(): void;
 	abortInFlight(): void;
@@ -120,7 +121,74 @@ async function* requestNativeTool(name: string): AsyncGenerator<LlmStreamEvent> 
 	yield { type: 'complete', fullText: 'Investigation before the tool', stopReason: 'tool_use', inputTokens: 10, outputTokens: 5, cachedTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 };
 }
 
+interface NativeRequestBody {
+	model: string;
+	tools?: Array<{ type: string; function: { name: string; description: string; parameters: ToolDefinition['inputSchema'] } }>;
+	messages: Array<{ role: string; content: string | Array<{ type: string; text?: string; image_url?: { url: string } }> }>;
+}
+
+async function withCatalogNativeSession(
+	options: { tools: CapabilityAvailability; images?: boolean; toolReply?: boolean; specialistFallback?: boolean },
+	run: (fixture: ReturnType<typeof createSession> & { llm: LlmClient; model: ModelId; bodies: NativeRequestBody[]; definition: ToolDefinition; executed: string[] }) => Promise<void>,
+): Promise<void> {
+	const rawModel = `chat-panel-${options.tools}-${options.images ?? false}-${options.toolReply ?? false}-${options.specialistFallback ?? false}`;
+	const model = discoveredModelId('openai', rawModel);
+	registerDiscoveredModels([{ id: model, provider: 'openai', model: rawModel, label: 'Offline chat fixture', chat: true, images: options.images ?? false, tools: options.tools, fetchedAt: Date.now() }]);
+	const definition: ToolDefinition = { name: 'write_file', description: 'Write the test fixture', inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } };
+	const llm = new LlmClient({ get: async () => 'synthetic-fixture-key', store: async () => {}, delete: async () => {} }, { get: <T>(key: string, fallback?: T): T => (key === 'openaiBaseUrl' ? 'https://fixture.invalid/v1' : fallback) as T });
+	const originalFetch = globalThis.fetch; const bodies: NativeRequestBody[] = []; const executed: string[] = [];
+	globalThis.fetch = async (_input, init) => {
+		bodies.push(JSON.parse(String(init?.body)));
+		const frame = { choices: [{ delta: { content: 'Useful answer', ...(options.toolReply ? { tool_calls: [{ index: 0, id: 'unexpected-tool', function: { name: 'write_file', arguments: '{"path":"fixture.ts"}' } }] } : {}) }, finish_reason: options.toolReply ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 5 } };
+		return new Response(`data: ${JSON.stringify(frame)}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } });
+	};
+	const f = createSession();
+	Object.assign(f.session, {
+		currentModel: model, currentSpecialistId: options.specialistFallback ? 'anton-spec' : 'anton',
+		agentBridge: options.specialistFallback ? { hasAgent: () => false } : undefined,
+		llmClient: llm, editedToolResults: new Map(),
+		toolRegistry: { definitions: () => [definition], get: () => ({ definition: { category: 'write', riskLevel: 'requiresApproval' } }), execute: async (name: string) => { executed.push(name); return { content: 'Written' }; } },
+	});
+	try { await run({ ...f, llm, model, bodies, definition, executed }); }
+	finally { f.session.abortInFlight(); globalThis.fetch = originalFetch; }
+}
+
 suite('Chat turn ownership', () => {
+	test('direct chat sends tools only for confirmed capability, while text and vision still work', async () => {
+		for (const scenario of [
+			{ tools: 'unknown', mode: 'act' },
+			{ tools: false, mode: 'act', specialistFallback: true },
+			{ tools: true, mode: 'act' },
+			{ tools: true, mode: 'plan', specialistFallback: true },
+			{ tools: 'unknown', mode: 'act', images: true },
+		] as const) {
+			await withCatalogNativeSession(scenario, async f => {
+				await f.session.handleSendMessage({ text: 'Explain this file', includeWorkspaceContext: false, chatMode: scenario.mode, ...('images' in scenario ? { images: [{ mime: 'image/png', base64: 'YWJj' }] } : {}) });
+				const response = f.conversations.get('first')?.at(-1);
+				const expectedTools = scenario.tools === true && scenario.mode === 'act' ? [{ type: 'function', function: { name: f.definition.name, description: f.definition.description, parameters: f.definition.inputSchema } }] : undefined;
+				assert.deepEqual({ requests: f.bodies.length, tools: f.bodies[0]?.tools, content: response?.content, outcome: response?.execution?.outcome, errors: f.messages.filter(message => message.type === 'streamError'), capability: getDiscoveredModel(f.model)?.tools }, { requests: 1, tools: expectedTools, content: 'Useful answer', outcome: 'completed', errors: [], capability: scenario.tools });
+				if ('images' in scenario) {
+					assert.deepEqual(f.bodies[0].messages.find(message => message.role === 'user')?.content, [{ type: 'image_url', image_url: { url: 'data:image/png;base64,YWJj' } }, { type: 'text', text: 'Explain this file' }]);
+				}
+			});
+		}
+	});
+
+	test('unknown tools and Plan mode reject unsolicited provider tool calls before approval or execution', async () => {
+		for (const scenario of [{ tools: 'unknown', mode: 'act' }, { tools: true, mode: 'plan' }] as const) {
+			await withCatalogNativeSession({ ...scenario, toolReply: true }, async f => {
+				await f.session.handleSendMessage({ text: 'Explain this file', includeWorkspaceContext: false, chatMode: scenario.mode });
+				const response = f.conversations.get('first')?.at(-1);
+				assert.deepEqual({ requests: f.bodies.length, tools: f.bodies[0]?.tools, executed: f.executed, toolCards: f.messages.some(message => message.type === 'toolCall'), approval: f.messages.some(message => message.type === 'approvalRequest'), complete: f.messages.some(message => message.type === 'messageComplete'), outcome: response?.execution?.outcome }, { requests: 1, tools: undefined, executed: [], toolCards: false, approval: false, complete: false, outcome: 'failed' });
+				assert.match(String(f.messages.find(message => message.type === 'streamError')?.error), scenario.mode === 'plan' ? /Plan mode cannot execute tools/ : /not confirmed tool support/);
+				if (scenario.tools === 'unknown') {
+					await assert.rejects(async () => { for await (const _event of f.llm.streamRequest({ model: f.model, messages: [{ role: 'user', content: 'Run a tool' }], tools: [f.definition] })) { /* consume */ } }, /not advertised tool support/);
+					assert.equal(f.bodies.length, 1, 'the runtime capability guard must reject tool-enabled requests before HTTP');
+				}
+			});
+		}
+	});
+
 	test('approval and rejection record orchestrator execution even with an ACP specialist selected', async () => {
 		for (const command of ['approve', 'reject']) {
 			const f = createSession(); let dispatched: string | undefined;

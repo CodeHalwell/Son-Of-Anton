@@ -42,7 +42,7 @@ suite('Verified IDE update candidates', () => {
 			assert.deepEqual({ versions: candidates.map(entry => entry.release.tag_name), fetched }, { versions: ['ide-v1.2.4'], fetched: ['ide-v1.2.4'] });
 		}
 	});
-	test('normal updates use numeric triplet and preview precedence while retaining nightly chronology', async () => {
+	test('normal updates use numeric triplet and preview precedence regardless of source date', async () => {
 		const cases: Array<[string, string, boolean]> = [
 			['1.2.9', '1.2.10', true], ['1.10.0', '1.9.99', false], ['2.0.0', '1.99.99', false],
 			['1.2.3-preview.2', '1.2.3-preview.10', true], ['1.2.3-preview.10', '1.2.3-preview.2', false],
@@ -59,7 +59,8 @@ suite('Verified IDE update candidates', () => {
 			assert.equal(candidates.length, Number(eligible), `${candidate} after ${version}`);
 		}
 		const olderPublication = fixture('1.2.3-nightly.20260909', nextCommit, '2025-12-31T00:00:00Z');
-		assert.deepEqual(await verifiedReleaseCandidates([olderPublication.release], { ...installed, version: '1.2.3-nightly.20260908' }, 'darwin-arm64', 'preview', false, async () => olderPublication.manifest), []);
+		const newerNightly = await verifiedReleaseCandidates([olderPublication.release], { ...installed, version: '1.2.3-nightly.20260908' }, 'darwin-arm64', 'preview', false, async () => olderPublication.manifest);
+		assert.deepEqual(newerNightly.map(entry => entry.release.tag_name), ['ide-v1.2.3-nightly.20260909']);
 	});
 	test('rollback keeps verified older builds and never offers the installed commit', async () => {
 		const older = fixture('1.2.2', nextCommit, '2025-12-30T00:00:00Z'), same = fixture('1.2.1', commit, '2025-12-29T00:00:00Z'), newer = fixture('1.2.4', nextCommit);
@@ -67,6 +68,24 @@ suite('Verified IDE update candidates', () => {
 		const candidates = await verifiedReleaseCandidates(fixtures.map(entry => entry.release), installed, 'darwin-arm64', 'stable', true, async release => { fetched.push(release.tag_name); return fixtures.find(entry => entry.release === release)!.manifest; });
 		assert.deepEqual(candidates.map(entry => entry.release.tag_name), ['ide-v1.2.2']);
 		assert.deepEqual(fetched, ['ide-v1.2.2', 'ide-v1.2.1']);
+	});
+	test('rollback uses lower versions, includes backfilled releases, and orders by publication independently of build dates', async () => {
+		const fixtures = [fixture('1.2.4', nextCommit, '2025-12-20T00:00:00Z'), fixture('1.2.3', nextCommit, '2025-12-25T00:00:00Z'), fixture('1.2.2', nextCommit, '2026-01-03T00:00:00Z'), fixture('1.2.1', nextCommit, '2026-01-05T00:00:00Z')];
+		for (const date of [installed.date, undefined, 'not-a-date']) {
+			const fetched: string[] = [];
+			const candidates = await verifiedReleaseCandidates(fixtures.map(entry => entry.release), { ...installed, date }, 'darwin-arm64', 'stable', true, async release => { fetched.push(release.tag_name); return fixtures.find(entry => entry.release === release)!.manifest; });
+			assert.deepEqual({ versions: candidates.map(entry => entry.release.tag_name), fetched }, { versions: ['ide-v1.2.1', 'ide-v1.2.2'], fetched: ['ide-v1.2.1', 'ide-v1.2.2'] });
+		}
+	});
+	test('rollback respects preview precedence and both directions reject unparseable installed versions', async () => {
+		const fixtures = ['1.2.3-preview.2', '1.2.3-preview.10', '1.2.3-preview.11', '1.2.3'].map(version => fixture(version, nextCommit));
+		const candidates = await verifiedReleaseCandidates(fixtures.map(entry => entry.release), { ...installed, version: '1.2.3-preview.10', date: undefined }, 'darwin-arm64', 'preview', true, async release => fixtures.find(entry => entry.release === release)!.manifest);
+		assert.deepEqual(candidates.map(entry => entry.release.tag_name), ['ide-v1.2.3-preview.2']);
+		for (const rollback of [true, false]) {
+			for (const version of ['', 'unknown', '1.2', '1.2.3-preview..1']) {
+				assert.deepEqual(await verifiedReleaseCandidates(fixtures.map(entry => entry.release), { ...installed, version }, 'darwin-arm64', 'preview', rollback, async () => { throw new Error('Must not fetch without comparable versions'); }), []);
+			}
+		}
 	});
 	test('a malformed manifest does not hide valid updates, while total verification failure is reported', async () => {
 		const bad = fixture('1.2.5', nextCommit), good = fixture('1.2.4', nextCommit);
@@ -84,11 +103,12 @@ suite('Verified IDE update candidates', () => {
 		});
 		assert.deepEqual([candidates.length, calls, peak], [100, 100, 4]);
 	});
-	test('startup waits for verification and announces the genuinely newer build instead of the installed release', async () => {
+	test('startup and rollback use verified version direction, including rollback with no installed date', async () => {
 		const stub = require('vscode') as typeof vscode;
 		const original = { env: stub.env, version: stub.version, configuration: stub.workspace.getConfiguration, register: stub.commands.registerCommand, information: stub.window.showInformationMessage, picker: stub.window.showQuickPick, error: stub.window.showErrorMessage, fetch: globalThis.fetch };
 		const root = await fs.mkdtemp(path.join(tmpdir(), 'sota-update-candidates-'));
 		const subscriptions: vscode.Disposable[] = [], messages: string[] = [], errors: string[] = [], requests: string[] = [];
+		let rollback!: () => Promise<void>;
 		let unblock!: () => void, started!: () => void, announced!: () => void;
 		const gate = new Promise<void>(resolve => { unblock = resolve; }), verificationStarted = new Promise<void>(resolve => { started = resolve; }), notification = new Promise<void>(resolve => { announced = resolve; });
 		try {
@@ -96,7 +116,7 @@ suite('Verified IDE update candidates', () => {
 			Object.assign(stub, { env: { ...stub.env, appRoot: root }, version: installed.version });
 			const { registerIdeUpdates } = require('../src/updates/IdeUpdates') as typeof import('../src/updates/IdeUpdates');
 			stub.workspace.getConfiguration = (() => ({ get: (key: string, fallback: unknown) => key === 'updates.checkOnStartup' ? true : key === 'updates.channel' ? 'stable' : fallback })) as typeof stub.workspace.getConfiguration;
-			stub.commands.registerCommand = () => ({ dispose() {} });
+			stub.commands.registerCommand = (command: string, callback: () => Promise<void>) => { if (command === 'sota.rollbackIdeUpdate') { rollback = callback; } return { dispose() {} }; };
 			stub.window.showInformationMessage = (async (message: string) => { messages.push(message); announced(); return undefined; }) as typeof stub.window.showInformationMessage;
 			stub.window.showQuickPick = async () => { throw new Error('No picker without explicit review'); };
 			stub.window.showErrorMessage = (async (message: string) => { errors.push(message); return undefined; }) as typeof stub.window.showErrorMessage;
@@ -113,6 +133,12 @@ suite('Verified IDE update candidates', () => {
 			unblock(); await notification;
 			assert.deepEqual(messages, ['Son of Anton ide-v1.2.4 is available.']);
 			assert.deepEqual(errors, []); assert.equal(requests.length, 2);
+			await fs.writeFile(path.join(root, 'product.json'), JSON.stringify({ commit }));
+			const pickers: { labels: string[]; title?: string }[] = [];
+			stub.window.showQuickPick = async (items: readonly (string | vscode.QuickPickItem)[] | Thenable<readonly (string | vscode.QuickPickItem)[]>, options?: vscode.QuickPickOptions) => { pickers.push({ labels: (await items).map(item => typeof item === 'string' ? item : item.label), title: options?.title }); return undefined; };
+			await rollback();
+			assert.deepEqual(pickers, [{ labels: ['ide-v1.2.2'], title: 'Choose an Earlier IDE Installer' }]);
+			assert.deepEqual(errors, []); assert.equal(requests.length, 4);
 		} finally {
 			unblock(); for (const subscription of subscriptions) { subscription.dispose(); }
 			Object.assign(stub, { env: original.env, version: original.version });

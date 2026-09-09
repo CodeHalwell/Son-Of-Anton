@@ -37,6 +37,8 @@ export interface DiscoveredProvider {
 	models: DiscoveredModel[];
 	error?: string;
 	truncated?: boolean;
+	/** The entire configured mapping was read successfully; this does not verify management access or inference entitlement. */
+	configurationComplete?: boolean;
 }
 export interface ProviderDiscoverySnapshot {
 	version: 1;
@@ -107,7 +109,19 @@ export class ProviderDiscovery {
 		this.value = validSnapshot(cached) ? cached : { version: 1, updatedAt: 0, software: [], providers: [] };
 		const local = this.value.providers.filter(provider => provider.id === 'ollama' || provider.id === 'lmstudio');
 		if (local.length) { this.cachedIncludeLocal = local.some(provider => provider.catalogStatus !== 'disabled'); }
-		for (const provider of this.value.providers) { registerDiscoveredModels(provider.models); }
+		// Local mappings are authoritative now, even if a cached discovery snapshot
+		// is still inside its TTL. Never replay removed configured routes on restart.
+		const configured = this.configuredProviders().filter(provider => provider.id === 'foundry' || provider.id === 'bedrock');
+		for (const provider of configured) {
+			const retainedIds = new Set(provider.models.map(model => model.id));
+			registerDiscoveredModels(this.previousConfiguredModels(provider.id as 'foundry' | 'bedrock').filter(model => retainedIds.has(model.id)));
+		}
+		this.value = { ...this.value, providers: [...this.value.providers.filter(provider => provider.id !== 'foundry' && provider.id !== 'bedrock'), ...configured] };
+		for (const provider of this.value.providers) {
+			const owned = provider.models.filter(model => model.provider === provider.id);
+			if ((provider.id === 'foundry' || provider.id === 'bedrock') && provider.configurationComplete === true) { replaceDiscoveredModels({ provider: provider.id }, owned); }
+			else { registerDiscoveredModels(owned); }
+		}
 	}
 
 	snapshot(): ProviderDiscoverySnapshot {
@@ -186,28 +200,37 @@ export class ProviderDiscovery {
 			// ACP catalogs are owned by session negotiation, never replayed from a
 			// provider snapshot. Failed or bounded HTTP listings are not authoritative.
 			if (provider.id === 'acp' || provider.catalogStatus === 'error') { continue; }
-			if (provider.catalogStatus === 'ready' && !provider.truncated) { replaceDiscoveredModels({ provider: provider.id }, provider.models); }
+			if (!provider.truncated && (provider.catalogStatus === 'ready' || ((provider.id === 'foundry' || provider.id === 'bedrock') && provider.configurationComplete === true))) { replaceDiscoveredModels({ provider: provider.id }, provider.models); }
 			else { registerDiscoveredModels(provider.models); }
 		}
 		await this.deps.state?.update(storageKey, this.value);
 		return this.snapshot();
 	}
 
+	private previousConfiguredModels(id: 'foundry' | 'bedrock'): DiscoveredModel[] {
+		return (this.value.providers.find(provider => provider.id === id)?.models ?? []).filter(model => {
+			try { return model.provider === id && model.id === discoveredModelId(id, model.model); }
+			catch { return false; }
+		});
+	}
+
 	private configuredProviders(): DiscoveredProvider[] {
 		const rows: DiscoveredProvider[] = [];
 		for (const [id, name, setting] of [['foundry', 'Microsoft Foundry / Azure OpenAI', 'foundryDeployments'], ['bedrock', 'Amazon Bedrock', 'bedrockModelMap']] as const) {
-			const models: DiscoveredModel[] = [];
+			let models: DiscoveredModel[] = []; let configurationComplete = false;
 			try {
 				const raw = this.deps.config.get<string>(setting);
-				const map: unknown = raw ? JSON.parse(raw) : {};
-				if (object(map)) {
-					for (const [label, wireId] of Object.entries(map).slice(0, 1000)) {
-						if (typeof wireId !== 'string' || !wireId.trim() || wireId.length > 512) { continue; }
-						models.push({ id: discoveredModelId(id, wireId), provider: id, model: wireId, label: `${label} · ${wireId}`, chat: id === 'bedrock' ? wireId.includes('anthropic.claude') : 'unknown', tools: 'unknown', images: 'unknown', fetchedAt: Date.now() });
-					}
+				if (raw !== undefined && (typeof raw !== 'string' || raw.length > 1024 * 1024)) { throw new Error('Invalid configured inventory'); }
+				const map: unknown = raw?.trim() ? JSON.parse(raw) : {};
+				if (!object(map) || Object.keys(map).length > 1000) { throw new Error('Invalid configured inventory'); }
+				for (const [label, wireId] of Object.entries(map)) {
+					if (typeof wireId !== 'string' || !wireId.trim() || wireId.length > 512) { throw new Error('Invalid configured model ID'); }
+					models.push({ id: discoveredModelId(id, wireId), provider: id, model: wireId, label: `${label} · ${wireId}`, chat: id === 'bedrock' ? wireId.includes('anthropic.claude') : 'unknown', tools: 'unknown', images: 'unknown', fetchedAt: Date.now() });
 				}
-			} catch { /* The row still explains where account-wide enumeration is unavailable. */ }
-			rows.push({ id, name, credentialSource: 'none', catalogStatus: models.length ? 'configuration-only' : 'not-configured', inferenceStatus: 'not-tested', models,
+				configurationComplete = true;
+			} catch { models = this.previousConfiguredModels(id); }
+			rows.push({ id, name, credentialSource: 'none', configurationComplete, catalogStatus: configurationComplete ? models.length ? 'configuration-only' : 'not-configured' : 'error', inferenceStatus: 'not-tested', models,
+				error: configurationComplete ? undefined : 'Could not read the configured model inventory. Use a JSON object mapping names to model IDs, with at most 1000 entries. Previously discovered models are retained.',
 				catalogScope: id === 'foundry' ? 'Configured deployments only. Account-wide deployment discovery requires Azure management access.' : 'Configured invocation IDs only. Account-wide model discovery requires AWS management access and an explicitly configured region/profile.' });
 		}
 		rows.push({ id: 'claude-code', name: 'Claude Code Subscription', credentialSource: 'none', catalogStatus: 'adapter-required', inferenceStatus: 'not-tested', models: [], catalogScope: 'Subscription models are advertised by the configured ACP adapter during a trusted session; Anthropic API access is separate.' });

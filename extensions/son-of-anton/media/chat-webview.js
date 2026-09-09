@@ -3093,7 +3093,8 @@
 		function isCurrentModelUnavailable() {
 			if (!currentModel.startsWith('catalog:') || !providerCatalogSnapshot) return false;
 			const provider = providerCatalogSnapshot.providers.find(entry => entry.id === currentModel.split(':')[1]);
-			return Boolean(provider && !provider.truncated && provider.catalogStatus === 'ready' && !provider.models.some(model => model.id === currentModel && model.chat !== false));
+			const configuredInventory = provider && ['foundry', 'bedrock'].includes(provider.id) && provider.configurationComplete === true && ['configuration-only', 'not-configured'].includes(provider.catalogStatus);
+			return Boolean(provider && !provider.truncated && (provider.catalogStatus === 'ready' || configuredInventory) && !provider.models.some(model => model.id === currentModel && model.chat !== false));
 		}
 		function updateModelLabel() {
 			const acpAgent = getCurrentAcpAgent();

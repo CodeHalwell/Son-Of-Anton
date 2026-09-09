@@ -8,7 +8,7 @@ import { ChatTurnQueue } from './ChatTurnQueue';
 import { assembleTurnContext, type TurnContext } from './TurnContext';
 import type { ProviderFinder } from '../providers/ProviderFinder';
 import { globalScopedConfig } from './globalScopedConfig';
-import { LlmClient, LlmContentPart, LlmMessage, ModelId, ToolDefinition as LlmToolDefinition } from 'son-of-anton-core/llm/LlmClient';
+import { LlmClient, LlmContentPart, LlmMessage, ModelId, supportsAgenticToolLoop, ToolDefinition as LlmToolDefinition } from 'son-of-anton-core/llm/LlmClient';
 import { ToolRegistry, createInstrumentedWorkspaceToolContext, type ApprovalRequest } from '../tools/registry';
 import { clearActiveApproval, getActiveApproval, setActiveApproval } from './approvalRegistry';
 import type { HookRunner } from 'son-of-anton-core/persistence/HookRunner';
@@ -3229,7 +3229,10 @@ export class ChatSession {
 		// we hit the cap. The tools-module ToolDefinition shape is structurally
 		// compatible with LlmClient's local ToolDefinition (the latter is a
 		// looser superset), so a runtime-safe cast is used at the boundary.
-		const tools = (mode === 'plan' ? [] : this.toolRegistry.definitions()) as unknown as ReadonlyArray<LlmToolDefinition>;
+		// Match the agent stack's single-shot fallback: a model can support
+		// chat before its tool capability is confirmed by discovery or a probe.
+		const toolsEnabled = mode !== 'plan' && supportsAgenticToolLoop(model);
+		const tools = toolsEnabled ? this.toolRegistry.definitions() as unknown as ReadonlyArray<LlmToolDefinition> : undefined;
 		// Single execution context per send — tool calls reuse the same handles.
 		// H14 — when a HookRunner is supplied (workspace trusted +
 		// `.son-of-anton/hooks.json` exists) the context is wrapped so
@@ -3337,7 +3340,7 @@ export class ChatSession {
 							// throwaway "tool" placeholder flickering above the
 							// rendered block. The block postMessage in the
 							// execute branch below handles all visible UI.
-							if (event.name !== 'emit_ui_block') {
+							if (toolsEnabled && event.name !== 'emit_ui_block') {
 								post({
 									type: 'toolCall',
 									id: event.id,
@@ -3411,6 +3414,10 @@ export class ChatSession {
 				if (stopReason !== 'tool_use' || pendingToolCalls.length === 0) {
 					break; // model is done
 				}
+				if (!toolsEnabled) {
+					post({ type: 'streamError', error: mode === 'plan' ? vscode.l10n.t('Plan mode cannot execute tools.') : vscode.l10n.t('This model has not confirmed tool support. Choose a tool-capable model to run tools.') });
+					break;
+				}
 				if (toolCalls + pendingToolCalls.length > maxToolCalls) {
 					post({ type: 'streamError', error: vscode.l10n.t('The response reached its limit of {0} tool calls. No further tools were executed.', maxToolCalls) });
 					break;
@@ -3449,7 +3456,6 @@ export class ChatSession {
 				// same send (per Phase 19 spec) so we don't pay per-call setup.
 				const resultLines: string[] = ['[Tool results]'];
 				for (const call of pendingToolCalls) {
-					if (mode === 'plan') { throw new Error(vscode.l10n.t('Plan mode cannot execute tools.')); }
 					if (!current()) { break toolLoop; }
 					// Phase 41: gate tools whose definition declares
 					// `riskLevel: 'requiresApproval'` (write_file, run_command)
