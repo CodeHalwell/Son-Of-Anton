@@ -643,6 +643,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		},
 	});
 	context.subscriptions.push(checkpointManager);
+	conversationStore.setPermanentDeleteCleanup(async id => {
+		await Promise.all([
+			agentBridge.forgetConversation(id).catch(error => console.warn('[acp] Recovery cleanup failed', error)),
+			checkpointManager.deleteFor(id).catch(error => console.warn('[checkpoint] Cleanup failed', error)),
+		]);
+	});
 
 	// Task board (Phase 82). Shared model that mirrors orchestrator plan +
 	// subtask events into a per-conversation kanban state. Wired to the
@@ -1031,10 +1037,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}),
 		vscode.commands.registerCommand('sota.renameConversation', target => conversationActions.rename(target)),
 		vscode.commands.registerCommand('sota.deleteConversation', target => conversationActions.delete(target)),
-		conversationStore.onDidPermanentlyDelete(id => {
-			void agentBridge.forgetConversation(id).catch(error => console.warn('[acp] Recovery cleanup failed', error));
-			void checkpointManager.deleteFor(id).catch(error => console.warn('[checkpoint] Cleanup failed', error));
-		}),
 	);
 
 	// Export this workspace’s active conversation to a Markdown file. The

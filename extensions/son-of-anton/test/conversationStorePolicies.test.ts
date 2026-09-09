@@ -128,11 +128,11 @@ suite('ConversationStore — Phase 47', () => {
 		store.dispose();
 	});
 
-	test('retains more than 50 conversations without deleting the oldest', () => {
+	test('retains more than 50 conversations without deleting the oldest', async () => {
 		const { context, globalState } = makeContext();
 		const store = new ConversationStore(context);
 
-		const first = store.create();
+		const first = store.create(); await store.flush();
 		// Backdate so it has the lowest updatedAt and gets pruned first.
 		const index = (globalState.get<Array<{ id: string; updatedAt: number; createdAt: number }>>(
 			'sota.conversations.index',
@@ -175,13 +175,13 @@ suite('ConversationStore — Phase 47', () => {
 		store.dispose();
 	});
 
-	test('delete() hides a conversation but retains its body for recovery', () => {
+	test('delete() hides a conversation but retains its body for recovery', async () => {
 		const { context, globalState } = makeContext();
 		const store = new ConversationStore(context);
 		const record = store.create();
 		store.update(record.summary.id, [userMsg('hi')]);
 
-		store.delete(record.summary.id);
+		store.delete(record.summary.id); await store.flush();
 
 		assert.deepStrictEqual(
 			{
@@ -243,7 +243,7 @@ suite('ConversationStore — Phase 47', () => {
 		store.dispose();
 	});
 
-	test('restores each workspace’s selected chat even when another conversation is newer', () => {
+	test('restores each workspace’s selected chat even when another conversation is newer', async () => {
 		const a = makeContext();
 		const b = makeContext(a.globalState);
 		const storeA = new ConversationStore(a.context, 'file:///workspace-a', 'Project A');
@@ -253,6 +253,7 @@ suite('ConversationStore — Phase 47', () => {
 			storeA.rememberActive(selected.summary.id);
 			storeA.create([userMsg('A newer')]);
 			const other = storeB.create([userMsg('B newest')]);
+			await Promise.all([storeA.flush(), storeB.flush()]);
 			const reopened = new ConversationStore(a.context, 'file:///workspace-a', 'Project A');
 			try {
 				assert.deepStrictEqual({
@@ -261,7 +262,7 @@ suite('ConversationStore — Phase 47', () => {
 					historyCount: reopened.list().length,
 					workspace: reopened.getInitialConversation()?.summary.workspaceName,
 				}, { activeA: selected.summary.id, activeB: other.summary.id, historyCount: 3, workspace: 'Project A' });
-				storeA.delete(selected.summary.id);
+				storeA.delete(selected.summary.id); await storeA.flush();
 				assert.strictEqual(reopened.getInitialConversation()?.summary.title, 'A newer');
 			} finally { reopened.dispose(); }
 		} finally { storeA.dispose(); storeB.dispose(); }
@@ -295,7 +296,7 @@ suite('ConversationStore — Phase 47', () => {
 		} finally { storeA.dispose(); storeB.dispose(); }
 	});
 
-	test('migrates legacy history independently for each workspace, despite an older global flag', () => {
+	test('migrates legacy history independently for each workspace, despite an older global flag', async () => {
 		const a = makeContext();
 		const b = makeContext(a.globalState);
 		void a.globalState.update('sota.conversations.migrated', true);
@@ -304,6 +305,7 @@ suite('ConversationStore — Phase 47', () => {
 		const storeA = new ConversationStore(a.context, 'a', 'A');
 		const storeB = new ConversationStore(b.context, 'b', 'B');
 		try {
+			await Promise.all([storeA.ready, storeB.ready]);
 			assert.deepStrictEqual([storeA.getInitialConversation()?.summary.title, storeB.getInitialConversation()?.summary.title, storeA.list().length], ['Legacy A', 'Legacy B', 2]);
 		} finally { storeA.dispose(); storeB.dispose(); }
 	});

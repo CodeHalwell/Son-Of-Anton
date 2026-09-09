@@ -178,7 +178,7 @@ jobs:
           node --test son-of-anton-core/dist/acp/*.test.js son-of-anton-core/dist/checkpoint/*.test.js son-of-anton-core/dist/workspace/*.test.js
           node --test son-of-anton-core/dist/util/readBoundedFile.test.js son-of-anton-core/dist/credentials/ProtectedSecretStore.test.js
           node --test son-of-anton-cli/dist/test/updateInstall.test.js
-          node --test scripts/test/ide-release.test.mjs
+          node --test scripts/test/ide-release.test.mjs scripts/test/ide-package.test.mjs
       - name: Graph watcher regressions
         run: node --test services/code-graph/mcp-server/test/incremental.test.mjs
       - name: Build native code graph

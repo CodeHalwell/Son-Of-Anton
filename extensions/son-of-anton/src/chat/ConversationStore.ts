@@ -168,9 +168,11 @@ export class ConversationStore implements vscode.Disposable {
 	private readonly pendingRecords = new Map<string, ConversationRecord | null>();
 	private pendingWrite: Promise<void> = Promise.resolve();
 	private writeFailure: Error | undefined;
+	private readonly failedWrites = new Map<string, Error>();
 	readonly ready: Promise<void>;
 	private readonly _onDidPermanentlyDelete = new vscode.EventEmitter<string>();
 	readonly onDidPermanentlyDelete = this._onDidPermanentlyDelete.event;
+	private permanentDeleteCleanup?: (id: string) => Promise<void>;
 
 	constructor(
 		private readonly context: vscode.ExtensionContext,
@@ -224,24 +226,36 @@ export class ConversationStore implements vscode.Disposable {
 		}
 	}
 
-	/** Await pending disk writes. Persistence failures remain visible to the host. */
-	async flush(): Promise<void> { await this.pendingWrite; if (this.writeFailure) { throw this.writeFailure; } }
-
-	private persist(record: ConversationRecord): void {
-		if (!this.disk) {
-			void this.context.globalState.update(recordKey(record.summary.id), record.messages);
-			const index = this.readIndex().filter(summary => summary.id !== record.summary.id);
-			void this.context.globalState.update(INDEX_KEY, [...index, record.summary]);
-			return;
-		}
-		const snapshot = structuredClone(record); this.pendingRecords.set(record.summary.id, snapshot);
-		this.enqueue(async () => { await this.disk!.save(snapshot); if (this.pendingRecords.get(snapshot.summary.id) === snapshot) { this.pendingRecords.delete(snapshot.summary.id); } });
+	/** Await pending writes and deletion cleanup, including after UI disposal. */
+	async flush(): Promise<void> {
+		await this.pendingWrite; const failure = this.writeFailure ?? this.failedWrites.values().next().value;
+		if (failure) { throw failure; }
 	}
 
-	private enqueue(operation: () => Promise<void>): void {
-		this.pendingWrite = this.pendingWrite.then(operation).catch(error => {
-			this.writeFailure = error instanceof Error ? error : new Error(String(error));
-			void vscode.window.showErrorMessage(vscode.l10n.t('Conversation history could not be saved: {0}', this.writeFailure.message));
+	/** Register host cleanup that survives UI disposal and runs only after durable deletion. */
+	setPermanentDeleteCleanup(cleanup: (id: string) => Promise<void>): void {
+		this.permanentDeleteCleanup = cleanup;
+	}
+
+	private persist(record: ConversationRecord): void {
+		const snapshot = structuredClone(record); this.pendingRecords.set(record.summary.id, snapshot);
+		this.enqueue(snapshot.summary.id, async () => {
+			if (this.disk) { await this.disk.save(snapshot); }
+			else {
+				await this.context.globalState.update(recordKey(snapshot.summary.id), snapshot.messages);
+				const index = this.mementoIndex().filter(summary => summary.id !== snapshot.summary.id);
+				await this.context.globalState.update(INDEX_KEY, [...index, snapshot.summary]);
+			}
+			if (this.pendingRecords.get(snapshot.summary.id) === snapshot) { this.pendingRecords.delete(snapshot.summary.id); }
+		});
+	}
+
+	private enqueue(id: string, operation: () => Promise<void>): void {
+		this.pendingWrite = this.pendingWrite.then(async () => {
+			await operation(); this.failedWrites.delete(id);
+		}).catch(error => {
+			const failure = error instanceof Error ? error : new Error(String(error)); this.failedWrites.set(id, failure);
+			void vscode.window.showErrorMessage(vscode.l10n.t('Conversation history could not be saved: {0}', failure.message));
 		});
 	}
 
@@ -277,8 +291,8 @@ export class ConversationStore implements vscode.Disposable {
 
 	/** Returns the full record for a conversation, or `undefined` if missing. */
 	load(id: string, includeDeleted = false): ConversationRecord | undefined {
-		if (this.disk) {
-			const record = this.pendingRecords.has(id) ? this.pendingRecords.get(id) : this.disk.load(id);
+		if (this.pendingRecords.has(id) || this.disk) {
+			const record = this.pendingRecords.has(id) ? this.pendingRecords.get(id) : this.disk?.load(id);
 			return record && (includeDeleted || !record.summary.deletedAt) ? record : undefined;
 		}
 		const summary = this.readIndex().find(s => s.id === id);
@@ -394,14 +408,42 @@ export class ConversationStore implements vscode.Disposable {
 	/** Permanently remove only an already trashed record, after host confirmation. */
 	permanentDelete(id: string): void {
 		const record = this.load(id, true); if (!record?.summary.deletedAt) { return; }
-		if (this.disk) {
-			this.pendingRecords.set(id, null);
-			this.enqueue(async () => { await this.disk!.delete(id); if (this.pendingRecords.get(id) === null) { this.pendingRecords.delete(id); } });
-		} else {
-			void this.context.globalState.update(recordKey(id), undefined);
-			void this.context.globalState.update(INDEX_KEY, this.readIndex().filter(summary => summary.id !== id));
+		this.pendingRecords.set(id, null);
+		this.enqueue(id, async () => {
+			try {
+				if (this.disk) { await this.disk.delete(id); }
+				else { await this.deleteFromMemento(record); }
+			} catch (error) {
+				// Remove only this pending tombstone. Keep the complete Trash record
+				// available for recovery/retry even if the backing deletion was partial.
+				if (this.pendingRecords.get(id) === null) { this.pendingRecords.set(id, record); }
+				this._onDidChange.fire(); throw error;
+			}
+			if (this.pendingRecords.get(id) === null) { this.pendingRecords.delete(id); }
+			// Checkpoints and ACP recovery belong to the durable transcript lifecycle.
+			// The host disposes subscriptions before awaiting deactivate(), so cleanup
+			// must remain in the write queue independently of the UI event listeners.
+			await this.permanentDeleteCleanup?.(id);
+			this._onDidPermanentlyDelete.fire(id); this._onDidChange.fire();
+		});
+		this._onDidChange.fire();
+	}
+
+	private async deleteFromMemento(record: ConversationRecord): Promise<void> {
+		const id = record.summary.id; let bodyAttempted = false;
+		try {
+			await this.context.globalState.update(INDEX_KEY, this.mementoIndex().filter(summary => summary.id !== id));
+			bodyAttempted = true; await this.context.globalState.update(recordKey(id), undefined);
+		} catch (error) {
+			// Memento has no multi-key transaction. Restore the index if removing the
+			// body fails, including hosts that update their cache before rejecting.
+			try {
+				if (bodyAttempted) { await this.context.globalState.update(recordKey(id), record.messages); }
+				const index = this.mementoIndex().filter(summary => summary.id !== id);
+				await this.context.globalState.update(INDEX_KEY, [...index, record.summary]);
+			} catch (recoveryError) { throw new AggregateError([error, recoveryError], 'Conversation deletion failed and its stored Trash record could not be restored. The transcript remains available in this window.'); }
+			throw error;
 		}
-		this._onDidPermanentlyDelete.fire(id); this._onDidChange.fire();
 	}
 
 	/** Fork through an inclusive message boundary. Selecting the fork never modifies files. */
@@ -477,7 +519,8 @@ export class ConversationStore implements vscode.Disposable {
 	/** Read a bounded message page without loading the complete stored transcript. */
 	loadMessages(id: string, offset: number, limit = 100): ChatMessage[] {
 		const pending = this.pendingRecords.get(id);
-		if (this.disk && !pending) { return this.disk.load(id, offset, limit)?.messages ?? []; }
+		if (this.pendingRecords.has(id)) { return pending?.messages.slice(offset, offset + limit) ?? []; }
+		if (this.disk) { return this.disk.load(id, offset, limit)?.messages ?? []; }
 		return (pending ?? this.load(id))?.messages.slice(offset, offset + limit) ?? [];
 	}
 
@@ -487,10 +530,14 @@ export class ConversationStore implements vscode.Disposable {
 	}
 
 	private readIndex(): ConversationSummary[] {
-		if (!this.disk) { const raw = this.context.globalState.get<ConversationSummary[]>(INDEX_KEY); return Array.isArray(raw) ? raw : []; }
-		const index = new Map(this.disk.list().map(summary => [summary.id, summary]));
+		const summaries = this.disk ? this.disk.list() : this.mementoIndex();
+		const index = new Map(summaries.map(summary => [summary.id, summary]));
 		for (const [id, record] of this.pendingRecords) { if (record) { index.set(id, record.summary); } else { index.delete(id); } }
 		return [...index.values()];
+	}
+
+	private mementoIndex(): ConversationSummary[] {
+		const raw = this.context.globalState.get<ConversationSummary[]>(INDEX_KEY); return Array.isArray(raw) ? raw : [];
 	}
 
 	/**
