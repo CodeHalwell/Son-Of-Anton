@@ -1268,11 +1268,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			// Abort any in-flight chat stream before the workspace gets
 			// rewritten under it. The chat surface listens for its own
 			// abort and unwinds cleanly.
-			ChatPanel.abortAll();
-			await checkpointManager.restore(pick.checkpoint.id, { conversationToo: scope.conversationToo });
-			if (scope.conversationToo) {
-				ChatPanel.reloadCurrentConversations();
-			}
+			const conversationId = pick.checkpoint.ownerDeleted ? pick.checkpoint.branchConversationIds?.[0] : pick.checkpoint.conversationId;
+			const reload = ChatPanel.prepareCheckpointRestore();
+			await checkpointManager.restore(pick.checkpoint.id, { conversationToo: scope.conversationToo, conversationId });
+			if (scope.conversationToo && conversationId) { reload(conversationId); }
 		}),
 	);
 

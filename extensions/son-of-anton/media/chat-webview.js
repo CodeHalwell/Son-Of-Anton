@@ -2140,7 +2140,9 @@
 				if (part.type === 'image' && typeof part.base64Data === 'string' && typeof part.mimeType === 'string') {
 					const img = document.createElement('img');
 					img.className = 'msg-image';
-					img.src = 'data:' + part.mimeType + ';base64,' + part.base64Data;
+					const source = attachmentImageSource({ mime: part.mimeType, base64: part.base64Data });
+					if (!source) continue;
+					img.src = source;
 					img.alt = typeof part.name === 'string' ? part.name : '';
 					body.appendChild(img);
 				} else if (part.type === 'text' && typeof part.text === 'string') {
@@ -3027,7 +3029,7 @@
 		/**
 		 * Validate and stash an incoming image attachment. Enforces the
 		 * per-message count cap and total-byte cap; rejects anything whose
-		 * MIME type isn't `image/*`. Returns true when the entry was
+		 * MIME type isn't a supported raster image. Returns true when the entry was
 		 * accepted, false otherwise so callers (drop, paste, picker) can
 		 * batch-process without each duplicating the toast.
 		 */
@@ -3038,7 +3040,7 @@
 			const mime = typeof payload.mime === 'string' ? payload.mime : '';
 			const base64 = typeof payload.base64 === 'string' ? payload.base64 : '';
 			const name = typeof payload.name === 'string' ? payload.name : '';
-			if (!mime.startsWith('image/') || base64.length === 0) {
+			if (!attachmentImageSource({ mime, base64 })) {
 				showComposerToast('Image attachment rejected: unsupported format.');
 				return false;
 			}
@@ -3075,7 +3077,22 @@
 			});
 		}
 
+		/** Validate even restored drafts before building an image URL. */
+		function attachmentImageSource(image) {
+			if (!image || typeof image.base64 !== 'string' || !image.base64.length || image.base64.length % 4 !== 0 || image.base64.length > Math.ceil(MAX_IMAGE_BYTES_TOTAL / 3) * 4 || !/^[A-Za-z0-9+/]+={0,2}$/.test(image.base64)) return '';
+			const padding = image.base64.endsWith('==') ? 2 : image.base64.endsWith('=') ? 1 : 0;
+			if (image.base64.length / 4 * 3 - padding > MAX_IMAGE_BYTES_TOTAL) return '';
+			switch (image.mime) {
+				case 'image/png': return 'data:image/png;base64,' + image.base64;
+				case 'image/jpeg': return 'data:image/jpeg;base64,' + image.base64;
+				case 'image/webp': return 'data:image/webp;base64,' + image.base64;
+				case 'image/gif': return 'data:image/gif;base64,' + image.base64;
+				default: return '';
+			}
+		}
+
 		function renderContextChips() {
+			imageAttachments = imageAttachments.filter(image => attachmentImageSource(image));
 			contextSourcesChanged();
 			persistDraft();
 			updateSendAffordance();
@@ -3104,7 +3121,7 @@
 				chip.dataset.mime = img.mime;
 				const thumb = document.createElement('img');
 				thumb.className = 'attachment-thumb';
-				thumb.src = 'data:' + img.mime + ';base64,' + img.base64;
+				thumb.src = attachmentImageSource(img);
 				thumb.alt = '';
 				chip.appendChild(thumb);
 				const label = document.createElement('span');
@@ -3180,7 +3197,11 @@
 		function isCurrentModelUnavailable() {
 			if (!currentModel.startsWith('catalog:') || !providerCatalogSnapshot) return false;
 			const provider = providerCatalogSnapshot.providers.find(entry => entry.id === currentModel.split(':')[1]);
-			const configuredInventory = provider && provider.configurationComplete === true && (provider.id === 'zai' ? provider.catalogStatus === 'catalog-unavailable' : ['foundry', 'bedrock'].includes(provider.id) && ['configuration-only', 'not-configured'].includes(provider.catalogStatus));
+			const configuredInventory = provider && provider.configurationComplete === true && (
+				(provider.id === 'acp' && provider.catalogStatus === 'adapter-required') ||
+				(provider.id === 'zai' && provider.catalogStatus === 'catalog-unavailable') ||
+				(['foundry', 'bedrock'].includes(provider.id) && ['configuration-only', 'not-configured'].includes(provider.catalogStatus))
+			);
 			const missingCredential = provider && provider.credentialStatus === 'missing' && provider.credentialSource === 'none' && provider.catalogStatus === 'not-configured';
 			return Boolean(provider && !provider.truncated && (provider.catalogStatus === 'ready' || configuredInventory || missingCredential) && !provider.models.some(model => model.id === currentModel && model.chat !== false));
 		}
@@ -4027,12 +4048,14 @@
 			if (!info) return;
 			const tip = ensureModelTooltip();
 			const caps = Array.isArray(info.capabilities) ? info.capabilities.join(' / ') : '';
-			tip.innerHTML = ''
-				+ '<div class="tt-row"><b>Context</b><span>' + fmtTokens(info.contextWindow) + ' tokens</span></div>'
-				+ '<div class="tt-row"><b>Max output</b><span>' + fmtTokens(info.maxOutputTokens) + ' tokens</span></div>'
-				+ '<div class="tt-row"><b>Capabilities</b><span>' + escapeHtml(caps) + '</span></div>'
-				+ '<div class="tt-row"><b>Pricing</b><span>' + escapeHtml(fmtPricing(info)) + '</span></div>'
-				+ '<div class="tt-row tt-blurb">' + escapeHtml(info.blurb || '') + '</div>';
+			tip.replaceChildren();
+			for (const [label, value] of [['Context', fmtTokens(info.contextWindow) + ' tokens'], ['Max output', fmtTokens(info.maxOutputTokens) + ' tokens'], ['Capabilities', caps], ['Pricing', fmtPricing(info)]]) {
+				const row = document.createElement('div'); row.className = 'tt-row';
+				const heading = document.createElement('b'); heading.textContent = label;
+				const text = document.createElement('span'); text.textContent = value;
+				row.append(heading, text); tip.appendChild(row);
+			}
+			const blurb = document.createElement('div'); blurb.className = 'tt-row tt-blurb'; blurb.textContent = info.blurb || ''; tip.appendChild(blurb);
 			tip.hidden = false;
 			const rect = anchor.getBoundingClientRect();
 			// Position to the right of the icon; flip left if it'd overflow
@@ -4195,6 +4218,7 @@
 		// When the host pushes settingsState, hydrate the chip labels too so a
 		// re-mount or second window shows the persisted value.
 		window.addEventListener('message', (ev) => {
+			if (ev.origin !== window.origin) return;
 			const msg = ev && ev.data;
 			if (!msg || msg.type !== 'settingsState' || !msg.settings) return;
 			const effort = msg.settings['sota.reasoningEffort'];
@@ -4300,7 +4324,10 @@
 		// --- Extension → webview message handling ---
 
 		window.addEventListener('message', (event) => {
+			// VS Code forwards from its same-origin wrapper and shadows window.parent.
+			if (event.origin !== window.origin) return;
 			const message = event.data;
+			if (!message || typeof message !== 'object' || typeof message.type !== 'string') return;
 			if (message.type === 'turnAccepted') { acceptTurn(message); return; }
 			if (message.type === 'turnResumed') { resumeTurn(message); return; }
 			if (message.type === 'messagePersisted') { acknowledgeTimelineMessage(message); return; }
@@ -9538,6 +9565,7 @@
 		// existing top-level handler scope; the host fans out via
 		// postMessage so additive listeners are safe.
 		window.addEventListener('message', (event) => {
+			if (event.origin !== window.origin) return;
 			const msg = event && event.data;
 			if (!msg || typeof msg !== 'object') return;
 			if (msg.type === 'spendLimitState') {

@@ -28,7 +28,7 @@ import { CostReporter } from '../monitoring/CostReporter';
 import { SpendGuard, readSpendLimits } from '../monitoring/SpendGuard';
 import { ConversationStore, ChatTab, type ConversationRecord, type ConversationWriteToken } from './ConversationStore';
 import { loadCliConversation } from './CliConversationReader';
-import { CheckpointManager } from 'son-of-anton-core/checkpoint/CheckpointManager';
+import { CheckpointManager, CheckpointConversationRewindError } from 'son-of-anton-core/checkpoint/CheckpointManager';
 import { CredentialBroker } from 'son-of-anton-core/auth/CredentialBroker';
 import { TaskBoardModel, BoardSnapshot, BoardTask, SubtaskState } from '../board/TaskBoardModel';
 import { detectCredentials, CredentialState } from 'son-of-anton-core/credentials/credentialDetection';
@@ -93,6 +93,7 @@ interface ChatTurn {
 	readonly conversationId: string;
 	failed?: boolean;
 	userMessagePersisted?: boolean;
+	checkpointCancelled?: boolean;
 }
 
 interface WebviewMessage {
@@ -403,6 +404,9 @@ export class ChatSession {
 	 * subsequent turn and what is stored in the conversation transcript.
 	 */
 	private readonly editedToolResults = new Map<string, string>();
+
+	/** Invalidated when a new turn or history selection supersedes a pending restore reload. */
+	private checkpointReloadGuard?: object;
 
 	/**
 	 * Generative-UI block ids that have already been rendered for the
@@ -1258,6 +1262,7 @@ export class ChatSession {
 	}
 
 	clearConversation(): void {
+		this.checkpointReloadGuard = undefined;
 		// "Clear" now means "start a new conversation" — the previous one is
 		// preserved in the store so users can return to it from the History
 		// view. Side effects mirror the legacy in-place wipe so cost meters,
@@ -1349,6 +1354,7 @@ export class ChatSession {
 		this.abortController = undefined;
 		this.emittedUiBlockIds.clear();
 		this.pendingUiBlockResponses.clear();
+		this.checkpointReloadGuard = undefined;
 		this.currentConversationId = record.summary.id;
 		this.conversation = [...record.messages];
 		this.conversationWriteToken = record.writeToken;
@@ -1410,6 +1416,21 @@ export class ChatSession {
 		this.abortController?.abort();
 	}
 
+	/** Fence cancelled finalizers before loading a new transcript write lineage. */
+	prepareCheckpointRestore(): (conversationId: string) => void {
+		const conversationId = this.currentConversationId;
+		const guard = {}; this.checkpointReloadGuard = guard;
+		const turn = this.activeTurn;
+		if (turn) { turn.checkpointCancelled = true; }
+		this.abortInFlight();
+		this.abortController = undefined; this.activeTurn = undefined;
+		this.followupQueue.pause(conversationId); this.postFollowupQueue();
+		if (turn) { void this.webview.postMessage({ type: 'requestSettled', conversationId, requestId: turn.requestId, turnId: turn.turnId, cancelled: true }); }
+		return restoredId => {
+			if (!this.disposed && this.checkpointReloadGuard === guard && this.currentConversationId === conversationId && restoredId === conversationId) { this.reloadCurrentConversation(); }
+		};
+	}
+
 	/**
 	 * Reload the active conversation's persisted message list and repaint
 	 * the webview scrollback. Used after a checkpoint restore with
@@ -1417,6 +1438,7 @@ export class ChatSession {
 	 * open chat surface.
 	 */
 	reloadCurrentConversation(): void {
+		this.checkpointReloadGuard = undefined;
 		const record = this.conversationStore.load(this.currentConversationId);
 		if (!record) {
 			return;
@@ -2903,39 +2925,21 @@ export class ChatSession {
 	}
 
 	private async handleCheckpointRestore(checkpointId: string, conversationToo: boolean): Promise<void> {
-		if (!this.checkpointManager) {
-			return;
-		}
-		// Restore is destructive — abort any in-flight stream and outstanding
-		// approval prompts before the workspace gets rewritten under the
-		// model's feet. The CheckpointManager handles the modal warning
-		// itself so we don't double-prompt the user here.
-		this.cancelPendingApprovals('cancel');
-		this.abortController?.abort();
+		if (!this.checkpointManager) { return; }
+		const conversationId = this.currentConversationId;
+		// Fence every surface sharing this workspace before the modal/file work.
+		const reload = ChatPanel.prepareCheckpointRestore(this);
 		try {
-			await this.checkpointManager.restore(checkpointId, { conversationToo, conversationId: this.currentConversationId });
+			await this.checkpointManager.restore(checkpointId, { conversationToo, conversationId });
 		} catch (err) {
 			console.warn(`[chat] checkpoint restore failed: ${err instanceof Error ? err.message : String(err)}`);
-			void vscode.window.showErrorMessage(vscode.l10n.t('Checkpoint restore failed: {0}', err instanceof Error ? err.message : String(err)));
+			const message = err instanceof CheckpointConversationRewindError
+				? vscode.l10n.t('Workspace files were restored, but the conversation rewind could not be confirmed saved. Recovery checkpoint: {0}.', err.recoveryCheckpointId)
+				: vscode.l10n.t('Checkpoint restore failed: {0}', err instanceof Error ? err.message : String(err));
+			void vscode.window.showErrorMessage(message);
 			return;
 		}
-		if (conversationToo) {
-			// Reload the conversation from the store so the webview drops the
-			// trimmed messages from its scrollback.
-			const record = this.conversationStore.load(this.currentConversationId);
-			if (record) {
-				this.conversation = [...record.messages];
-				this.conversationWriteToken = record.writeToken;
-				this.webview.postMessage({
-					type: 'loadConversation',
-					conversationId: this.currentConversationId,
-					messages: this.messagesForWebview(),
-					lastSpecialist: this.currentSpecialistId,
-					lastMode: this.currentMode,
-					lastModel: this.currentModel,
-				});
-			}
-		}
+		if (conversationToo) { reload(conversationId); }
 	}
 
 	/** Only the current turn may publish UI updates or persist into this session. */
@@ -2994,6 +2998,7 @@ export class ChatSession {
 		}
 		this.cancelPendingApprovals('cancel');
 		this.abortController?.abort();
+		this.checkpointReloadGuard = undefined;
 		const turn: ChatTurn = { controller: new AbortController(), conversationId: this.currentConversationId, turnId: randomUUID(), requestId: message.requestId || randomUUID(), draft: message };
 		this.abortController = turn.controller; this.activeTurn = turn;
 		void this.webview.postMessage({ type: 'turnAccepted', conversationId: turn.conversationId, requestId: turn.requestId, turnId: turn.turnId });
@@ -3009,7 +3014,7 @@ export class ChatSession {
 			const redirected = this.redirectedController === turn.controller;
 			if (redirected) { this.redirectedController = undefined; }
 			const record = fromQueue && !this.disposed ? this.conversationStore.load(turn.conversationId) : undefined;
-			if (record && !turn.userMessagePersisted && !redirected && (turn.failed || turn.controller.signal.aborted)) {
+			if (record && !turn.userMessagePersisted && !redirected && !turn.checkpointCancelled && (turn.failed || turn.controller.signal.aborted)) {
 				this.followupQueue.requeue(turn.conversationId, message); this.followupQueue.pause(turn.conversationId);
 			}
 			if (this.ownsTurn(turn)) {
@@ -3529,7 +3534,6 @@ export class ChatSession {
 						capUsd: limits.taskCapUsd,
 					});
 					controller.abort();
-					aborted = true;
 					break;
 				}
 
@@ -4371,7 +4375,7 @@ export class ChatSession {
 				return `**Attached selection** (\`${filename}\` lines ${startLine}-${endLine}):\n\n\`\`\`${language}\n${content}\n\`\`\``;
 			}
 			case 'terminal-output':
-				return this.workspaceContext?.resolveTerminalMention() ?? vscode.l10n.t('Terminal context is unavailable. Reload the window and try again.');
+				return (await this.workspaceContext?.resolveTerminalMention()) ?? vscode.l10n.t('Terminal context is unavailable. Reload the window and try again.');
 			default:
 				return undefined;
 		}
@@ -5753,11 +5757,14 @@ export class ChatPanel {
 		}
 	}
 
-	/**
-	 * Reload the conversation from the store in every active session — used
-	 * after a checkpoint restore with `conversationToo: true` so any open
-	 * chat surfaces drop the trimmed messages.
-	 */
+	/** Cancel and fence shared sessions, then reload only unchanged owners after durable restore. */
+	static prepareCheckpointRestore(source?: ChatSession): (conversationId: string) => void {
+		const sessions = new Set(ACTIVE_SESSIONS); if (source) { sessions.add(source); }
+		const reloads = [...sessions].map(session => session.prepareCheckpointRestore());
+		return conversationId => { for (const reload of reloads) { reload(conversationId); } };
+	}
+
+	/** Reload every active session when its history was updated externally. */
 	static reloadCurrentConversations(): void {
 		for (const session of ACTIVE_SESSIONS) {
 			session.reloadCurrentConversation();

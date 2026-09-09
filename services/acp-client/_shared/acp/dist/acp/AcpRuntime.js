@@ -96,7 +96,7 @@ class AcpRuntime {
             });
             const externalAbort = () => controller.abort((0, protocol_1.abortError)());
             const job = {
-                key, turn: { ...turn, onPermission: permission }, controller,
+                key, turn: { ...turn, onPermission: permission }, controller, publishModels: (0, DiscoveredModels_1.beginAcpModelCatalog)(turn.agent),
                 finish: (error, result) => {
                     if (done) {
                         return;
@@ -333,12 +333,7 @@ class AcpRuntime {
                         label: `${job.turn.agent.id} · ${model.name}`, chat: true, images: !!connection.initialization?.agentCapabilities?.promptCapabilities?.image,
                         tools: true, fetchedAt: Date.now(),
                     }));
-                    if (connection.modelsTruncated) {
-                        (0, DiscoveredModels_1.registerDiscoveredModels)(entries);
-                    }
-                    else {
-                        (0, DiscoveredModels_1.replaceDiscoveredModels)({ provider: 'acp', acpAdapterId: job.turn.agent.id }, entries);
-                    }
+                    job.publishModels(entries, connection.modelsTruncated);
                 }
             }
         };

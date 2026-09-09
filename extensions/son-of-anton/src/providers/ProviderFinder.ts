@@ -17,9 +17,12 @@ export class ProviderFinder implements vscode.Disposable {
 	private readonly disposables: vscode.Disposable[] = [];
 	private readonly timer: ReturnType<typeof setInterval>;
 	private disposed = false;
+	private catalogCapturePending = false;
+	private catalogCaptureRunning?: Promise<void>;
 	constructor(private readonly context: vscode.ExtensionContext, private readonly llmClient: LlmClient) {
 		const userSetting = <T>(key: string, fallback?: T): T => {
 			const setting = vscode.workspace.getConfiguration('sota').inspect<T>(key);
+			if (key === 'acp.agents' && setting?.globalValue !== undefined) { return setting.globalValue; }
 			return (setting?.globalValue ?? setting?.defaultValue ?? fallback) as T;
 		};
 		this.service = llmClient.createProviderDiscovery(context.globalState, {
@@ -40,14 +43,15 @@ export class ProviderFinder implements vscode.Disposable {
 			catch { return false; }
 		});
 		this.registerMetadata(this.service.snapshot());
-		this.disposables.push(onDiscoveredModelsChanged(() => {
-			if (this.disposed) { return; }
-			void this.service.captureAdvertisedModels().then(() => { if (!this.disposed) { const snapshot = this.snapshot(); this.registerMetadata(snapshot); this.change.fire(snapshot); } }, () => {});
-		}));
+		this.disposables.push(onDiscoveredModelsChanged(() => this.captureCatalogChanges()));
 		this.disposables.push(vscode.commands.registerCommand('sota.refreshProviders', async () => this.refresh({ force: true })));
 		this.disposables.push(vscode.commands.registerCommand('sota.verifyProviderModel', async () => this.verifyModel()));
 		this.disposables.push(vscode.commands.registerCommand('sota.findProviders', async () => this.showPicker()));
 		this.disposables.push(vscode.workspace.onDidChangeConfiguration(event => {
+			if (event.affectsConfiguration('sota.acp.agents')) {
+				const snapshot = this.service.refreshAcpAdapters();
+				this.registerMetadata(snapshot); this.change.fire(snapshot); this.captureCatalogChanges();
+			}
 			if (['discovery', 'xaiApiKey', 'xaiBaseUrl', 'moonshotApiKey', 'moonshotBaseUrl', 'zaiApiKey', 'zaiBaseUrl', 'zaiModels', 'minimaxApiKey', 'minimaxBaseUrl', 'apiKey', 'openaiApiKey', 'googleApiKey', 'openRouterApiKey', 'deepSeekApiKey', 'mistralApiKey', 'groqApiKey', 'cerebrasApiKey', 'togetherApiKey', 'fireworksApiKey', 'anthropicBaseUrl', 'openaiBaseUrl', 'googleBaseUrl', 'openRouterBaseUrl', 'deepSeekBaseUrl', 'mistralBaseUrl', 'groqBaseUrl', 'cerebrasBaseUrl', 'togetherBaseUrl', 'fireworksManagementBaseUrl', 'ollamaBaseUrl', 'lmstudioBaseUrl', 'foundryDeployments', 'foundryEndpoint', 'bedrockModelMap'].some(key => event.affectsConfiguration(`sota.${key}`))) { void this.automaticRefresh(true); }
 		}));
 		this.disposables.push(context.secrets.onDidChange(() => { void this.automaticRefresh(true); }));
@@ -71,6 +75,23 @@ export class ProviderFinder implements vscode.Disposable {
 		this.change.dispose();
 	}
 
+	/** Registry retirement can itself notify observers; coalesce captures without recursive writes. */
+	private captureCatalogChanges(): void {
+		if (this.disposed) { return; }
+		this.catalogCapturePending = true;
+		if (this.catalogCaptureRunning) { return; }
+		this.catalogCaptureRunning = Promise.resolve().then(async () => {
+			while (this.catalogCapturePending && !this.disposed) {
+				this.catalogCapturePending = false;
+				try { await this.service.captureAdvertisedModels(); } catch { /* Catalog availability does not depend on optional cache persistence. */ }
+			}
+			if (!this.disposed) { const snapshot = this.snapshot(); this.registerMetadata(snapshot); this.change.fire(snapshot); }
+		}).finally(() => {
+			this.catalogCaptureRunning = undefined;
+			if (this.catalogCapturePending && !this.disposed) { this.captureCatalogChanges(); }
+		});
+	}
+
 	private async automaticRefresh(force = false): Promise<void> {
 		if (this.disposed || !vscode.workspace.getConfiguration('sota').get<boolean>('discovery.enabled', true)) { return; }
 		try { await this.refresh({ force }); } catch { /* Explicit refresh surfaces status; background scans remain unobtrusive. */ }
@@ -79,6 +100,7 @@ export class ProviderFinder implements vscode.Disposable {
 	private registerMetadata(snapshot: ProviderDiscoverySnapshot): void {
 		const retained = new Set<string>(snapshot.providers.flatMap(provider => provider.models.filter(model => model.chat !== false).map(model => model.id)));
 		const complete = new Set(snapshot.providers.filter(provider => !provider.truncated && (provider.catalogStatus === 'ready'
+			|| (provider.id === 'acp' && provider.configurationComplete === true && ['ready', 'adapter-required'].includes(provider.catalogStatus))
 			|| (provider.credentialStatus === 'missing' && provider.credentialSource === 'none' && provider.catalogStatus === 'not-configured')
 			|| (provider.configurationComplete === true && (provider.id === 'zai' ? provider.catalogStatus === 'catalog-unavailable' : ['foundry', 'bedrock'].includes(provider.id) && ['configuration-only', 'not-configured'].includes(provider.catalogStatus))))).map(provider => provider.id));
 		for (const id of Object.keys(MODEL_METADATA)) { if (id.startsWith('catalog:') && complete.has(id.split(':')[1] as ProviderDiscoverySnapshot['providers'][number]['id']) && !retained.has(id)) { delete MODEL_METADATA[id as ModelId]; } }
@@ -146,6 +168,10 @@ export class ProviderFinder implements vscode.Disposable {
 			const action = await vscode.window.showQuickPick(actions, { title: choice.label });
 			if (!action) { return; }
 			if (action.id === 'verify') { await this.verifyModel(choice.modelId as ModelId); return; }
+			if (choice.modelId.startsWith('catalog:acp:') && !this.service.refreshAcpAdapters().providers.find(provider => provider.id === 'acp')?.models.some(model => model.id === choice.modelId)) {
+				await vscode.window.showWarningMessage(vscode.l10n.t("This ACP adapter or model is no longer available. Reopen the provider finder and choose a configured adapter."));
+				return;
+			}
 			await vscode.workspace.getConfiguration('sota').update('defaultModel', choice.modelId, vscode.ConfigurationTarget.Global);
 			await vscode.window.showInformationMessage(vscode.l10n.t("{0} will be used for new conversations.", choice.label));
 		}

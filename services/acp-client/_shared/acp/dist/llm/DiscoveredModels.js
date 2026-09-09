@@ -4,6 +4,8 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.createAcpCatalogPolicy = createAcpCatalogPolicy;
+exports.beginAcpModelCatalog = beginAcpModelCatalog;
 exports.onDiscoveredModelsChanged = onDiscoveredModelsChanged;
 exports.discoveredAcpModels = discoveredAcpModels;
 exports.discoveredModelId = discoveredModelId;
@@ -12,10 +14,78 @@ exports.registerDiscoveredModels = registerDiscoveredModels;
 exports.replaceDiscoveredModels = replaceDiscoveredModels;
 exports.getDiscoveredModel = getDiscoveredModel;
 exports.markDiscoveredToolsVerified = markDiscoveredToolsVerified;
+const node_crypto_1 = require("node:crypto");
 const protocol_1 = require("../acp/protocol");
 const providers = new Set(['anthropic', 'openai', 'google', 'openrouter', 'ollama', 'lmstudio', 'deepseek', 'mistral', 'groq', 'cerebras', 'together', 'fireworks', 'foundry', 'bedrock', 'acp', 'claude-code', 'codex', 'copilot', 'xai', 'moonshot', 'zai', 'minimax']);
 const models = new Map();
 const listeners = new Set();
+let acpCatalogPolicy;
+let acpCatalogGeneration = 0;
+function acpAdapterFingerprint(agent) {
+    // These model selections are legitimate per-turn overlays of the configured adapter.
+    const env = Object.fromEntries(Object.entries(agent.env ?? {}).filter(([key]) => key !== 'ANTHROPIC_MODEL').sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0));
+    return (0, node_crypto_1.createHash)('sha256').update(JSON.stringify([agent.id, agent.command, agent.args ?? [], env, agent.authMethodId ?? ''])).digest('hex');
+}
+/** An IDE catalog owns its current validated adapter scopes; standalone runtimes need no policy. */
+function createAcpCatalogPolicy() {
+    const policy = { scopes: acpCatalogPolicy?.scopes };
+    acpCatalogPolicy = policy;
+    return {
+        update: agents => {
+            const next = new Map();
+            for (const agent of agents) {
+                (0, protocol_1.validateAgent)(agent);
+                discoveredAcpModelId(agent.id, 'scope-validation');
+                if (next.has(agent.id)) {
+                    throw new Error('Duplicate ACP adapter ID');
+                }
+                const fingerprint = acpAdapterFingerprint(agent), previous = policy.scopes?.get(agent.id);
+                next.set(agent.id, previous?.fingerprint === fingerprint ? previous : { fingerprint, generation: ++acpCatalogGeneration });
+            }
+            policy.scopes = next;
+            if (acpCatalogPolicy !== policy) {
+                return;
+            }
+            let changed = false;
+            for (const [id, model] of models) {
+                if (model.provider === 'acp' && !acpModelAllowed(model)) {
+                    models.delete(id);
+                    changed = true;
+                }
+            }
+            if (changed) {
+                notifyChanged();
+            }
+        },
+        dispose: () => { if (acpCatalogPolicy === policy) {
+            acpCatalogPolicy = undefined;
+        } },
+    };
+}
+function acpModelAllowed(model) {
+    const scopes = acpCatalogPolicy?.scopes;
+    const scope = model.acpAdapterId ? scopes?.get(model.acpAdapterId) : undefined;
+    return scopes === undefined || scope !== undefined && scope.fingerprint === model.acpAdapterFingerprint;
+}
+/** Capture before queueing/negotiation so a removed or replaced adapter cannot republish late. */
+function beginAcpModelCatalog(agent) {
+    const fingerprint = acpAdapterFingerprint(agent);
+    const initialScopes = acpCatalogPolicy?.scopes;
+    const scope = initialScopes?.get(agent.id);
+    return (entries, truncated) => {
+        const currentScopes = acpCatalogPolicy?.scopes;
+        if (initialScopes === undefined ? currentScopes !== undefined : !scope || scope.fingerprint !== fingerprint || currentScopes?.get(agent.id)?.generation !== scope.generation) {
+            return;
+        }
+        const advertised = entries.map(model => ({ ...model, acpAdapterFingerprint: fingerprint }));
+        if (truncated) {
+            registerDiscoveredModels(advertised);
+        }
+        else {
+            replaceDiscoveredModels({ provider: 'acp', acpAdapterId: agent.id }, advertised);
+        }
+    };
+}
 function onDiscoveredModelsChanged(listener) { listeners.add(listener); return { dispose: () => { listeners.delete(listener); } }; }
 function discoveredAcpModels() { return [...models.values()].filter(model => model.provider === 'acp').map(model => ({ ...model })); }
 function discoveredModelId(provider, model) {
@@ -54,6 +124,9 @@ function replaceDiscoveredModels(scope, entries) {
     if (scope.provider === 'acp') {
         discoveredAcpModelId(scope.acpAdapterId, 'scope-validation');
     }
+    if (scope.provider === 'acp' && acpCatalogPolicy?.scopes && !acpCatalogPolicy.scopes.has(scope.acpAdapterId)) {
+        return;
+    }
     const owns = (model) => model.provider === scope.provider && (scope.provider !== 'acp' || model.acpAdapterId === scope.acpAdapterId);
     const next = new Map();
     for (const model of entries) {
@@ -84,6 +157,8 @@ function validatedModel(model) {
             ? discoveredAcpModelId(model.acpAdapterId, model.model)
             : discoveredModelId(model.provider, model.acpAdapterId ? `${model.acpAdapterId}/${model.model}` : model.model);
         if (!providers.has(model.provider) || model.id !== identifier
+            || model.provider === 'acp' && !acpModelAllowed(model)
+            || model.acpAdapterFingerprint !== undefined && (typeof model.acpAdapterFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(model.acpAdapterFingerprint))
             || model.modelFamily !== undefined && (typeof model.modelFamily !== 'string' || !model.modelFamily || model.modelFamily.length > 512 || /[\u0000-\u001f\u007f]/.test(model.modelFamily))
             || ![true, false, 'unknown'].includes(model.chat) || ![true, false, 'unknown'].includes(model.images) || ![true, false, 'unknown'].includes(model.tools)) {
             return undefined;

@@ -61,7 +61,8 @@
 	}
 	function merge(report) { const previous = reports.get(report?.id); if (!report?.id || (previous?.sequence ?? -1) > report.sequence || (!report.snapshot && previous?.snapshot && previous.sequence === report.sequence)) { return; } reports.set(report.id, report); }
 	window.addEventListener('message', event => {
-		if (event.origin !== window.origin || event.source !== window.parent) { return; }
+		// VS Code's same-origin wrapper shadows window.parent inside the webview.
+		if (event.origin !== window.origin) { return; }
 		const message = event.data;
 		if (!message || typeof message !== 'object') { return; }
 		if (message.type === 'councilState') {

@@ -6,7 +6,7 @@
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { AcpConnection } from './AcpConnection';
-import { discoveredAcpModelId, registerDiscoveredModels, replaceDiscoveredModels } from '../llm/DiscoveredModels';
+import { beginAcpModelCatalog, discoveredAcpModelId } from '../llm/DiscoveredModels';
 import { AcpSessionStore, type AcpSessionRecord } from './AcpSessionStore';
 import { abortError, cancelledPermission, object, validateImages, type AcpCapabilities, type AcpImage, type AcpUsage, type AcpAgentDefinition, type AcpMcpServer, type AcpPermissionHandler, type AcpPromptResult, type AcpUpdate } from './protocol';
 
@@ -35,7 +35,7 @@ export interface AcpTurn {
 	onPermission?: AcpPermissionHandler;
 }
 interface Worker { key: string; connection: AcpConnection; busy: boolean; lastUsed: number; ready: boolean }
-interface Job { key: string; turn: AcpTurn; controller: AbortController; finish(error?: Error, result?: AcpPromptResult): void; abort(): void }
+interface Job { publishModels: ReturnType<typeof beginAcpModelCatalog>; key: string; turn: AcpTurn; controller: AbortController; finish(error?: Error, result?: AcpPromptResult): void; abort(): void }
 
 export interface AcpRecoveryStorageIssue {
 	phase: 'read' | 'before-prompt' | 'after-prompt';
@@ -104,7 +104,7 @@ export class AcpRuntime {
 			});
 			const externalAbort = () => controller.abort(abortError());
 			const job: Job = {
-				key, turn: { ...turn, onPermission: permission }, controller,
+				key, turn: { ...turn, onPermission: permission }, controller, publishModels: beginAcpModelCatalog(turn.agent),
 				finish: (error, result) => {
 					if (done) { return; } done = true;
 					clearTimeout(timeout); clearTimeout(permissionTimeout); turn.signal?.removeEventListener('abort', externalAbort); controller.signal.removeEventListener('abort', job.abort);
@@ -267,8 +267,7 @@ export class AcpRuntime {
 						label: `${job.turn.agent.id} · ${model.name}`, chat: true, images: !!connection.initialization?.agentCapabilities?.promptCapabilities?.image,
 						tools: true, fetchedAt: Date.now(),
 					}));
-					if (connection.modelsTruncated) { registerDiscoveredModels(entries); }
-					else { replaceDiscoveredModels({ provider: 'acp', acpAdapterId: job.turn.agent.id }, entries); }
+					job.publishModels(entries, connection.modelsTruncated);
 				}
 			}
 		};

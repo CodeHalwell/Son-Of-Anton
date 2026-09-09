@@ -3171,11 +3171,21 @@ export class LlmClient {
 			}
 		}
 		const baseUrl = (this.config.get<string>('ollamaBaseUrl') ?? '').trim().replace(/\/+$/, '') || 'http://localhost:11434';
+		const customHeaders: Record<string, string> = {};
+		applyAdvancedHeaders(customHeaders, this.config.get<string>('ollamaCustomHeaders'));
+		// Shared Ollama servers can authenticate through arbitrary custom headers.
+		// A workspace URL must not receive inherited credentials for another server.
+		const authenticated = Object.keys(customHeaders).length > 0;
+		if (authenticated && !this.matchesUserEndpoint('ollamaBaseUrl', baseUrl, 'http://localhost:11434')) {
+			yield { type: 'error', error: 'Ollama credentials require an endpoint configured in user settings. Set sota.ollamaBaseUrl in User Settings to this server, or remove the custom headers.' };
+			return;
+		}
 		yield* this.streamOpenAICompatible(options, {
 			provider: 'ollama',
 			endpoint: `${baseUrl}/v1/chat/completions`,
 			modelId: modelTag,
-			customHeadersSetting: 'ollamaCustomHeaders',
+			customHeaders,
+			redirect: authenticated ? 'error' : undefined,
 			emptyBodyMessage: 'Ollama returned an empty response body. Is the model finished loading? (Try again in a few seconds.)',
 		});
 	}
@@ -3205,16 +3215,9 @@ export class LlmClient {
 		// Custom headers can contain credentials under arbitrary names. Capture
 		// them once and bind all authenticated traffic to the user-owned endpoint.
 		const authenticated = !!apiKey || Object.keys(customHeaders).length > 0;
-		if (authenticated && this.config.inspect) {
-			const setting = this.config.inspect<string>('lmstudioBaseUrl');
-			const userBaseUrl = (setting?.globalValue ?? setting?.defaultValue ?? '').trim() || 'http://localhost:1234';
-			const canonical = (value: string): string => new URL(value.trim().replace(/\/+$/, '')).href.replace(/\/+$/, '');
-			let matches = false;
-			try { matches = canonical(baseUrl) === canonical(userBaseUrl); } catch { /* An invalid endpoint cannot receive credentials. */ }
-			if (!matches) {
-				yield { type: 'error', error: 'LM Studio credentials require an endpoint configured in user settings. Set sota.lmstudioBaseUrl in User Settings to this server, or remove the credentials.' };
-				return;
-			}
+		if (authenticated && !this.matchesUserEndpoint('lmstudioBaseUrl', baseUrl, 'http://localhost:1234')) {
+			yield { type: 'error', error: 'LM Studio credentials require an endpoint configured in user settings. Set sota.lmstudioBaseUrl in User Settings to this server, or remove the credentials.' };
+			return;
 		}
 		yield* this.streamOpenAICompatible(options, {
 			provider: 'lmstudio',
@@ -3227,6 +3230,16 @@ export class LlmClient {
 			redirect: authenticated ? 'error' : undefined,
 			emptyBodyMessage: 'LM Studio returned an empty response body. Confirm a model is loaded in the LM Studio app.',
 		});
+	}
+
+	/** Scoped hosts bind credentials to User/default endpoints; CLI configuration is user-owned. */
+	private matchesUserEndpoint(settingName: string, baseUrl: string, defaultBaseUrl: string): boolean {
+		if (!this.config.inspect) { return true; }
+		const setting = this.config.inspect<string>(settingName);
+		const userBaseUrl = (setting?.globalValue ?? setting?.defaultValue ?? '').trim() || defaultBaseUrl;
+		const canonical = (value: string): string => new URL(value.trim().replace(/\/+$/, '')).href.replace(/\/+$/, '');
+		try { return canonical(baseUrl) === canonical(userBaseUrl); }
+		catch { return false; }
 	}
 
 	/**

@@ -16,11 +16,22 @@ import type { ConfigStore, Disposable, MementoStore, Notifier } from '../host';
  * Minimal conversation-store contract the checkpoint manager depends on for
  * the `restore conversation too` flow. The extension's full `ConversationStore`
  * satisfies this shape; tests / future CLI implementations only need to
- * implement these two methods.
+ * implement synchronous durable load/update methods.
  */
 export interface ConversationStoreLike {
 	load(conversationId: string): { readonly messages: ReadonlyArray<unknown>; readonly summary: { readonly lastSpecialist?: string }; readonly writeToken?: { revision: string | null } } | undefined;
-	update(conversationId: string, messages: ReadonlyArray<unknown>, lastSpecialist?: string, lastMode?: undefined, lastTab?: undefined, lastModel?: undefined, writeToken?: { revision: string | null }): void;
+	update(conversationId: string, messages: ReadonlyArray<unknown>, lastSpecialist?: string, lastMode?: undefined, lastTab?: undefined, lastModel?: undefined, writeToken?: { revision: string | null }): void | Promise<void>;
+	/** Queued stores must expose the exact durable write outcome here. */
+	updateAndWait?: ConversationStoreLike['update'];
+}
+
+/** Files were restored successfully, but the optional transcript write did not complete. */
+export class CheckpointConversationRewindError extends Error {
+	readonly workspaceRestored = true;
+	constructor(readonly recoveryCheckpointId: string, readonly conversationId: string, cause: unknown) {
+		super(`Workspace files were restored, but the conversation rewind could not be confirmed saved. The previous files are available in recovery checkpoint ${recoveryCheckpointId}.`, { cause });
+		this.name = 'CheckpointConversationRewindError';
+	}
 }
 
 /**
@@ -374,6 +385,10 @@ export class CheckpointManager implements Disposable {
 		checkpoint: Checkpoint, root: string, options: RestoreOptions,
 		restore: (retain: (snapshot: FileSnapshot | GitSnapshot, markRetained: () => void) => Promise<void>) => Promise<FileSnapshot | GitSnapshot | undefined>,
 	): Promise<void> {
+		// Capture write lineage before any prompt or file operation. A newer
+		// transcript arriving during restore must cause CAS rejection, not be truncated.
+		const conversation = options.conversationToo ? this.conversationStore.load(options.conversationId!) : undefined;
+		if (options.conversationToo && !conversation) { throw new Error('The conversation is no longer available to rewind. Workspace files were not changed.'); }
 		let recoveryCheckpoint: Checkpoint | undefined; let recoveryIndexed = false;
 		const protectedIds = new Set([checkpoint.id]);
 		const pin = await this.indexStore(root).pin(checkpoint.id, current => {
@@ -406,7 +421,10 @@ export class CheckpointManager implements Disposable {
 			// during restore. This may exceed the count by one until a later capture.
 			try { await this.mutateIndex((index, pinned) => this.pruneIndex(index, pinned), root); }
 			catch (error) { this.warnRestoreCleanup(error); }
-			if (options.conversationToo) { this.rewindConversation(checkpoint, options.conversationId); }
+			if (options.conversationToo && conversation) {
+				try { await this.rewindConversation(checkpoint, options.conversationId!, conversation); }
+				catch (error) { throw new CheckpointConversationRewindError(recoveryCheckpoint!.id, options.conversationId!, error); }
+			}
 			try { this._onDidChange.fire(); } catch { /* Display listeners cannot undo a completed restore. */ }
 			try { this.host.notifier.info('Workspace restored. The previous state is available as a recovery checkpoint.'); } catch { /* The durable recovery remains available. */ }
 		} finally { this.activeRestores.delete(protectedIds); try { await pin.release(); } catch (error) { this.warnRestoreCleanup(error); } }
@@ -423,19 +441,12 @@ export class CheckpointManager implements Disposable {
 	 * at capture time, so slicing to `turnIndex` drops the user message that
 	 * triggered the turn AND every assistant/tool message that followed.
 	 */
-	private rewindConversation(checkpoint: Checkpoint, conversationId = checkpoint.conversationId): void {
+	private async rewindConversation(checkpoint: Checkpoint, conversationId: string, record: NonNullable<ReturnType<ConversationStoreLike['load']>>): Promise<void> {
 		if (conversationId !== checkpoint.conversationId && !checkpoint.branchConversationIds?.includes(conversationId)) { throw new Error('Checkpoint is not associated with this conversation.'); }
-		const record = this.conversationStore.load(conversationId);
-		if (!record) {
-			return;
-		}
-		const trimmed = record.messages.slice(0, checkpoint.turnIndex);
-		this.conversationStore.update(
-			conversationId,
-			trimmed,
-			record.summary.lastSpecialist,
-			undefined, undefined, undefined, record.writeToken,
-		);
+		if (!this.conversationStore.load(conversationId)) { throw new Error('The conversation is no longer available to rewind.'); }
+		const args: Parameters<ConversationStoreLike['update']> = [conversationId, record.messages.slice(0, checkpoint.turnIndex), record.summary.lastSpecialist, undefined, undefined, undefined, record.writeToken];
+		if (this.conversationStore.updateAndWait) { await this.conversationStore.updateAndWait(...args); }
+		else { await this.conversationStore.update(...args); }
 	}
 
 	private keyForIdentity(workspaceRoot: string): string {

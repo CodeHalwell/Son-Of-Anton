@@ -9,29 +9,30 @@ import path from 'node:path';
 import * as vscode from 'vscode';
 import { LlmClient } from 'son-of-anton-core/llm/LlmClient';
 import { MODEL_METADATA } from 'son-of-anton-core/llm/modelMetadata';
-import { discoveredModelId, registerDiscoveredModels, replaceDiscoveredModels } from 'son-of-anton-core/llm/DiscoveredModels';
+import { beginAcpModelCatalog, discoveredAcpModelId, discoveredModelId, getDiscoveredModel, registerDiscoveredModels, replaceDiscoveredModels, type DiscoveredModel } from 'son-of-anton-core/llm/DiscoveredModels';
 import { liveConfig } from '../src/chat/globalScopedConfig';
 import { ProviderFinder } from '../src/providers/ProviderFinder';
 
 suite('Provider Finder configuration boundary', () => {
-	const defaults: Record<string, unknown> = { 'discovery.enabled': false, 'discovery.localServers': true, apiKey: '', foundryDeployments: '{}', bedrockModelMap: '{}', zaiModels: [] };
+	const defaults: Record<string, unknown> = { 'acp.agents': [], 'discovery.enabled': false, 'discovery.localServers': true, apiKey: '', foundryDeployments: '{}', bedrockModelMap: '{}', zaiModels: [] };
 	let user: Record<string, unknown>, workspace: Record<string, unknown>, secrets: Map<string, string>, broker: Map<string, string>;
 	let requests: Array<{ url: string; authorization: string | null; apiKey: string | null }>;
+	let changeConfiguration: () => void, failAcpRead: boolean, settingsUpdates: string[], cacheWrites: number;
 	let finder: ProviderFinder, llm: LlmClient, directory: string, restore: () => void;
 
 	setup(async () => {
 		directory = await mkdtemp(path.join(os.tmpdir(), 'sota-finder-config-'));
-		user = {}; workspace = {}; secrets = new Map(); broker = new Map(); requests = [];
+		user = {}; workspace = {}; secrets = new Map(); broker = new Map(); requests = []; failAcpRead = false; settingsUpdates = []; cacheWrites = 0;
 		const original = { getConfiguration: vscode.workspace.getConfiguration, onDidChangeConfiguration: vscode.workspace.onDidChangeConfiguration, onDidChangeWindowState: vscode.window.onDidChangeWindowState, fetch: globalThis.fetch, homedir: os.homedir, metadata: { ...MODEL_METADATA } };
 		const environment = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.endsWith('_API_KEY') || key === 'LM_API_TOKEN'));
 		for (const key of Object.keys(environment)) { delete process.env[key]; }
 		const configuration = {
 			get: <T>(key: string, fallback?: T): T => (workspace[key] ?? user[key] ?? defaults[key] ?? fallback) as T,
-			inspect: <T>(key: string) => ({ key: `sota.${key}`, globalValue: user[key] as T | undefined, workspaceValue: workspace[key] as T | undefined, defaultValue: defaults[key] as T | undefined }),
+			inspect: <T>(key: string) => { if (key === 'acp.agents' && failAcpRead) { throw new Error('private config error'); } return { key: `sota.${key}`, globalValue: user[key] as T | undefined, workspaceValue: workspace[key] as T | undefined, defaultValue: defaults[key] as T | undefined }; },
 			has: (key: string) => key in workspace || key in user || key in defaults,
-			update: async () => {},
+			update: async (key: string) => { settingsUpdates.push(key); },
 		};
-		Object.assign(vscode.workspace, { getConfiguration: () => configuration, onDidChangeConfiguration: () => ({ dispose() {} }) });
+		Object.assign(vscode.workspace, { getConfiguration: () => configuration, onDidChangeConfiguration: (listener: (event: vscode.ConfigurationChangeEvent) => void) => { changeConfiguration = () => listener({ affectsConfiguration: key => key === 'sota.acp.agents' }); return { dispose() {} }; } });
 		Object.assign(vscode.window, { onDidChangeWindowState: () => ({ dispose() {} }) });
 		os.homedir = () => directory;
 		globalThis.fetch = async (input, init) => {
@@ -42,11 +43,12 @@ suite('Provider Finder configuration boundary', () => {
 		};
 		const secretStore = { get: async (key: string) => secrets.get(key), store: async (key: string, value: string) => { secrets.set(key, value); }, delete: async (key: string) => { secrets.delete(key); } };
 		const state = new Map<string, unknown>();
-		const context = { globalState: { get: <T>(key: string) => state.get(key) as T | undefined, update: async (key: string, value: unknown) => { state.set(key, value); } }, secrets: { ...secretStore, onDidChange: () => ({ dispose() {} }) } } as unknown as vscode.ExtensionContext;
+		const context = { globalState: { get: <T>(key: string) => state.get(key) as T | undefined, update: async (key: string, value: unknown) => { cacheWrites++; state.set(key, value); } }, secrets: { ...secretStore, onDidChange: () => ({ dispose() {} }) } } as unknown as vscode.ExtensionContext;
 		llm = new LlmClient(secretStore, liveConfig('sota'), { getToken: async provider => broker.has(provider) ? { token: broker.get(provider)! } : undefined });
 		finder = new ProviderFinder(context, llm);
 		restore = () => {
 			finder.dispose();
+			for (const acpAdapterId of ['finder-removed', 'finder-survivor']) { replaceDiscoveredModels({ provider: 'acp', acpAdapterId }, []); }
 			Object.assign(vscode.workspace, { getConfiguration: original.getConfiguration, onDidChangeConfiguration: original.onDidChangeConfiguration });
 			Object.assign(vscode.window, { onDidChangeWindowState: original.onDidChangeWindowState });
 			globalThis.fetch = original.fetch; os.homedir = original.homedir;
@@ -58,6 +60,59 @@ suite('Provider Finder configuration boundary', () => {
 		};
 	});
 	teardown(async () => { restore?.(); await rm(directory, { recursive: true, force: true }); });
+
+	const removed = { id: 'finder-removed', command: 'fixture-removed' };
+	const survivor = { id: 'finder-survivor', command: 'fixture-survivor' };
+	const acpModel = (agent: typeof removed): DiscoveredModel => ({ id: discoveredAcpModelId(agent.id, 'fixture-model'), provider: 'acp', acpAdapterId: agent.id, model: 'fixture-model', label: agent.id, chat: true, tools: true, images: true, fetchedAt: 1 });
+	const settle = () => new Promise<void>(resolve => setImmediate(resolve));
+	function advertise(agent: typeof removed): void { beginAcpModelCatalog(agent)([acpModel(agent)], false); }
+
+	test('adapter removal and an authoritative empty list retire picker metadata with automatic discovery disabled', async () => {
+		user['acp.agents'] = [removed, survivor]; changeConfiguration();
+		advertise(removed); advertise(survivor); await settle();
+		const removedId = acpModel(removed).id, survivorId = acpModel(survivor).id;
+		user.defaultModel = removedId;
+		assert.ok(MODEL_METADATA[removedId] && MODEL_METADATA[survivorId]);
+		const late = beginAcpModelCatalog(removed);
+		user['acp.agents'] = [survivor]; changeConfiguration();
+		assert.deepEqual([MODEL_METADATA[removedId], getDiscoveredModel(removedId), !!MODEL_METADATA[survivorId], user.defaultModel], [undefined, undefined, true, removedId]);
+		late([acpModel(removed)], false); await settle();
+		user['acp.agents'] = []; changeConfiguration(); await settle();
+		const row = finder.snapshot().providers.find(provider => provider.id === 'acp')!;
+		assert.deepEqual([row.configurationComplete, row.catalogStatus, row.models, MODEL_METADATA[survivorId], requests, settingsUpdates], [true, 'adapter-required', [], undefined, [], []]);
+		assert.ok(cacheWrites > 0 && cacheWrites < 10, 'Retirement must persist without recursive registry captures');
+	});
+
+	test('malformed and unreadable adapter edits retain the registry and picker entries', async () => {
+		user['acp.agents'] = [removed, survivor]; changeConfiguration(); advertise(removed); advertise(survivor); await settle();
+		for (const invalid of [null, {}, [removed, { id: survivor.id }], [removed, removed]]) {
+			user['acp.agents'] = invalid; changeConfiguration(); await settle();
+			const row = finder.snapshot().providers.find(provider => provider.id === 'acp')!;
+			assert.deepEqual([row.catalogStatus, row.configurationComplete, row.models.length, !!MODEL_METADATA[acpModel(removed).id], !!MODEL_METADATA[acpModel(survivor).id]], ['error', false, 2, true, true]);
+		}
+		failAcpRead = true; changeConfiguration(); await settle();
+		assert.ok(!JSON.stringify(finder.snapshot()).includes('private config error'));
+		assert.deepEqual([finder.snapshot().providers.find(provider => provider.id === 'acp')!.models.length, requests], [2, []]);
+	});
+
+	test('provider picker cannot save an ACP model removed while its selection dialog is open', async () => {
+		user['acp.agents'] = [removed]; user['discovery.localServers'] = false; changeConfiguration(); advertise(removed); await settle();
+		const original = { quickPick: vscode.window.showQuickPick, warning: vscode.window.showWarningMessage, progress: vscode.window.withProgress };
+		let selections = 0; const warnings: string[] = [];
+		Object.assign(vscode.window, {
+			withProgress: <T>(_options: vscode.ProgressOptions, task: () => Promise<T>) => task(),
+			showQuickPick: async (items: Array<{ modelId?: string; id?: string }>) => {
+				if (++selections === 1) { return items.find(item => item.modelId === acpModel(removed).id); }
+				user['acp.agents'] = []; changeConfiguration();
+				return items.find(item => item.id === 'select');
+			},
+			showWarningMessage: async (message: string) => { warnings.push(message); },
+		});
+		try { await (finder as unknown as { showPicker(): Promise<void> }).showPicker(); }
+		finally { Object.assign(vscode.window, { showQuickPick: original.quickPick, showWarningMessage: original.warning, withProgress: original.progress }); }
+		assert.deepEqual([selections, settingsUpdates, MODEL_METADATA[acpModel(removed).id]], [2, [], undefined]);
+		assert.match(warnings[0], /no longer available/);
+	});
 
 	test('effective local server URLs match live chat and update without recreating the finder', async () => {
 		user.ollamaBaseUrl = 'http://localhost:11434'; user.lmstudioBaseUrl = 'http://localhost:1234';
