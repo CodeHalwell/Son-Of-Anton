@@ -381,6 +381,7 @@ export class ChatSession {
 	private redirectedController: AbortController | undefined;
 	private previewedContext: { key: string; value: TurnContext } | undefined;
 	private historyFilter: { query: string; scope: 'active' | 'archived' | 'trash'; workspaceOnly: boolean } = { query: '', scope: 'active', workspaceOnly: false };
+	private historySearchController: AbortController | undefined;
 	private costUpdateDebounceTimer: ReturnType<typeof setTimeout> | undefined;
 	/**
 	 * In-flight approval prompts for risky tool calls (Phase 41). Keyed by the
@@ -817,6 +818,8 @@ export class ChatSession {
 				.catch(() => { /* swallow — hooks must never break a session */ });
 		}
 		this.disposed = true;
+		this.historySearchController?.abort();
+		this.historySearchController = undefined;
 		ACTIVE_SESSIONS.delete(this);
 		this.followupQueue.clear();
 		this.abortController?.abort();
@@ -1476,34 +1479,49 @@ export class ChatSession {
 	}
 
 	/**
-	 * Push a compact summary of every conversation in the store to the
-	 * webview so the History tab can render a flat list. Mirrors the
-	 * sidebar tree's data feed without needing a separate provider.
+	 * Search text asynchronously and publish only the latest requested page.
+	 * Superseded searches release their storage readers when cancelled.
 	 */
-	private postHistorySnapshot(offset = 0): void {
+	private async postHistorySnapshot(offset = 0): Promise<void> {
 		if (this.disposed) {
 			return;
 		}
-		const workspaceIds = new Set(this.conversationStore.listForWorkspace().map(summary => summary.id));
-		const result = this.conversationStore.search({ ...this.historyFilter, offset, limit: 50 });
-		const summaries = result.items.map(s => ({
-			id: s.id,
-			title: s.title,
-			updatedAt: s.updatedAt,
-			messageCount: s.messageCount,
-			lastSpecialist: s.lastSpecialist,
-			workspaceName: s.workspaceName,
-			pinned: s.pinned, archived: s.archived, deletedAt: s.deletedAt, branch: s.branch,
-			searchText: this.historyFilter.query,
-			inCurrentWorkspace: workspaceIds.has(s.id),
-		}));
-		this.webview.postMessage({
-			type: 'historySnapshot',
-			activeId: this.currentConversationId,
-			conversations: summaries,
-			query: this.historyFilter.query, historyScope: this.historyFilter.scope, workspaceOnly: this.historyFilter.workspaceOnly,
-			total: result.total, nextOffset: result.nextOffset, append: offset > 0,
-		});
+		this.historySearchController?.abort();
+		const controller = new AbortController();
+		this.historySearchController = controller;
+		const filter = { ...this.historyFilter };
+		try {
+			const result = await this.conversationStore.searchAsync({ ...filter, offset, limit: 50 }, controller.signal);
+			if (this.disposed || controller.signal.aborted || this.historySearchController !== controller) {
+				return;
+			}
+			const summaries = result.items.map(s => ({
+				id: s.id,
+				title: s.title,
+				updatedAt: s.updatedAt,
+				messageCount: s.messageCount,
+				lastSpecialist: s.lastSpecialist,
+				workspaceName: s.workspaceName,
+				pinned: s.pinned, archived: s.archived, deletedAt: s.deletedAt, branch: s.branch,
+				searchText: filter.query,
+				inCurrentWorkspace: this.conversationStore.isInCurrentWorkspace(s),
+			}));
+			this.webview.postMessage({
+				type: 'historySnapshot',
+				activeId: this.currentConversationId,
+				conversations: summaries,
+				query: filter.query, historyScope: filter.scope, workspaceOnly: filter.workspaceOnly,
+				total: result.total, nextOffset: result.nextOffset, append: offset > 0,
+			});
+		} catch (error) {
+			if (!this.disposed && !controller.signal.aborted) {
+				console.warn('[chat] history search failed:', error);
+			}
+		} finally {
+			if (this.historySearchController === controller) {
+				this.historySearchController = undefined;
+			}
+		}
 	}
 
 	/**
@@ -4885,7 +4903,7 @@ export class ChatSession {
 				<button type="button" class="history-pane-new" data-workflow-command="sota.exportResponseFeedback" data-ui-text="exportFeedback"></button>
 				<select id="historyView" data-ui-label="historyView"><option value="active" data-ui-text="activeHistory"></option><option value="archived" data-ui-text="archivedHistory"></option><option value="trash" data-ui-text="trashHistory"></option></select>
 				<button type="button" id="councilHistoryBtn" class="history-pane-new" data-ui-text="councilHistory"></button>
-				<label class="history-search"><input type="search" id="historySearch" data-ui-label="searchConversations" data-ui-placeholder="searchConversations" autocomplete="off" /></label>
+				<label class="history-search"><input type="search" id="historySearch" data-ui-label="searchConversations" data-ui-placeholder="searchConversations" autocomplete="off" maxlength="1000" /></label>
 				<div class="history-scope" role="group" data-ui-label="historyScope">
 					<button type="button" data-history-scope="all" aria-pressed="true" data-ui-text="allWorkspaces"></button>
 					<button type="button" data-history-scope="workspace" aria-pressed="false" data-ui-text="thisWorkspace"></button>

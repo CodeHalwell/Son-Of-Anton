@@ -99,7 +99,7 @@ export class ConversationActions {
 		if (!view) { return; }
 		const query = await vscode.window.showInputBox({ prompt: vscode.l10n.t('Search conversation titles and messages (leave empty for all)') });
 		if (query === undefined) { return; }
-		const matches = this.store.search({ scope: view.scope, query, limit: Number.MAX_SAFE_INTEGER });
+		const matches = await this.store.searchAsync({ scope: view.scope, query, limit: Number.MAX_SAFE_INTEGER });
 		const picked = await vscode.window.showQuickPick(matches.items.map(summary => ({ label: `${summary.pinned ? '$(pin) ' : ''}${summary.title}`, description: summary.workspaceName, detail: vscode.l10n.t('{0} messages', summary.messageCount), summary })), { title: vscode.l10n.t('Conversation History'), matchOnDescription: true });
 		if (!picked) { return; }
 		if (view.scope === 'trash') {

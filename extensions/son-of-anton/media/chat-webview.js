@@ -936,22 +936,32 @@
 
 		const historySearch = document.getElementById('historySearch');
 		const historyView = document.getElementById('historyView');
-		function requestHistory(offset = 0) { vscode.postMessage({ type: 'searchHistory', query: historySearch.value.trim(), historyScope: historyView.value, workspaceOnly: historyScope === 'workspace', offset }); }
+		let historySearchTimer;
+		function requestHistory(offset = 0) {
+			clearTimeout(historySearchTimer);
+			historySearchTimer = undefined;
+			if (offset && (lastHistorySnapshot?.query !== historySearch.value.trim() || lastHistorySnapshot?.historyScope !== historyView.value || lastHistorySnapshot?.workspaceOnly !== (historyScope === 'workspace'))) offset = 0;
+			vscode.postMessage({ type: 'searchHistory', query: historySearch.value.trim(), historyScope: historyView.value, workspaceOnly: historyScope === 'workspace', offset });
+		}
+		window.addEventListener('pagehide', () => clearTimeout(historySearchTimer));
 		historyView.addEventListener('change', () => updateHistoryFilters());
 		document.querySelectorAll('[data-workflow-command]').forEach(button => button.addEventListener('click', () => vscode.postMessage({ type: 'workflowCommand', command: button.dataset.workflowCommand })));
 		const historyShowMore = document.getElementById('historyShowMore');
 		let historyLimit = 50;
 		const historySaved = vscode.getState()?.historyFilters;
 		let historyScope = historySaved?.scope === 'workspace' ? 'workspace' : 'all';
-		historySearch.value = typeof historySaved?.query === 'string' ? historySaved.query : '';
+		historySearch.value = typeof historySaved?.query === 'string' ? historySaved.query.slice(0, 1000) : '';
 		const historyClearFilters = document.getElementById('historyClearFilters');
-		function updateHistoryFilters() {
+		function updateHistoryFilters(debounce = false) {
 			historyLimit = 50;
 			vscode.setState({ ...vscode.getState(), historyFilters: { query: historySearch.value, scope: historyScope } });
-			requestHistory();
+			clearTimeout(historySearchTimer);
+			if (debounce) historySearchTimer = setTimeout(() => requestHistory(), 250);
+			else requestHistory();
 			renderHistoryPane(lastHistorySnapshot);
 		}
-		historySearch.addEventListener('input', updateHistoryFilters);
+		historySearch.addEventListener('input', () => updateHistoryFilters(true));
+		historySearch.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); requestHistory(); } });
 		document.querySelectorAll('[data-history-scope]').forEach(button => button.addEventListener('click', () => { historyScope = button.dataset.historyScope; updateHistoryFilters(); }));
 		historyClearFilters.addEventListener('click', () => { historyScope = 'all'; historySearch.value = ''; updateHistoryFilters(); historySearch.focus(); });
 		historyShowMore.addEventListener('click', () => { historyLimit += 50; if (lastHistorySnapshot?.nextOffset !== undefined) requestHistory(lastHistorySnapshot.nextOffset); else renderHistoryPane(lastHistorySnapshot); });

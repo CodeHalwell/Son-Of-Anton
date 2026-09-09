@@ -51,7 +51,9 @@ function createSession() {
 		update: (id: string, content: ChatMessage[], _specialist: string, _mode: string, _tab: string, model: ModelId) => { conversations.set(id, [...content]); models.set(id, model); },
 		list: () => Array.from(conversations, ([id, content]) => ({ id, title: id, updatedAt: 1, messageCount: content.length })),
 		listForWorkspace() { return this.list(); },
+		isInCurrentWorkspace: () => true,
 		search() { return { items: this.list(), total: conversations.size }; },
+		async searchAsync() { return this.search(); },
 		getInitialConversation: () => { const id = conversations.keys().next().value; return id ? { summary: { id }, messages: conversations.get(id) ?? [] } : undefined; },
 		load: (id: string) => conversations.has(id) ? ({ summary: { id, lastModel: models.get(id) }, messages: conversations.get(id) ?? [] }) : undefined,
 		create: () => { conversations.set('fresh', []); return { summary: { id: 'fresh' }, messages: [] }; },
@@ -214,7 +216,9 @@ suite('Chat turn ownership', () => {
 		f.conversations.delete('first'); f.session.handleConversationDeleted('first');
 		const count = f.messages.length;
 		request.emit({ type: 'token', token: 'Do not restore deleted work' }); request.release(); await request.done;
-		assert.deepEqual({ aborted: controller?.signal.aborted, resurrected: f.conversations.has('first'), lateMessages: f.messages.length - count }, { aborted: true, resurrected: false, lateMessages: 0 });
+		// The replacement conversation's async history refresh can settle after deletion; old stream events cannot.
+		const lateMessages = f.messages.slice(count).map(message => ({ type: message.type, activeId: message.activeId, conversationIds: Array.isArray(message.conversations) ? message.conversations.map((summary: { id: string }) => summary.id) : undefined }));
+		assert.deepEqual({ aborted: controller?.signal.aborted, resurrected: f.conversations.has('first'), lateMessages }, { aborted: true, resurrected: false, lateMessages: [{ type: 'historySnapshot', activeId: 'second', conversationIds: ['second'] }] });
 		assert.equal(f.messages.find(message => message.type === 'loadConversation')?.conversationId, 'second');
 	});
 

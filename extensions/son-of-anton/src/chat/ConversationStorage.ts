@@ -8,6 +8,7 @@ import * as path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import type { ConversationRecord, ConversationSummary } from './ConversationStore';
 import type { ChatMessage } from './ChatPanel';
+import { buildLegacySearchIndex, searchIndexMatches, writeSearchIndex } from './ConversationSearchIndex';
 
 interface Manifest { version: 1; summary: ConversationSummary; pages: string[] }
 const PAGE_SIZE = 100;
@@ -20,27 +21,91 @@ export interface ConversationRecoveryIssue { readonly path: string; readonly mes
 export class ConversationStorage {
 	constructor(private readonly directory: string, private readonly onRecoveryIssue: (issue: ConversationRecoveryIssue) => void = () => {}) {}
 	private folder(id: string): string { return path.join(this.directory, createHash('sha256').update(id).digest('hex')); }
+	private parseManifest(body: string, file: string, expectedId?: string): Manifest {
+		const value = JSON.parse(body) as Manifest;
+		const summary = value?.summary;
+		if (value?.version !== 1 || !summary || typeof summary.id !== 'string' || !summary.id || typeof summary.title !== 'string'
+			|| (expectedId !== undefined && summary.id !== expectedId) || this.folder(summary.id) !== path.dirname(file)
+			|| !Number.isFinite(summary.createdAt) || !Number.isFinite(summary.updatedAt) || !Number.isSafeInteger(summary.messageCount) || summary.messageCount < 0
+			|| ['lastSpecialist', 'lastModel', 'workspaceId', 'workspaceName'].some(key => { const field = summary[key as keyof ConversationSummary]; return field !== undefined && typeof field !== 'string'; })
+			|| ['pinned', 'archived'].some(key => { const field = summary[key as keyof ConversationSummary]; return field !== undefined && typeof field !== 'boolean'; })
+			|| (summary.deletedAt !== undefined && !Number.isFinite(summary.deletedAt))
+			|| (summary.lastMode !== undefined && !['act', 'plan'].includes(summary.lastMode))
+			|| (summary.lastTab !== undefined && !['chat', 'tasks', 'history', 'settings', 'roster'].includes(summary.lastTab))
+			|| (summary.branch !== undefined && (!summary.branch || typeof summary.branch.parentId !== 'string' || !Number.isSafeInteger(summary.branch.throughMessageIndex) || summary.branch.throughMessageIndex < 0 || !['checkpoint-available', 'unlinked'].includes(summary.branch.workspaceState) || (summary.branch.checkpointId !== undefined && typeof summary.branch.checkpointId !== 'string')))
+			|| !Array.isArray(value.pages) || value.pages.length !== Math.ceil(summary.messageCount / PAGE_SIZE) || value.pages.some(page => typeof page !== 'string' || !/^[a-f0-9]{64}\.json$/.test(page))) { throw new Error('Invalid conversation manifest.'); }
+		return value;
+	}
 	private manifest(file: string, expectedId?: string): Manifest | undefined {
 		try {
-			const value = JSON.parse(fs.readFileSync(file, 'utf8')) as Manifest;
-			const summary = value?.summary;
-			if (value?.version !== 1 || !summary || typeof summary.id !== 'string' || !summary.id || typeof summary.title !== 'string'
-				|| (expectedId !== undefined && summary.id !== expectedId) || this.folder(summary.id) !== path.dirname(file)
-				|| !Number.isFinite(summary.createdAt) || !Number.isFinite(summary.updatedAt) || !Number.isSafeInteger(summary.messageCount) || summary.messageCount < 0
-				|| ['lastSpecialist', 'lastModel', 'workspaceId', 'workspaceName'].some(key => { const field = summary[key as keyof ConversationSummary]; return field !== undefined && typeof field !== 'string'; })
-				|| ['pinned', 'archived'].some(key => { const field = summary[key as keyof ConversationSummary]; return field !== undefined && typeof field !== 'boolean'; })
-				|| (summary.deletedAt !== undefined && !Number.isFinite(summary.deletedAt))
-				|| (summary.lastMode !== undefined && !['act', 'plan'].includes(summary.lastMode))
-				|| (summary.lastTab !== undefined && !['chat', 'tasks', 'history', 'settings', 'roster'].includes(summary.lastTab))
-				|| (summary.branch !== undefined && (!summary.branch || typeof summary.branch.parentId !== 'string' || !Number.isSafeInteger(summary.branch.throughMessageIndex) || summary.branch.throughMessageIndex < 0 || !['checkpoint-available', 'unlinked'].includes(summary.branch.workspaceState) || (summary.branch.checkpointId !== undefined && typeof summary.branch.checkpointId !== 'string')))
-				|| !Array.isArray(value.pages) || value.pages.length !== Math.ceil(summary.messageCount / PAGE_SIZE) || value.pages.some(page => typeof page !== 'string' || !/^[a-f0-9]{64}\.json$/.test(page))) { throw new Error('Invalid conversation manifest.'); }
-			return value;
+			return this.parseManifest(fs.readFileSync(file, 'utf8'), file, expectedId);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return undefined; }
 			this.onRecoveryIssue({ path: file, message: error instanceof Error ? error.message : String(error) });
 			throw new Error('Conversation manifest failed its integrity check.', { cause: error });
 		}
 	}
+	private async manifestAsync(file: string, expectedId?: string): Promise<Manifest | undefined> {
+		try { return this.parseManifest(await fsp.readFile(file, 'utf8'), file, expectedId); }
+		catch (error) {
+			if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return undefined; }
+			this.onRecoveryIssue({ path: file, message: error instanceof Error ? error.message : String(error) });
+			throw new Error('Conversation manifest failed its integrity check.', { cause: error });
+		}
+	}
+	async listAsync(signal?: AbortSignal): Promise<ConversationSummary[]> {
+		let entries: fs.Dirent[];
+		try { entries = await fsp.readdir(this.directory, { withFileTypes: true }); }
+		catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { this.onRecoveryIssue({ path: this.directory, message: error instanceof Error ? error.message : String(error) }); }
+			return [];
+		}
+		const summaries: ConversationSummary[] = [];
+		for (const entry of entries) {
+			signal?.throwIfAborted();
+			if (!entry.isDirectory() || !/^[a-f0-9]{64}$/.test(entry.name)) { continue; }
+			try { const manifest = await this.manifestAsync(path.join(this.directory, entry.name, 'manifest.json')); if (manifest) { summaries.push(manifest.summary); } }
+			catch { /* A damaged manifest does not hide healthy history. */ }
+		}
+		return summaries;
+	}
+
+	/** Search immutable, text-only derived pages while retaining the selected message snapshot. */
+	async matches(id: string, query: string, signal?: AbortSignal): Promise<boolean> {
+		const folder = this.folder(id); const manifestFile = path.join(folder, 'manifest.json');
+		for (let attempt = 0; attempt < 5; attempt++) {
+			signal?.throwIfAborted();
+			const manifest = await this.manifestAsync(manifestFile, id); if (!manifest) { return false; }
+			let lease: string | undefined;
+			try { lease = this.createLease(folder, 'reader', manifest.pages); }
+			catch (error) { if (!['EROFS', 'EACCES', 'EPERM', 'ENOSPC', 'EDQUOT'].includes((error as NodeJS.ErrnoException).code ?? '')) { throw error; } }
+			try {
+				const current = await this.manifestAsync(manifestFile, id);
+				if (!current || JSON.stringify(current.pages) !== JSON.stringify(manifest.pages)) { continue; }
+				let failedPage = folder;
+				try {
+					for (const page of manifest.pages) {
+						signal?.throwIfAborted(); const file = path.join(folder, page); const index = `${file}.search`; failedPage = file;
+						try { if (await searchIndexMatches(index, query, signal)) { return true; } }
+						catch {
+							signal?.throwIfAborted();
+							// Derived caches may be rebuilt, but the authoritative page must pass integrity checks.
+							const rebuilt = await buildLegacySearchIndex(file, index, query, signal);
+							if (rebuilt.cacheError) { this.onRecoveryIssue({ path: index, message: `Conversation search cache could not be saved: ${rebuilt.cacheError}` }); }
+							if (rebuilt.matched) { return true; }
+						}
+					}
+					return false;
+				} catch (error) {
+					signal?.throwIfAborted();
+					if (!lease) { const latest = await this.manifestAsync(manifestFile, id); if (!latest || JSON.stringify(latest.pages) !== JSON.stringify(manifest.pages)) { continue; } }
+					this.onRecoveryIssue({ path: failedPage, message: error instanceof Error ? error.message : String(error) }); throw error;
+				}
+			} finally { if (lease) { await fsp.rm(lease, { force: true }); } }
+		}
+		throw new Error('Conversation changed repeatedly while searching. Please try again.');
+	}
+
 	list(): ConversationSummary[] {
 		let entries: fs.Dirent[];
 		try { entries = fs.readdirSync(this.directory, { withFileTypes: true }); }
@@ -99,19 +164,23 @@ export class ConversationStorage {
 	}
 	async save(record: ConversationRecord): Promise<void> {
 		const folder = this.folder(record.summary.id); await fsp.mkdir(folder, { recursive: true, mode: 0o700 });
-		const bodies = new Map<string, string>(); const pages: string[] = [];
+		const bodies = new Map<string, { body: string; messages: ChatMessage[] }>(); const pages: string[] = [];
 		for (let offset = 0; offset < record.messages.length; offset += PAGE_SIZE) {
-			const body = JSON.stringify(record.messages.slice(offset, offset + PAGE_SIZE));
+			const messages = record.messages.slice(offset, offset + PAGE_SIZE); const body = JSON.stringify(messages);
 			const name = `${createHash('sha256').update(body).digest('hex')}.json`; pages.push(name);
-			bodies.set(name, body);
+			bodies.set(name, { body, messages });
 		}
 		const lease = this.createLease(folder, 'writer', pages);
 		try {
 			// Publish prospective hashes before checking the collection barrier. A collector
 			// either retains this lease or finishes before the writer checks/reuses any pages.
 			await this.waitForCollectors(folder);
-			for (const [name, body] of bodies) {
+			for (const [name, { body, messages }] of bodies) {
 				if (!fs.existsSync(path.join(folder, name))) { await this.atomicWrite(path.join(folder, name), body); }
+				if (!fs.existsSync(path.join(folder, `${name}.search`))) {
+					try { await writeSearchIndex(path.join(folder, `${name}.search`), messages); }
+					catch (error) { this.onRecoveryIssue({ path: path.join(folder, `${name}.search`), message: `Conversation search cache could not be saved: ${error instanceof Error ? error.message : String(error)}` }); }
+				}
 			}
 			await this.atomicWrite(path.join(folder, 'manifest.json'), JSON.stringify({ version: 1, summary: { ...record.summary, messageCount: record.messages.length }, pages } satisfies Manifest));
 			this.collectPages(folder, record.summary.id);
@@ -164,7 +233,8 @@ export class ConversationStorage {
 				}
 			}
 			for (const name of entries) {
-				if ((PAGE_NAME.test(name) && !retained.has(name)) || (OWNER_FILE.test(name) && !this.liveOwner(name))) { fs.rmSync(path.join(folder, name), { force: true }); }
+				const indexedPage = name.endsWith('.search') ? name.slice(0, -7) : name;
+				if ((PAGE_NAME.test(indexedPage) && !retained.has(indexedPage)) || (OWNER_FILE.test(name) && !this.liveOwner(name))) { fs.rmSync(path.join(folder, name), { force: true }); }
 			}
 		} catch (error) {
 			// Cleanup is best effort after the manifest is durable; preserve data on uncertainty.

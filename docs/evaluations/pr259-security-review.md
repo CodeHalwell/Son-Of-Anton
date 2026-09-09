@@ -2,7 +2,7 @@
 
 The review addressed CodeQL's model-label property injection finding with `Map` dictionaries and catalog ID filtering in the chat webview. Catalog refreshes cannot overwrite built-in model metadata, special object keys cannot alter dictionary prototypes, and removed catalog entries lose their picker metadata. Browser regressions exercise these cases through the shipped webview.
 
-The impact classifier now uses separate directory and filename predicates, with path-boundary tests for POSIX and Windows. File checkpoints inspect an opened descriptor before reading, compare its identity with the path before and after bounded reads, reject symlinks, and reject substitutions or growth. These changes address the regex and file-capture findings; the next CodeQL analysis determines their alert status.
+The impact classifier now uses separate directory and filename predicates, with path-boundary tests for POSIX and Windows. File checkpoints inspect an opened descriptor before reading, compare its identity with the path before and after bounded reads, reject symlinks, and reject substitutions or growth. CodeQL marked these findings and the model-property injection finding fixed on the PR; analysis of review commit `4baa6856bdf` contained only the two configured-provider flows below.
 
 ## Provider catalog network boundary
 

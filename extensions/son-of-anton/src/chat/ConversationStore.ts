@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { ConversationStorage, type ConversationRecoveryIssue } from './ConversationStorage';
+import { conversationTextChunks, MAX_HISTORY_QUERY_LENGTH } from './ConversationSearchIndex';
 import { ChatMessage } from './ChatPanel';
 import { AgentHandle } from 'son-of-anton-core/agents/types';
 import { ChatMode } from 'son-of-anton-core/agents/agentEvents';
@@ -81,6 +82,9 @@ export interface ConversationRecord {
 	readonly summary: ConversationSummary;
 	readonly messages: ChatMessage[];
 }
+
+export interface ConversationSearchOptions { query?: string; scope?: 'active' | 'archived' | 'trash' | 'all'; workspaceOnly?: boolean; offset?: number; limit?: number }
+export interface ConversationSearchResult { items: ConversationSummary[]; total: number; nextOffset?: number }
 
 /**
  * Generate a v4-shape UUID without pulling in the `crypto` library — works
@@ -160,6 +164,7 @@ export class ConversationStore implements vscode.Disposable {
 	get recoveryIssues(): ReadonlyArray<ConversationRecoveryIssue> { return [...this.encounteredRecoveryIssues.values()]; }
 
 	private readonly disk: ConversationStorage | undefined;
+	private readonly searchLifetime = new AbortController();
 	private readonly pendingRecords = new Map<string, ConversationRecord | null>();
 	private pendingWrite: Promise<void> = Promise.resolve();
 	private writeFailure: Error | undefined;
@@ -247,8 +252,10 @@ export class ConversationStore implements vscode.Disposable {
 
 	/** Conversations created in this workspace; older history remains in list(). */
 	listForWorkspace(): ReadonlyArray<ConversationSummary> {
-		return this.list().filter(summary => summary.workspaceId === this.workspaceId);
+		return this.list().filter(summary => this.isInCurrentWorkspace(summary));
 	}
+
+	isInCurrentWorkspace(summary: ConversationSummary): boolean { return summary.workspaceId === this.workspaceId; }
 
 	/** Resume a conversation explicitly selected here; otherwise restore only this workspace’s history. */
 	getInitialConversation(): ConversationRecord | undefined {
@@ -406,20 +413,58 @@ export class ConversationStore implements vscode.Disposable {
 		this.persist(record); this._onDidChange.fire(); return record;
 	}
 
-	/** Full-text search includes message bodies and returns only the requested page of summaries. */
-	search(options: { query?: string; scope?: 'active' | 'archived' | 'trash' | 'all'; workspaceOnly?: boolean; offset?: number; limit?: number } = {}): { items: ConversationSummary[]; total: number; nextOffset?: number } {
-		const query = options.query?.trim().toLocaleLowerCase(); const scope = options.scope ?? 'active';
-		const matches = this.readIndex().filter(summary => {
-			if (options.workspaceOnly && summary.workspaceId !== this.workspaceId) { return false; }
-			if (scope === 'trash' ? !summary.deletedAt : scope === 'archived' ? summary.deletedAt || !summary.archived : scope === 'active' ? summary.deletedAt || summary.archived : false) { return false; }
-			if (!query || [summary.title, summary.workspaceName, summary.lastSpecialist].some(value => value?.toLocaleLowerCase().includes(query))) { return true; }
+	/** Synchronous metadata-only listing. Body queries must use searchAsync to avoid blocking the host. */
+	search(options: ConversationSearchOptions = {}): ConversationSearchResult {
+		const query = this.normaliseQuery(options.query);
+		return this.searchPage(this.readIndex().filter(summary => this.inSearchScope(summary, options) && this.matchesMetadata(summary, query)), options);
+	}
+
+	/** Exact body search reads text-only indexes in cancellable bounded chunks; it never loads transcripts. */
+	async searchAsync(options: ConversationSearchOptions = {}, cancellation?: AbortSignal): Promise<ConversationSearchResult> {
+		const signal = cancellation ? AbortSignal.any([cancellation, this.searchLifetime.signal]) : this.searchLifetime.signal;
+		signal.throwIfAborted(); const query = this.normaliseQuery(options.query);
+		const summaries = this.disk ? await this.disk.listAsync(signal) : this.readIndex();
+		const index = new Map(summaries.map(summary => [summary.id, summary]));
+		for (const [id, record] of this.pendingRecords) { if (record) { index.set(id, record.summary); } else { index.delete(id); } }
+		const matches: ConversationSummary[] = [];
+		for (const summary of index.values()) {
+			signal.throwIfAborted();
+			if (!this.inSearchScope(summary, options)) { continue; }
+			if (this.matchesMetadata(summary, query)) { matches.push(summary); continue; }
 			try {
-				return this.load(summary.id, true)?.messages.some(message => {
-					const text = typeof message.content === 'string' ? message.content : message.content.filter(part => part.type === 'text').map(part => part.type === 'text' ? part.text : '').join(' ');
-					return text.toLocaleLowerCase().includes(query);
-				}) ?? false;
-			} catch { return false; }
-		}).sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
+				const pending = this.pendingRecords.get(summary.id);
+				if (this.disk && !pending) {
+					if (await this.disk.matches(summary.id, query, signal)) { matches.push(summary); }
+				} else {
+					const messages = pending?.messages ?? this.context.globalState.get<ChatMessage[]>(recordKey(summary.id)) ?? [];
+					for (const text of conversationTextChunks(messages)) {
+						signal.throwIfAborted();
+						if (text.includes(query)) { matches.push(summary); break; }
+						await new Promise<void>(resolve => setImmediate(resolve));
+					}
+				}
+			} catch { signal.throwIfAborted(); /* Damaged histories retain their visible metadata and recovery notice. */ }
+		}
+		signal.throwIfAborted(); return this.searchPage(matches, options);
+	}
+
+	private normaliseQuery(query?: string): string {
+		if ((query?.length ?? 0) > MAX_HISTORY_QUERY_LENGTH) { throw new Error(vscode.l10n.t('Search text is too long. Use {0} characters or fewer.', MAX_HISTORY_QUERY_LENGTH)); }
+		return query?.trim().toLowerCase() ?? '';
+	}
+
+	private inSearchScope(summary: ConversationSummary, options: ConversationSearchOptions): boolean {
+		if (options.workspaceOnly && summary.workspaceId !== this.workspaceId) { return false; }
+		const scope = options.scope ?? 'active';
+		return !(scope === 'trash' ? !summary.deletedAt : scope === 'archived' ? summary.deletedAt || !summary.archived : scope === 'active' ? summary.deletedAt || summary.archived : false);
+	}
+
+	private matchesMetadata(summary: ConversationSummary, query: string): boolean {
+		return !query || [summary.title, summary.workspaceName, summary.lastSpecialist].some(value => value?.toLowerCase().includes(query));
+	}
+
+	private searchPage(matches: ConversationSummary[], options: ConversationSearchOptions): ConversationSearchResult {
+		matches.sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
 		const offset = Math.max(0, Math.floor(options.offset ?? 0)); const limit = Math.max(1, Math.floor(options.limit ?? 50));
 		return { items: matches.slice(offset, offset + limit), total: matches.length, nextOffset: offset + limit < matches.length ? offset + limit : undefined };
 	}
@@ -437,6 +482,7 @@ export class ConversationStore implements vscode.Disposable {
 	}
 
 	dispose(): void {
+		this.searchLifetime.abort();
 		this._onDidChange.dispose(); this._onDidDelete.dispose(); this._onDidChangeActive.dispose(); this._onDidPermanentlyDelete.dispose(); this._onDidEncounterRecoveryIssue.dispose();
 	}
 

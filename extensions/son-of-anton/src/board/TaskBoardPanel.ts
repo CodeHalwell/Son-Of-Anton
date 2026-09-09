@@ -8,7 +8,7 @@ import { randomUUID } from 'crypto';
 import { isWebviewToHostMessage, type DispatchMessage, type ReassignMessage, type RerunMessage, type RevealMessage, type BoardActionMessage, type ChatRuntimeRequestMessage as ChatRuntimeMessage, type ChatToolDefinition, type ChatRuntimeChunkMessage } from './webview/protocol';
 export type { ChatToolDefinition } from './webview/protocol';
 import { ConversationStore } from '../chat/ConversationStore';
-import { getPersona } from 'son-of-anton-core/chat/personas';
+import { getPersona, getRoster } from 'son-of-anton-core/chat/personas';
 import { BoardSnapshot, BoardTask, TaskBoardModel } from './TaskBoardModel';
 import { dependencyRevision } from './webview/dependencyGraph';
 
@@ -69,6 +69,8 @@ export class TaskBoardPanel {
 	private readonly disposables: vscode.Disposable[] = [];
 	private readonly activeChatStreams = new Map<string, vscode.Disposable>();
 	private readonly pendingReruns = new Set<string>();
+	private boardActionQueue: Promise<void> = Promise.resolve();
+	private conversationGeneration = 0;
 	private closed = false;
 	private currentConversationId: string | undefined;
 
@@ -143,6 +145,7 @@ export class TaskBoardPanel {
 	dispose(): void {
 		if (this.closed) { return; }
 		this.closed = true;
+		this.conversationGeneration++;
 		TaskBoardPanel.currentPanel = undefined;
 		// Cancel any chat streams in flight so their disposables release.
 		this.cancelChatStreams();
@@ -155,6 +158,7 @@ export class TaskBoardPanel {
 
 	switchConversation(conversationId: string | undefined): void {
 		if (conversationId === this.currentConversationId) { return; }
+		this.conversationGeneration++;
 		this.cancelChatStreams();
 		this.currentConversationId = conversationId;
 		this.pushSnapshot();
@@ -236,7 +240,7 @@ export class TaskBoardPanel {
 				}
 				return;
 			case 'board-action':
-				void this.confirmBoardAction(message as BoardActionMessage).catch(error => vscode.window.showErrorMessage(String(error)));
+				this.queueBoardAction(message);
 				return;
 			case 'chat-runtime':
 				this.handleChatRuntime(message as ChatRuntimeMessage);
@@ -256,15 +260,28 @@ export class TaskBoardPanel {
 		this.model.setDependencies(conversationId, taskId, dependencies, expectedRevision);
 	}
 
-	private async confirmBoardAction(message: BoardActionMessage): Promise<void> {
+	/** Review and apply proposals in order, each against the board left by its predecessor. */
+	private queueBoardAction(message: BoardActionMessage): void {
 		const conversationId = this.currentConversationId; if (!conversationId) { return; }
+		const generation = this.conversationGeneration;
+		const isCurrent = () => !this.closed && this.currentConversationId === conversationId && this.conversationGeneration === generation;
+		this.boardActionQueue = this.boardActionQueue.then(async () => {
+			if (isCurrent()) { await this.confirmBoardAction(message, conversationId, isCurrent); }
+		}).catch(error => {
+			// A declined or failed proposal must not reject the queue tail and
+			// prevent the remaining proposals from being reviewed.
+			if (isCurrent()) { void vscode.window.showErrorMessage(String(error)); }
+		});
+	}
+
+	private async confirmBoardAction(message: BoardActionMessage, conversationId: string, isCurrent: () => boolean): Promise<void> {
 		const snapshot = this.model.getSnapshot(conversationId); if (!snapshot) { return; }
 		if (message.cardId && !snapshot.tasks.some(task => task.id === message.cardId)) { throw new Error('Proposed board action refers to a missing task.'); }
-		if (message.assignee && !snapshot.tasks.some(task => task.assignee === message.assignee)) { throw new Error('Proposed assignee is not on this board.'); }
+		if (message.assignee && !getPersona(message.assignee)) { throw new Error('Proposed assignee is not a registered specialist.'); }
 		const revision = dependencyRevision(snapshot.tasks);
 		const action = vscode.l10n.t('Apply Board Proposal');
 		const confirmed = await vscode.window.showInformationMessage(vscode.l10n.t('Apply the assistant’s proposed board change?'), { modal: true, detail: JSON.stringify(message, null, 2) }, action);
-		if (confirmed !== action || this.closed || this.currentConversationId !== conversationId) { return; }
+		if (confirmed !== action || !isCurrent()) { return; }
 		const current = this.model.getSnapshot(conversationId);
 		if (!current || dependencyRevision(current.tasks) !== revision) { throw new Error('Board changed while reviewing this proposal. Ask for a fresh proposal.'); }
 		this.handleBoardAction(message);
@@ -386,7 +403,7 @@ export class TaskBoardPanel {
 			conversationId: conversationId ?? null,
 			conversationTitle,
 			snapshot: snapshot ? this.serializeSnapshot(snapshot) : null,
-			personas: this.serializePersonas(snapshot),
+			personas: this.serializePersonas(),
 		});
 	}
 
@@ -416,31 +433,12 @@ export class TaskBoardPanel {
 	}
 
 	/**
-	 * Provide every persona referenced by the current board so the webview
-	 * can colour avatars without a second round-trip. Falls back to a
-	 * generic '?' persona when an assignee has no registered persona (e.g.
-	 * a reassignment to an as-yet-unknown handle).
+	 * Expose the host roster for both avatars and assistant assignment options,
+	 * including specialists who do not yet own a task. Cards with old unknown
+	 * handles use the webview's fallback avatar without offering those handles.
 	 */
-	private serializePersonas(snapshot: BoardSnapshot | undefined): unknown {
-		if (!snapshot) {
-			return [];
-		}
-		const seen = new Set<string>();
-		const result: Array<{ id: string; monogram: string; accent: string; tagline: string }> = [];
-		for (const task of snapshot.tasks) {
-			if (seen.has(task.assignee)) {
-				continue;
-			}
-			seen.add(task.assignee);
-			const persona = getPersona(task.assignee);
-			result.push({
-				id: task.assignee,
-				monogram: persona?.monogram ?? '?',
-				accent: persona?.accent ?? 'var(--vscode-descriptionForeground)',
-				tagline: persona?.tagline ?? '',
-			});
-		}
-		return result;
+	private serializePersonas(): unknown {
+		return getRoster().map(({ id, monogram, accent, tagline }) => ({ id, monogram, accent, tagline }));
 	}
 
 	/**

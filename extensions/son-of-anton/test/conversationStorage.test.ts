@@ -49,7 +49,7 @@ suite('Conversation immutable page collection', () => {
 			const pending = otherWindow.save(original); await paused.promise;
 			try {
 				await storage.save(record('replacement'));
-				assert.ok(originalPages.every(page => fs.existsSync(path.join(folder, page))), 'A future committed manifest still needs the staged writer hashes');
+				assert.ok(originalPages.every(page => fs.existsSync(path.join(folder, page)) && fs.existsSync(path.join(folder, `${page}.search`))), 'A future committed manifest still needs the staged writer hashes');
 			} finally { release.resolve(); await pending; }
 			assert.deepEqual({ loaded: storage.load('conversation'), pages: pages(folder) }, { loaded: original, pages: originalPages });
 		});

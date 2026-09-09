@@ -349,12 +349,12 @@ suite('ConversationStore — Phase 47', () => {
 		assert.strictEqual(count, 4);
 		store.dispose();
 	});
-	test('pinning, archive, body search and Trash are independent and recoverable', () => {
+	test('pinning, archive, body search and Trash are independent and recoverable', async () => {
 		const { context } = makeContext(); const store = new ConversationStore(context, 'project', 'Project');
 		try {
 			const first = store.create([userMsg('First'), assistantMsg('deep searchable phrase')]); const second = store.create([userMsg('Second')]);
 			store.setPinned(first.summary.id, true); store.archive(first.summary.id);
-			assert.deepStrictEqual(store.search({ query: 'searchable', scope: 'archived' }).items.map(item => item.id), [first.summary.id]);
+			assert.deepStrictEqual((await store.searchAsync({ query: 'searchable', scope: 'archived' })).items.map(item => item.id), [first.summary.id]);
 			store.delete(first.summary.id); assert.equal(store.search({ scope: 'trash' }).total, 1);
 			store.restore(first.summary.id); assert.deepStrictEqual(store.list().map(item => item.id), [first.summary.id, second.summary.id]);
 			store.permanentDelete(first.summary.id); assert.ok(store.load(first.summary.id));
@@ -389,7 +389,7 @@ suite('ConversationStore — Phase 47', () => {
 				assert.equal(reopened.load('older')?.messages[0].content, 'Legacy body');
 				reopened.create([userMsg('Other window')]); await reopened.flush();
 				assert.equal(store.search({ query: 'Other window' }).total, 1);
-				assert.equal(store.search({ query: 'message-1000', limit: 1 }).total, 1);
+				assert.equal((await store.searchAsync({ query: 'message-1000', limit: 1 })).total, 1);
 			} finally { reopened.dispose(); }
 		} finally { store.dispose(); await fs.rm(directory, { recursive: true, force: true }); }
 	});
@@ -469,7 +469,7 @@ suite('ConversationStore — Phase 47', () => {
 		const store = new ConversationStore(context, 'workspace', 'Workspace'); const notices: string[] = []; const listener = store.onDidEncounterRecoveryIssue(issue => notices.push(issue.path));
 		try {
 			await store.ready;
-			assert.deepStrictEqual({ initial: store.getInitialConversation()?.summary.id, matches: store.search({ query: 'searchable evidence' }).items.map(summary => summary.id), notices, retained: await fs.readFile(page, 'utf8') }, { initial: healthy.summary.id, matches: [healthy.summary.id], notices: [page], retained: 'damaged message bytes' });
+			assert.deepStrictEqual({ initial: store.getInitialConversation()?.summary.id, matches: (await store.searchAsync({ query: 'searchable evidence' })).items.map(summary => summary.id), notices, retained: await fs.readFile(page, 'utf8') }, { initial: healthy.summary.id, matches: [healthy.summary.id], notices: [page], retained: 'damaged message bytes' });
 			assert.throws(() => store.load(damaged.summary.id), /integrity check/); assert.equal(notices.length, 1);
 		} finally { listener.dispose(); store.dispose(); await fs.rm(directory, { recursive: true, force: true }); }
 	});

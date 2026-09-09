@@ -540,6 +540,50 @@ test('history: search, date groups, active title, bounded rendering, and keyboar
 	for (const width of [280, 400, 800]) { await page.setViewportSize({ width, height: 900 }); await assertNoPageOverflow(page); }
 });
 
+test('history: debounce typing, flush explicit filters, reject stale results and cancel on close', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	await page.clock.install(); await page.clock.pauseAt(Date.now());
+	await page.evaluate(() => {
+		sentMessages.length = 0;
+		const input = document.getElementById('historySearch');
+		for (const value of ['a', 'au', 'authentication']) { input.value = value; input.dispatchEvent(new Event('input', { bubbles: true })); }
+	});
+	await page.clock.runFor(249);
+	assert.equal(await page.evaluate(() => sentMessages.filter(message => message.type === 'searchHistory').length), 0);
+	await page.clock.runFor(1);
+	const requests = () => page.evaluate(() => sentMessages.filter(message => message.type === 'searchHistory').map(({ query, historyScope, offset }) => ({ query, historyScope, offset })));
+	assert.deepEqual(await requests(), [{ query: 'authentication', historyScope: 'active', offset: 0 }]);
+	await page.evaluate(() => {
+		const input = document.getElementById('historySearch'); input.value = 'latest'; input.dispatchEvent(new Event('input', { bubbles: true }));
+		const view = document.getElementById('historyView'); view.value = 'archived'; view.dispatchEvent(new Event('change', { bubbles: true }));
+	});
+	await page.clock.runFor(300);
+	assert.deepEqual(await requests(), [{ query: 'authentication', historyScope: 'active', offset: 0 }, { query: 'latest', historyScope: 'archived', offset: 0 }]);
+	const conversation = { id: 'matching', title: 'Latest result', updatedAt: Date.now(), messageCount: 1 };
+	await post(page, { type: 'historySnapshot', query: 'latest', historyScope: 'archived', workspaceOnly: false, conversations: [conversation], nextOffset: 50 });
+	await post(page, { type: 'historySnapshot', query: 'authentication', historyScope: 'active', workspaceOnly: false, conversations: [{ ...conversation, title: 'Obsolete result' }] });
+	assert.equal(await page.locator('.history-pane-row-open').count(), 1);
+	assert.match(await page.locator('.history-pane-row-open').textContent(), /Latest result/);
+	await page.evaluate(() => {
+		const input = document.getElementById('historySearch'); input.value = 'next'; input.dispatchEvent(new Event('input', { bubbles: true }));
+		document.getElementById('historyShowMore').click();
+	});
+	assert.deepEqual((await requests()).at(-1), { query: 'next', historyScope: 'archived', offset: 0 });
+	await page.evaluate(() => {
+		const input = document.getElementById('historySearch'); input.value = 'submit'; input.dispatchEvent(new Event('input', { bubbles: true }));
+		input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+	});
+	await page.clock.runFor(300);
+	assert.equal((await requests()).length, 4);
+	assert.equal((await requests()).at(-1).query, 'submit');
+	await page.evaluate(() => {
+		const input = document.getElementById('historySearch'); input.value = 'closed'; input.dispatchEvent(new Event('input', { bubbles: true }));
+		window.dispatchEvent(new Event('pagehide'));
+	});
+	await page.clock.runFor(300);
+	assert.equal((await requests()).length, 4);
+});
+
 test('drafts: separate conversations, restore after reload, and clear only the sent draft', async t => {
 	const page = await openSurface(t, 'chat', 420);
 	await page.locator('#messageInput').fill('Please review my unfinished implementation');
