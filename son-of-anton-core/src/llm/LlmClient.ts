@@ -2914,6 +2914,9 @@ export class LlmClient {
 			modelId: string;
 			extraHeaders?: Record<string, string>;
 			customHeadersSetting?: string;
+			/** Already captured headers must not be re-read after an endpoint authorization check. */
+			customHeaders?: Record<string, string>;
+			redirect?: RequestInit['redirect'];
 			emptyBodyMessage: string;
 			supportsUsageStream?: boolean; // some local servers omit usage chunks
 		},
@@ -2954,12 +2957,14 @@ export class LlmClient {
 			...(config.apiKey ? { 'Authorization': `Bearer ${config.apiKey}` } : {}),
 			...(config.extraHeaders ?? {}),
 		};
-		applyAdvancedHeaders(headers, this.config.get<string>(config.customHeadersSetting ?? ''));
+		if (config.customHeaders) { Object.assign(headers, config.customHeaders); }
+		else { applyAdvancedHeaders(headers, this.config.get<string>(config.customHeadersSetting ?? '')); }
 
 		try {
 			const response = await fetch(config.endpoint, {
 				method: 'POST',
 				headers,
+				redirect: config.redirect,
 				body: JSON.stringify(body),
 				signal: options.signal,
 			});
@@ -3194,12 +3199,31 @@ export class LlmClient {
 		}
 		const apiKey = await this.resolveCredential('sota.secrets.lmstudioApiKey', 'lmstudioApiKey', ['LMSTUDIO_API_KEY', 'LM_API_TOKEN']);
 		const baseUrl = (this.config.get<string>('lmstudioBaseUrl') ?? '').trim().replace(/\/+$/, '') || 'http://localhost:1234';
+		const customHeaders: Record<string, string> = {};
+		applyAdvancedHeaders(customHeaders, this.config.get<string>('lmstudioCustomHeaders'));
+		// Custom headers can contain credentials under arbitrary names. Capture
+		// them once and bind all authenticated traffic to the user-owned endpoint.
+		const authenticated = !!apiKey || Object.keys(customHeaders).length > 0;
+		if (authenticated && this.config.inspect) {
+			const setting = this.config.inspect<string>('lmstudioBaseUrl');
+			const userBaseUrl = (setting?.globalValue ?? setting?.defaultValue ?? '').trim() || 'http://localhost:1234';
+			const canonical = (value: string): string => new URL(value.trim().replace(/\/+$/, '')).href.replace(/\/+$/, '');
+			let matches = false;
+			try { matches = canonical(baseUrl) === canonical(userBaseUrl); } catch { /* An invalid endpoint cannot receive credentials. */ }
+			if (!matches) {
+				yield { type: 'error', error: 'LM Studio credentials require an endpoint configured in user settings. Set sota.lmstudioBaseUrl in User Settings to this server, or remove the credentials.' };
+				return;
+			}
+		}
 		yield* this.streamOpenAICompatible(options, {
 			provider: 'lmstudio',
 			endpoint: `${baseUrl}/v1/chat/completions`,
 			apiKey: apiKey || undefined,
 			modelId,
-			customHeadersSetting: 'lmstudioCustomHeaders',
+			customHeaders,
+			// Following even a same-origin path redirect could send credentials
+			// outside the full endpoint authorized above (including custom headers).
+			redirect: authenticated ? 'error' : undefined,
 			emptyBodyMessage: 'LM Studio returned an empty response body. Confirm a model is loaded in the LM Studio app.',
 		});
 	}

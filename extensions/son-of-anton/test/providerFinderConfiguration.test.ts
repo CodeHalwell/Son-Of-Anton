@@ -9,7 +9,7 @@ import path from 'node:path';
 import * as vscode from 'vscode';
 import { LlmClient } from 'son-of-anton-core/llm/LlmClient';
 import { MODEL_METADATA } from 'son-of-anton-core/llm/modelMetadata';
-import { replaceDiscoveredModels } from 'son-of-anton-core/llm/DiscoveredModels';
+import { discoveredModelId, registerDiscoveredModels, replaceDiscoveredModels } from 'son-of-anton-core/llm/DiscoveredModels';
 import { liveConfig } from '../src/chat/globalScopedConfig';
 import { ProviderFinder } from '../src/providers/ProviderFinder';
 
@@ -37,6 +37,7 @@ suite('Provider Finder configuration boundary', () => {
 		globalThis.fetch = async (input, init) => {
 			const url = String(input), headers = new Headers(init?.headers);
 			requests.push({ url, authorization: headers.get('authorization'), apiKey: headers.get('x-api-key') });
+			if (url.endsWith('/chat/completions')) { return new Response('data: {"choices":[{"delta":{"content":"fixture response"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } }); }
 			return new Response(JSON.stringify(url.endsWith('/api/tags') ? { models: [{ name: 'fixture-local' }] } : { data: [{ id: 'fixture-chat', type: 'llm' }] }), { headers: { 'content-type': 'application/json' } });
 		};
 		const secretStore = { get: async (key: string) => secrets.get(key), store: async (key: string, value: string) => { secrets.set(key, value); }, delete: async (key: string) => { secrets.delete(key); } };
@@ -101,6 +102,41 @@ suite('Provider Finder configuration boundary', () => {
 			assert.deepEqual(requests.find(request => request.authorization !== null), { url: 'http://localhost:1234/api/v1/models', authorization: 'Bearer private-key', apiKey: null });
 		});
 	}
+
+	for (const source of ['secret-storage', 'setting', 'LMSTUDIO_API_KEY', 'LM_API_TOKEN', 'custom-header'] as const) {
+		test(`direct and discovered LM Studio inference bind ${source} to the live User endpoint without a catalog scan`, async () => {
+			user.lmstudioBaseUrl = 'https://approved.invalid/local'; workspace.lmstudioBaseUrl = 'https://workspace.invalid/local';
+			if (source === 'secret-storage') { secrets.set('sota.secrets.lmstudioApiKey', 'private-key'); }
+			else if (source === 'setting') { user.lmstudioApiKey = 'private-key'; }
+			else if (source === 'custom-header') { user.lmstudioCustomHeaders = '{"Authorization":"Bearer private-key"}'; }
+			else { process.env[source] = 'private-key'; }
+			const discovered = discoveredModelId('lmstudio', 'fixture-chat');
+			registerDiscoveredModels([{ id: discovered, provider: 'lmstudio', model: 'fixture-chat', label: 'Fixture', chat: true, tools: true, images: false, fetchedAt: Date.now() }]);
+			for (const model of ['lmstudio-loaded', discovered] as const) {
+				const events = [];
+				for await (const event of llm.streamRequest({ model, messages: [{ role: 'user', content: 'test' }] })) { events.push(event); }
+				assert.deepEqual(requests, [], 'No catalog or inference request may receive the credential');
+				assert.match(events.find(event => event.type === 'error')?.error ?? '', /endpoint configured in user settings/i);
+				assert.equal(JSON.stringify(events).includes('private-key'), false);
+			}
+			// The existing LlmClient must use fresh scope inspection after settings change.
+			user.lmstudioBaseUrl = 'https://workspace.invalid:443/local/';
+			for await (const event of llm.streamRequest({ model: 'lmstudio-loaded', messages: [{ role: 'user', content: 'test' }] })) { assert.notEqual(event.type, 'error'); }
+			assert.deepEqual(requests, [{ url: 'https://workspace.invalid/local/v1/chat/completions', authorization: 'Bearer private-key', apiKey: null }]);
+			requests.length = 0; workspace.lmstudioBaseUrl = 'https://workspace.invalid/other-path';
+			for await (const event of llm.streamRequest({ model: discovered, messages: [{ role: 'user', content: 'test' }] })) { if (event.type === 'error') { assert.match(event.error, /endpoint configured in user settings/i); } }
+			assert.deepEqual(requests, [], 'Sharing an origin does not authorize another base path');
+		});
+	}
+
+	test('anonymous LM Studio inference keeps effective workspace endpoints available', async () => {
+		user.lmstudioBaseUrl = 'http://localhost:1234'; workspace.lmstudioBaseUrl = 'http://127.0.0.1:2234/local';
+		const events = [];
+		for await (const event of llm.streamRequest({ model: 'lmstudio-loaded', messages: [{ role: 'user', content: 'test' }] })) { events.push(event); }
+		assert.equal(events.some(event => event.type === 'complete'), true);
+		assert.equal(events.some(event => event.type === 'error'), false);
+		assert.deepEqual(requests, [{ url: 'http://127.0.0.1:2234/local/v1/chat/completions', authorization: null, apiKey: null }]);
+	});
 
 	test('authenticated endpoint comparison includes the full path, not just the origin', async () => {
 		user.lmstudioBaseUrl = 'https://trusted.example/approved'; workspace.lmstudioBaseUrl = 'https://trusted.example/unapproved';

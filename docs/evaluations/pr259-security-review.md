@@ -10,7 +10,7 @@ The subsequent analysis of `2e7de85d5bf` (analysis `1747912351`, merge `4e1b074d
 
 Analysis `1748197929` of review commit `0c64c36550b` (merge `5130a252e4b229f3caea9be94d60bba599c941b5`) confirmed those corrections with zero results and no analysis errors or warnings. All nine prior PR alerts are marked fixed.
 
-The later analysis `1748624129` of review commit `37d8d58e022` (merge `cb67d0120d90fc6d33d33807694911bd0cc63906`, completed September 9, 2026) also reported zero results with no errors or warnings. The merge parents were verified against that exact PR revision and main; all nine alerts remained fixed.
+The later analysis `1748949827` of review commit `5f45144eb12` (merge `cae67cefdb2c9eca03b13f33a018a4b3802d3e0e`, completed September 9, 2026) also reported zero results with no errors or warnings. The merge parents were verified against that exact PR revision and main; all nine alerts remained fixed.
 
 ## Provider catalog network boundary
 
@@ -18,6 +18,7 @@ CodeQL alerts [787](https://github.com/CodeHalwell/Son-Of-Anton/security/code-sc
 
 - `son-of-anton-cli/src/cliHost.ts` reads the user's own configuration and, when explicitly enabled, plaintext secret storage. Provider discovery selects documented endpoint and credential fields; it does not send those files as request bodies.
 - `extensions/son-of-anton/src/providers/ProviderFinder.ts` reads remote discovery endpoints from global or default settings. It honors the legacy workspace Anthropic key and effective local-server URLs. Anonymous local catalogs may use workspace URLs, but credential-bearing LM Studio discovery requires the same full endpoint in User settings. Workspace settings therefore cannot redirect an automatically authenticated catalog request.
+- LM Studio inference enforces the same full endpoint binding through live User/default scope inspection, including direct fallback requests without a preceding catalog scan. API keys and nonempty custom headers require that binding. Headers are captured once, and credential-bearing requests reject redirects. Anonymous workspace servers remain usable; the CLI's single-scope configuration remains user-owned. Regression tests cover both environment aliases, stored/settings keys, custom headers, live setting changes and static/discovered routes.
 - `son-of-anton-core/src/llm/ProviderDiscovery.ts` sends catalog GET requests without a body, permits HTTPS or explicit HTTP loopback endpoints, and rejects redirects. Credentials are limited to the selected provider's authorization headers. Coding-tool discovery extracts documented model preferences and sign-in-file presence; it does not import those tools' credentials.
 - `son-of-anton-core/src/llm/ProviderDiscoverySecurity.test.ts` uses real disposable HTTP servers to verify the exact request, exclusion of unrelated configuration and tool-file contents, absence of secrets in the resulting inventory, and refusal to forward credentials across redirects. Existing discovery tests cover endpoint and response bounds.
 
