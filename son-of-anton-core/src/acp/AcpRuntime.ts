@@ -6,7 +6,7 @@
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { AcpConnection } from './AcpConnection';
-import { discoveredModelId, registerDiscoveredModels } from '../llm/DiscoveredModels';
+import { discoveredAcpModelId, registerDiscoveredModels } from '../llm/DiscoveredModels';
 import { AcpSessionStore, type AcpSessionRecord } from './AcpSessionStore';
 import { abortError, cancelledPermission, object, validateImages, type AcpCapabilities, type AcpImage, type AcpUsage, type AcpAgentDefinition, type AcpMcpServer, type AcpPermissionHandler, type AcpPromptResult, type AcpUpdate } from './protocol';
 
@@ -237,7 +237,7 @@ export class AcpRuntime {
 				metering: this.capabilities.get(capabilityKey)?.metering ?? 'unavailable',
 			});
 			registerDiscoveredModels(worker.connection.availableModels.map(model => ({
-				id: discoveredModelId('acp', `${job.turn.agent.id}/${model.id}`), provider: 'acp', acpAdapterId: job.turn.agent.id, model: model.id,
+				id: discoveredAcpModelId(job.turn.agent.id, model.id), provider: 'acp', acpAdapterId: job.turn.agent.id, model: model.id,
 				label: `${job.turn.agent.id} · ${model.name}`, chat: true, images: !!worker.connection.initialization?.agentCapabilities?.promptCapabilities?.image,
 				tools: true, fetchedAt: Date.now(),
 			})));

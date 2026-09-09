@@ -338,7 +338,9 @@ export class CheckpointManager implements Disposable {
 		if (!root) {
 			return `${CHECKPOINT_INDEX_KEY}.no-workspace`;
 		}
-		const canonical = fs.realpathSync(root);
+		// Match fs.promises.realpath used by both snapshot stores. The JS fallback
+		// preserves input casing on Windows, splitting reads and writes across keys.
+		const canonical = fs.realpathSync.native(root);
 		return `${CHECKPOINT_INDEX_KEY}.${createHash('sha256').update(canonical).digest('hex')}`;
 	}
 

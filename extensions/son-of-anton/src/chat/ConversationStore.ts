@@ -179,7 +179,10 @@ export class ConversationStore implements vscode.Disposable {
 			this.disk.list(); // Scan for recoverable damage without preventing activation.
 			for (const summary of oldIndex) {
 				try {
-					if (!this.disk.load(summary.id)) { this.persist({ summary, messages: context.globalState.get<ChatMessage[]>(recordKey(summary.id)) ?? [] }); }
+					if (!this.disk.load(summary.id)) {
+						const messages = context.globalState.get<ChatMessage[]>(recordKey(summary.id)) ?? [];
+						this.persist({ summary: { ...summary, messageCount: messages.length }, messages });
+					}
 				} catch { retainedLegacyIds.add(summary.id); } // Never overwrite damage or discard its original migration source.
 			}
 		}

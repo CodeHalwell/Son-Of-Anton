@@ -15,6 +15,7 @@ import { WriteSnapshotStore } from './chat/WriteSnapshotStore';
 import { registerEditorOverlay } from './codeGraph/EditorOverlay';
 import { registerResponseFeedback } from './chat/ResponseFeedback';
 import { ConversationStore } from './chat/ConversationStore';
+import { activateConversationHistory } from './chat/activateConversationHistory';
 import { ConversationActions } from './chat/ConversationActions';
 import { ConversationListProvider } from './chat/ConversationListProvider';
 import { InlineEditProvider } from './inline/InlineEdit';
@@ -613,19 +614,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		hookEngine.registerGitHooks();
 	});
 
-	// Conversation history store (Phase 47). Persists past chat sessions in
-	// globalState so users can browse and return to them from the History
-	// sidebar view. Constructed once and shared across the chat sidebar, the
-	// editor-panel chat command, and the History tree provider.
-	const conversationStore = new ConversationStore(context);
-	context.subscriptions.push(conversationStore);
+	// Shared durable history remains usable in memory if its migration needs recovery.
+	const conversationStore = await activateConversationHistory(context);
 	activeConversationStore = conversationStore;
-	const reportHistoryRecovery = (issue: { path: string; message: string }): void => {
-		void vscode.window.showWarningMessage(vscode.l10n.t('A conversation could not be read. Its files are preserved at {0}. {1}', issue.path, issue.message));
-	};
-	context.subscriptions.push(conversationStore.onDidEncounterRecoveryIssue(reportHistoryRecovery));
-	for (const issue of conversationStore.recoveryIssues) { reportHistoryRecovery(issue); }
-	await conversationStore.ready;
 	registerResponseFeedback(context, conversationStore);
 
 	// Workspace checkpoint manager (Cline-style snapshots). Captures a

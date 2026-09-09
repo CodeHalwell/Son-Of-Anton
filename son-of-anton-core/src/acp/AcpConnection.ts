@@ -6,7 +6,7 @@
 import { execFile, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import spawn from 'cross-spawn';
 import { AcpPeer } from './AcpPeer';
-import { ACP_VERSION, AcpError, abortError, cancelledPermission, object, validateAgent, validateImages, type AcpImage, type AcpAgentDefinition, type AcpInitializeResult, type AcpMcpServer, type AcpPermissionHandler, type AcpPermissionRequest, type AcpPromptResult, type AcpUpdate } from './protocol';
+import { ACP_VERSION, AcpError, abortError, cancelledPermission, isValidAcpModelId, object, validateAgent, validateImages, type AcpImage, type AcpAgentDefinition, type AcpInitializeResult, type AcpMcpServer, type AcpPermissionHandler, type AcpPermissionRequest, type AcpPromptResult, type AcpUpdate } from './protocol';
 
 /** One agent process and conversation. Never replays a prompt after a transport failure. */
 export class AcpConnection {
@@ -114,7 +114,7 @@ export class AcpConnection {
 	}
 
 	private async selectModel(models: Array<{ modelId: string; name: string }> | undefined, signal?: AbortSignal): Promise<void> {
-		this.availableModels = Array.isArray(models) ? models.filter(model => object(model) && typeof model.modelId === 'string' && model.modelId.trim() && model.modelId.length < 512 && typeof model.name === 'string').slice(0, 500).map(model => ({ id: model.modelId, name: model.name.slice(0, 200) })) : [];
+		this.availableModels = Array.isArray(models) ? models.filter(model => object(model) && isValidAcpModelId(model.modelId) && typeof model.name === 'string').slice(0, 500).map(model => ({ id: model.modelId, name: model.name.slice(0, 200) })) : [];
 		if (this.definition.modelId) {
 			if (!this.availableModels.some(model => model.id === this.definition.modelId)) { throw new Error('The ACP adapter does not advertise the selected model. Refresh its catalog or choose another model.'); }
 			await this.peer.request('session/set_model', { sessionId: this.sessionId, modelId: this.definition.modelId }, { signal });

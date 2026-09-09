@@ -87,6 +87,11 @@ export function object(value: unknown): value is Record<string, unknown> {
 export function abortError(): Error { return new DOMException('ACP request cancelled', 'AbortError'); }
 export const cancelledPermission = (): AcpPermissionResult => ({ outcome: { outcome: 'cancelled' } });
 
+/** The limit applies to the adapter's raw model ID, excluding host catalog namespaces. */
+export function isValidAcpModelId(value: unknown): value is string {
+	return typeof value === 'string' && !!value.trim() && value.length <= 512 && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
 export function validateAgent(value: unknown): asserts value is AcpAgentDefinition {
 	if (!object(value) || typeof value.id !== 'string' || !value.id.trim() || typeof value.command !== 'string' || !value.command.trim()) {
 		throw new Error('ACP agent requires a non-empty id and command');
@@ -97,7 +102,7 @@ export function validateAgent(value: unknown): asserts value is AcpAgentDefiniti
 	if (value.env !== undefined && (!object(value.env) || !Object.values(value.env).every(item => typeof item === 'string'))) {
 		throw new Error(`ACP agent ${value.id}: env must map names to strings`);
 	}
-	if (value.modelId !== undefined && (typeof value.modelId !== 'string' || !value.modelId.trim() || value.modelId.length > 512 || /[\u0000-\u001f\u007f]/.test(value.modelId))) {
+	if (value.modelId !== undefined && !isValidAcpModelId(value.modelId)) {
 		throw new Error(`ACP agent ${value.id}: modelId must be a non-empty advertised model ID`);
 	}
 	if (value.authMethodId !== undefined && typeof value.authMethodId !== 'string') {

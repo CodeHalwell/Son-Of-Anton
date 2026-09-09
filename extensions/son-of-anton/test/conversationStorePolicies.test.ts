@@ -394,6 +394,21 @@ suite('ConversationStore — Phase 47', () => {
 		} finally { store.dispose(); await fs.rm(directory, { recursive: true, force: true }); }
 	});
 
+	test('legacy migration derives manifest counts from actual bodies before clearing Memento records', async () => {
+		const directory = await fs.mkdtemp(path.join(tmpdir(), 'sota-history-stale-count-'));
+		const { context, globalState } = makeContext(); Object.assign(context, { globalStorageUri: vscode.Uri.file(directory) });
+		const fixtures = [{ id: 'overcount', oldCount: 500, actualCount: 2 }, { id: 'undercount', oldCount: 1, actualCount: 105 }, { id: 'empty', oldCount: 99, actualCount: 0 }];
+		await globalState.update('sota.conversations.index', fixtures.map(fixture => ({ id: fixture.id, title: fixture.id, createdAt: 1, updatedAt: 1, messageCount: fixture.oldCount })));
+		for (const fixture of fixtures) { await globalState.update(`sota.conversations.${fixture.id}`, Array.from({ length: fixture.actualCount }, (_, index) => userMsg(`message-${index}`, index))); }
+		const store = new ConversationStore(context);
+		try {
+			await store.ready;
+			assert.deepStrictEqual(fixtures.map(fixture => { const record = store.load(fixture.id)!; return { id: record.summary.id, count: record.summary.messageCount, messages: record.messages.length, legacy: globalState.get(`sota.conversations.${fixture.id}`) }; }), fixtures.map(fixture => ({ id: fixture.id, count: fixture.actualCount, messages: fixture.actualCount, legacy: undefined })));
+			assert.equal(globalState.get('sota.conversations.index'), undefined);
+			assert.deepStrictEqual(store.recoveryIssues, []);
+		} finally { store.dispose(); await fs.rm(directory, { recursive: true, force: true }); }
+	});
+
 	test('failed disk migration retains original records and can be retried without duplicate imports', async () => {
 		const directory = await fs.mkdtemp(path.join(tmpdir(), 'sota-history-retry-'));
 		const { context, globalState } = makeContext(); Object.assign(context, { globalStorageUri: vscode.Uri.file(directory) });
@@ -428,6 +443,17 @@ suite('ConversationStore — Phase 47', () => {
 			assert.throws(() => store.load(damaged.summary.id), /integrity check/);
 			assert.equal(store.load(healthy.summary.id)?.messages[0].content, 'Healthy conversation');
 			const created = store.create([userMsg('Still able to chat')]); await store.flush(); assert.ok(store.load(created.summary.id));
+		} finally { store.dispose(); await fs.rm(directory, { recursive: true, force: true }); }
+	});
+
+	test('an unavailable history directory reports recovery information without blocking construction', async () => {
+		const directory = await fs.mkdtemp(path.join(tmpdir(), 'sota-history-invalid-directory-'));
+		const { context } = makeContext(); Object.assign(context, { globalStorageUri: vscode.Uri.file(directory) });
+		const historyPath = path.join(directory, 'conversations-v2'); await fs.writeFile(historyPath, 'Retain this unexpected file');
+		const store = new ConversationStore(context);
+		try {
+			await store.ready;
+			assert.deepStrictEqual({ histories: store.list(), issues: store.recoveryIssues.map(issue => issue.path), retained: await fs.readFile(historyPath, 'utf8') }, { histories: [], issues: [historyPath], retained: 'Retain this unexpected file' });
 		} finally { store.dispose(); await fs.rm(directory, { recursive: true, force: true }); }
 	});
 

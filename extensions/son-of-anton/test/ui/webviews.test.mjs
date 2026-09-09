@@ -1172,3 +1172,50 @@ test('context source exclusions are scoped to the draft and stale preview respon
 	await page.locator('#messageInput').fill('Fresh workspace context'); await page.locator('#sendBtn').click();
 	assert.deepEqual(await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').at(-1).excludedContext), []);
 });
+
+test('assistant-first history windows restore off-window prompts across system messages and incomplete turns', async t => {
+	const page = await openSurface(t, 'chat', 420);
+	const messages = Array.from({ length: 601 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `Message ${index}` }));
+	for (const boundary of [201, 301, 401]) {
+		messages[boundary - 5] = { role: 'user', content: `Abandoned request ${boundary}` };
+		messages[boundary - 4] = { role: 'user', content: `Visible request ${boundary}`, model: 'haiku', specialistId: 'anton-code', request: { text: `Original prompt ${boundary}`, attachments: ['terminal-output'], includeWorkspaceContext: false, chatMode: 'plan' } };
+		for (let index = boundary - 3; index < boundary; index++) { messages[index] = { role: 'system', content: `Status before ${boundary}` }; }
+		messages[boundary] = { role: 'assistant', content: `Response at boundary ${boundary}` };
+	}
+	messages[600] = { role: 'user', content: 'Unanswered latest request' };
+	await post(page, { type: 'loadConversation', conversationId: 'assistant-boundaries', messages }); await frames(page);
+	const response = index => page.locator(`.msg[data-conversation-index="${index}"]`);
+	for (const boundary of [401, 301, 201]) {
+		assert.equal(await page.locator('.msg').first().getAttribute('data-conversation-index'), String(boundary));
+		assert.equal(await response(boundary - 4).count(), 0, 'The preceding prompt must still be outside the mounted window');
+		const reuse = response(boundary).getByRole('button', { name: 'Reuse Prompt', exact: true });
+		assert.equal(await reuse.isVisible(), true, 'Assistant-first pages must expose their off-window prompt immediately');
+		await reuse.click();
+		assert.equal(await page.locator('#messageInput').inputValue(), `Original prompt ${boundary}`);
+		assert.match(await page.locator('#contextChips').innerText(), /Terminal output/);
+		assert.equal(await page.locator('#includeWorkspaceContext').isChecked(), false);
+		assert.equal(await page.locator('#planActBtnPlan').getAttribute('aria-checked'), 'true');
+		assert.ok(await page.locator('.msg').count() <= 300);
+		if (boundary !== 201) {
+			await response(boundary).evaluate(node => { window.boundaryResponse = node; });
+			await page.getByRole('button', { name: /Show Earlier Messages/ }).click(); await frames(page);
+			assert.equal(await response(boundary).evaluate(node => node === window.boundaryResponse), true, 'An overlapping assistant keeps its mounted controls');
+			assert.equal(await response(boundary - 4).count(), 1);
+			await response(boundary).getByRole('button', { name: 'Reuse Prompt', exact: true }).click();
+			assert.equal(await page.locator('#messageInput').inputValue(), `Original prompt ${boundary}`, 'Mounting the preceding user must not change an existing response action');
+		}
+	}
+	assert.equal(await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').length), 0);
+});
+
+test('an assistant without any preceding user cannot reuse a later incomplete request', async t => {
+	const page = await openSurface(t, 'chat', 420);
+	const messages = Array.from({ length: 220 }, (_, index) => ({ role: index < 20 ? 'system' : 'assistant', content: `Message ${index}` }));
+	messages[219] = { role: 'user', content: 'Later incomplete request' };
+	await post(page, { type: 'loadConversation', conversationId: 'orphan-assistant', messages }); await frames(page);
+	const orphan = page.locator('.msg[data-conversation-index="20"]');
+	assert.equal(await orphan.getByRole('button', { name: 'Reuse Prompt', exact: true }).count(), 0);
+	await page.getByRole('button', { name: /Show Earlier Messages/ }).click(); await frames(page);
+	assert.equal(await orphan.getByRole('button', { name: 'Reuse Prompt', exact: true }).count(), 0);
+	assert.equal(await page.locator('#messageInput').inputValue(), '');
+});

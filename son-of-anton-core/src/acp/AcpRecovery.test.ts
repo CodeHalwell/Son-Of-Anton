@@ -11,7 +11,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { AcpRuntime, type AcpTurn } from './AcpRuntime';
 import { AcpSessionStore } from './AcpSessionStore';
 import { object, type AcpUsage } from './protocol';
-import { discoveredModelId, getDiscoveredModel } from '../llm/DiscoveredModels';
+import { discoveredAcpModelId, discoveredModelId, getDiscoveredModel } from '../llm/DiscoveredModels';
 
 const agent = { id: 'recovery', command: process.execPath, args: [path.resolve(__dirname, '../../test/fixtures/acp-agent.cjs')] };
 const image = { mimeType: 'image/png', data: 'aGVsbG8=' };
@@ -20,7 +20,7 @@ function output() {
 	let text = '';
 	return {
 		onUpdate: (update: Parameters<NonNullable<AcpTurn['onUpdate']>>[0]) => { if (object(update.content) && typeof update.content.text === 'string') { text += update.content.text; } },
-		get: (): { count: number; text: string; mode: string; images: Array<typeof image & { type: string }>; outcome?: { outcome: string } } => JSON.parse(text.replace(/ 😀$/, '')),
+		get: (): { count: number; text: string; mode: string; model?: string; images: Array<typeof image & { type: string }>; outcome?: { outcome: string } } => JSON.parse(text.replace(/ 😀$/, '')),
 	};
 }
 function store() {
@@ -102,9 +102,43 @@ test('ACP catalogs contain only advertised session models and selection is negot
 	const configured = { ...agent, env: { FIXTURE_MODELS: '1' }, modelId: 'fixture-deep' };
 	const result = output();
 	await runtime.run({ ...turn(), agent: configured, onUpdate: result.onUpdate });
-	assert.equal((result.get() as ReturnType<typeof result.get> & { model: string }).model, 'fixture-deep');
+	assert.equal(result.get().model, 'fixture-deep');
 	assert.equal(getDiscoveredModel(discoveredModelId('acp', `${agent.id}/fixture-deep`))?.acpAdapterId, agent.id);
 	await assert.rejects(runtime.run({ ...turn(), agent: { ...configured, modelId: 'not-advertised' } }), /does not advertise the selected model/);
+});
+
+test('ACP session selection and catalogs accept 511/512 raw characters and reject 513', async t => {
+	const runtime = new AcpRuntime(); t.after(() => runtime.shutdown());
+	const validModels = [511, 512].map(length => `model/${'m'.repeat(length - 6)}`);
+	const invalidModels = ['x'.repeat(513), 'invalid\nmodel', '   '];
+	const configured = { ...agent, id: 'model-limits', env: { FIXTURE_MODEL_IDS: JSON.stringify([...validModels, ...invalidModels]) } };
+	for (const modelId of validModels) {
+		const selected = { ...configured, modelId };
+		const result = output();
+		await runtime.run({ ...turn(), agent: selected, onUpdate: result.onUpdate });
+		assert.equal(result.get().model, modelId);
+		assert.deepEqual(runtime.getCapabilities(selected).models?.map(model => model.id), validModels);
+		const catalog = getDiscoveredModel(discoveredAcpModelId(configured.id, modelId));
+		assert.equal(catalog?.model, modelId);
+		assert.equal(catalog?.acpAdapterId, configured.id);
+	}
+	for (const modelId of invalidModels) {
+		await assert.rejects(runtime.run({ ...turn(), agent: { ...configured, modelId } }), /modelId must be a non-empty advertised model ID/);
+	}
+});
+
+test('a resumed ACP session negotiates and registers a 512-character model ID unchanged', async t => {
+	const directory = await mkdtemp(path.join(os.tmpdir(), 'sota-model-resume-')); t.after(() => rm(directory, { recursive: true, force: true }));
+	const sessionStore = store();
+	const modelId = 'm'.repeat(512);
+	const configured = { ...agent, id: 'long-model-resume', modelId, env: { FIXTURE_SESSIONS_FILE: path.join(directory, 'sessions.json'), FIXTURE_MODEL_IDS: JSON.stringify([modelId]) } };
+	const first = new AcpRuntime({ sessionStore }); t.after(() => first.shutdown());
+	await first.run({ ...turn('first turn'), agent: configured }); await first.shutdown();
+	const second = new AcpRuntime({ sessionStore }); t.after(() => second.shutdown());
+	const result = output(); const recovery: string[] = [];
+	await second.run({ ...turn('next turn'), agent: configured, onUpdate: result.onUpdate, onRecovery: value => recovery.push(value) });
+	assert.deepEqual([result.get().count, result.get().model, recovery], [2, modelId, ['resumed']]);
+	assert.equal(getDiscoveredModel(discoveredAcpModelId(configured.id, modelId))?.model, modelId);
 });
 
 

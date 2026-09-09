@@ -3,6 +3,8 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { isValidAcpModelId } from '../acp/protocol';
+
 export type CatalogProvider = 'anthropic' | 'openai' | 'google' | 'openrouter' | 'ollama' | 'lmstudio' | 'deepseek' | 'mistral' | 'groq' | 'cerebras' | 'together' | 'fireworks' | 'foundry' | 'bedrock' | 'acp' | 'claude-code' | 'codex' | 'copilot' | 'xai' | 'moonshot' | 'zai' | 'minimax';
 export type DiscoveredModelId = `catalog:${CatalogProvider}:${string}`;
 export type CapabilityAvailability = boolean | 'unknown';
@@ -34,13 +36,21 @@ export function discoveredModelId(provider: CatalogProvider, model: string): Dis
 	return `catalog:${provider}:${encodeURIComponent(model)}`;
 }
 
+/** Preserve the catalog namespace without counting its adapter prefix against the raw ID limit. */
+export function discoveredAcpModelId(adapterId: string, model: string): DiscoveredModelId {
+	if (typeof adapterId !== 'string' || !adapterId.trim() || /[\u0000-\u001f\u007f]/.test(adapterId) || !isValidAcpModelId(model)) { throw new Error('Invalid ACP model identifier'); }
+	return `catalog:acp:${encodeURIComponent(`${adapterId}/${model}`)}`;
+}
+
 /** Only catalog entries received through discovery can become executable model routes. */
 export function registerDiscoveredModels(entries: readonly DiscoveredModel[]): void {
 	let changed = false;
 	for (const model of entries.slice(0, 10000)) {
 		try {
-			const identifier = model.acpAdapterId ? `${model.acpAdapterId}/${model.model}` : model.model;
-			if (!providers.has(model.provider) || model.id !== discoveredModelId(model.provider, identifier)
+			const identifier = model.provider === 'acp' && model.acpAdapterId !== undefined
+				? discoveredAcpModelId(model.acpAdapterId, model.model)
+				: discoveredModelId(model.provider, model.acpAdapterId ? `${model.acpAdapterId}/${model.model}` : model.model);
+			if (!providers.has(model.provider) || model.id !== identifier
 				|| ![true, false, 'unknown'].includes(model.chat) || ![true, false, 'unknown'].includes(model.images) || ![true, false, 'unknown'].includes(model.tools)) { continue; }
 			const previous = models.get(model.id);
 			const value = previous?.capabilitySource === 'verified' && previous.verifiedAt && Date.now() - previous.verifiedAt < 24 * 60 * 60 * 1000 && model.tools === 'unknown' ? { ...model, tools: previous.tools, capabilitySource: previous.capabilitySource, verifiedAt: previous.verifiedAt } : { ...model };

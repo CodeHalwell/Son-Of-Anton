@@ -2,6 +2,10 @@
 const readline = require('node:readline');
 const fs = require('node:fs');
 const send = value => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\n');
+const availableModels = process.env.FIXTURE_MODEL_IDS
+	? JSON.parse(process.env.FIXTURE_MODEL_IDS).map(modelId => ({ modelId, name: 'Custom fixture' }))
+	: process.env.FIXTURE_MODELS ? [{ modelId: 'fixture-fast', name: 'Fast fixture' }, { modelId: 'fixture-deep', name: 'Deep fixture' }] : undefined;
+const models = availableModels ? { models: { availableModels } } : {};
 let initialized = false, session, count = 0, pending, permission, mode = 'act', selectedModel;
 const rl = readline.createInterface({ input: process.stdin });
 rl.on('line', line => {
@@ -14,14 +18,14 @@ rl.on('line', line => {
 	} else if (method === 'session/new') {
 		if (!initialized) { send({ id, error: { code: -32600, message: 'Initialize first' } }); return; }
 		session = 'fixture-session';
-		send({ id, result: { sessionId: session, ...(process.env.FIXTURE_MODELS ? { models: { availableModels: [{ modelId: 'fixture-fast', name: 'Fast fixture' }, { modelId: 'fixture-deep', name: 'Deep fixture' }] } } : {}), ...(process.env.FIXTURE_MODES ? { modes: { currentModeId: mode, availableModes: [{ id: 'act', name: 'Act' }, { id: 'review', name: 'Read-only Review' }, { id: 'plan', name: 'Plan' }] } } : {}) } });
+		send({ id, result: { sessionId: session, ...models, ...(process.env.FIXTURE_MODES ? { modes: { currentModeId: mode, availableModes: [{ id: 'act', name: 'Act' }, { id: 'review', name: 'Read-only Review' }, { id: 'plan', name: 'Plan' }] } } : {}) } });
 	} else if (method === 'session/load') {
 		if (process.env.FIXTURE_LOAD_FAIL || !process.env.FIXTURE_SESSIONS_FILE || !fs.existsSync(process.env.FIXTURE_SESSIONS_FILE)) { send({ id, error: { code: -32602, message: 'Session not found' } }); return; }
 		session = params.sessionId;
 		count = JSON.parse(fs.readFileSync(process.env.FIXTURE_SESSIONS_FILE, 'utf8')).count;
 		// Replay should never surface as a fresh response or trigger host permissions.
 		send({ method: 'session/update', params: { sessionId: session, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'OLD REPLAY' } } } });
-		send({ id, result: { modes: { availableModes: [{ id: 'act' }, { id: 'plan' }] } } });
+		send({ id, result: { ...models, modes: { availableModes: [{ id: 'act' }, { id: 'plan' }] } } });
 	} else if (method === 'session/set_model') {
 		selectedModel = params.modelId; send({ id, result: {} });
 	} else if (method === 'session/set_mode') {

@@ -158,6 +158,7 @@ jobs:
           npm --prefix son-of-anton-cli run build
           npm --prefix services/code-graph/mcp-server run build
           node node_modules/typescript/bin/tsc -p extensions/son-of-anton/tsconfig.json --noEmit
+          npx tsgo --project extensions/son-of-anton/tsconfig.json --noEmit
           npm run compile-check-ts-native
           npm run gulp compile-extensions
           npm --prefix build run typecheck

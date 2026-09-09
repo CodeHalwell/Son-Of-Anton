@@ -8,12 +8,13 @@ import * as path from 'node:path';
 import { arch } from 'node:os';
 import { createHash } from 'node:crypto';
 import { IDE_REPOSITORY, eligibleReleases, installerForRelease, releaseAssetUrl, type IdeRelease, type ReleaseChannel } from './ReleaseManifest';
+import { readResponseBody } from './ResponseStream';
 
 const MAX_METADATA_BYTES = 2 * 1024 * 1024;
 async function boundedText(response: Response): Promise<string> {
 	if (!response.ok || !response.body) { throw new Error(vscode.l10n.t('Release service returned HTTP {0}.', response.status)); }
 	const chunks: Uint8Array[] = []; let length = 0;
-	for await (const chunk of response.body) {
+	for await (const chunk of readResponseBody(response.body)) {
 		length += chunk.byteLength;
 		if (length > MAX_METADATA_BYTES) { throw new Error(vscode.l10n.t('Release metadata is too large.')); }
 		chunks.push(chunk);
@@ -65,14 +66,14 @@ export function registerIdeUpdates(context: vscode.ExtensionContext): void {
 			await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: vscode.l10n.t('Downloading {0}', installer.name), cancellable: true }, async (progress, token) => {
 				const cancel = new AbortController(), subscription = token.onCancellationRequested(() => cancel.abort());
 				if (token.isCancellationRequested) { cancel.abort(); }
-				await fs.mkdir(folder, { recursive: true });
 				const temporary = `${destination}.${Date.now()}.partial`;
 				try {
+					await fs.mkdir(folder, { recursive: true });
 					const response = await fetch(installer.url, { signal: AbortSignal.any([abort.signal, cancel.signal, AbortSignal.timeout(20 * 60_000)]) });
 					if (!response.ok || !response.body) { throw new Error(vscode.l10n.t('Installer download failed with HTTP {0}.', response.status)); }
 					const file = await fs.open(temporary, 'wx', 0o600), hash = createHash('sha256'); let bytes = 0;
 					try {
-						for await (const chunk of response.body) {
+						for await (const chunk of readResponseBody(response.body)) {
 							bytes += chunk.byteLength;
 							if (bytes > installer.bytes) { throw new Error(vscode.l10n.t('Installer exceeds its declared size.')); }
 							hash.update(chunk); await file.writeFile(chunk); progress.report({ increment: chunk.byteLength / installer.bytes * 100 });
@@ -80,7 +81,7 @@ export function registerIdeUpdates(context: vscode.ExtensionContext): void {
 					} finally { await file.close(); }
 					if (bytes !== installer.bytes || hash.digest('hex') !== installer.sha256) { throw new Error(vscode.l10n.t('Installer checksum verification failed. The download was discarded.')); }
 					await fs.rm(destination, { force: true }); await fs.rename(temporary, destination);
-				} finally { subscription.dispose(); await fs.rm(temporary, { force: true }); }
+				} finally { cancel.abort(); subscription.dispose(); await fs.rm(temporary, { force: true }); }
 			});
 			if (disposed) { return; }
 			const open = vscode.l10n.t('Open Installer'), reveal = vscode.l10n.t('Reveal Download');
