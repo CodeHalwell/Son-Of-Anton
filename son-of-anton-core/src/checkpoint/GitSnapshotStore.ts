@@ -112,20 +112,24 @@ export class GitSnapshotStore {
 		}
 	}
 
-	/** Preview, retain a recovery point, and restore with a rollback on failure. */
-	async restore(snapshot: GitSnapshot, confirm: (files: readonly string[]) => Promise<boolean>): Promise<GitSnapshot | undefined> {
+	/**
+	 * Preview and restore with rollback. Hosts can index recovery before mutation;
+	 * markRetained must run at that commit even if subsequent work fails.
+	 */
+	async restore(snapshot: GitSnapshot, confirm: (files: readonly string[]) => Promise<boolean>, retainRecovery?: (recovery: GitSnapshot, markRetained: () => void) => Promise<void>): Promise<GitSnapshot | undefined> {
 		return this.locked(async () => {
 			await this.validate(snapshot);
 			const recovery = await this.captureUnlocked();
 			let confirmed = false;
-			let mutationStarted = false;
+			let mutationStarted = false; let recoveryRetained = false; let restoreFailure: unknown;
 			try {
 				const files = (await git(snapshot.workspaceRoot, ['diff-tree', '--no-commit-id', '--name-only', '--no-renames', '-r', '-z', recovery.commit, snapshot.commit])).split('\0').filter(Boolean);
 				confirmed = await confirm(files);
 				if (!confirmed) {
 					return undefined;
 				}
-				// The confirmation may have been open while a user edited files. Take
+				if (retainRecovery) { await retainRecovery(recovery, () => { recoveryRetained = true; }); recoveryRetained = true; }
+				// Confirmation and recovery persistence can overlap user edits. Take
 				// a fresh recovery snapshot rather than overwrite those edits unseen.
 				const current = await this.captureUnlocked();
 				const changed = (await git(snapshot.workspaceRoot, ['diff-tree', '--no-commit-id', '--name-only', '-r', current.commit, recovery.commit])).trim();
@@ -148,9 +152,14 @@ export class GitSnapshotStore {
 					throw new Error(`Restore failed; the previous workspace was recovered (${recovery.ref}).`, { cause: error });
 				}
 				return recovery;
-			} finally {
-				if (!mutationStarted) {
-					await this.release(recovery);
+			} catch (error) { restoreFailure = error; throw error; }
+			finally {
+				if (!mutationStarted && !recoveryRetained) {
+					try { await this.release(recovery); }
+					catch (cleanupError) {
+						if (restoreFailure) { throw new AggregateError([restoreFailure, cleanupError], `${restoreFailure instanceof Error ? restoreFailure.message : String(restoreFailure)} Unused recovery ref could not be removed: ${recovery.ref}.`, { cause: restoreFailure }); }
+						throw cleanupError;
+					}
 				}
 			}
 		});

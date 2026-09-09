@@ -161,7 +161,7 @@ jobs:
           npm ci
           npm --prefix son-of-anton-core ci
           npm --prefix son-of-anton-cli ci
-          npm --prefix extensions/son-of-anton ci
+          npm --prefix extensions/son-of-anton ci --include=dev
           npm --prefix services/code-graph/mcp-server ci
       - name: Compile before validation
         run: |
@@ -169,6 +169,7 @@ jobs:
           npm --prefix son-of-anton-cli run build
           npm --prefix services/code-graph/mcp-server run build
           node node_modules/typescript/bin/tsc -p extensions/son-of-anton/tsconfig.json --noEmit
+          node node_modules/typescript/bin/tsc -p extensions/son-of-anton/tsconfig.test.json --noEmit
           npx tsgo --project extensions/son-of-anton/tsconfig.json --noEmit
           npm run compile-check-ts-native
           npm run gulp compile-extensions
@@ -179,6 +180,9 @@ jobs:
           node --test son-of-anton-core/dist/util/readBoundedFile.test.js son-of-anton-core/dist/credentials/ProtectedSecretStore.test.js
           node --test son-of-anton-cli/dist/test/updateInstall.test.js
           node --test scripts/test/ide-release.test.mjs scripts/test/ide-package.test.mjs
+      - name: Shared history and branch recovery regressions
+        working-directory: extensions/son-of-anton
+        run: npm test -- --grep '^(Chat transcript write ownership|Conversation revision compare-and-swap|Conversation branch failure recovery) ' --fail-zero
       - name: Graph watcher regressions
         run: node --test services/code-graph/mcp-server/test/incremental.test.mjs
       - name: Build native code graph

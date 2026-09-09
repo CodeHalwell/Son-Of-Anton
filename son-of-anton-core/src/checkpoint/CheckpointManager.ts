@@ -109,6 +109,7 @@ export class CheckpointManager implements Disposable {
 	private readonly _onDidChange = new TypedEventEmitter<void>();
 	readonly onDidChange: Event<void> = this._onDidChange.event;
 	private pendingWrite: Promise<void> = Promise.resolve();
+	private readonly activeRestores = new Set<ReadonlySet<string>>();
 
 	constructor(
 		private readonly conversationStore: ConversationStoreLike,
@@ -196,30 +197,14 @@ export class CheckpointManager implements Disposable {
 			throw new Error('This legacy checkpoint has no verified worktree snapshot. Capture a new checkpoint before making changes.');
 		}
 		const store = new GitSnapshotStore(root);
-		const recovery = await store.restore(checkpoint.snapshot, async files => {
+		await this.restoreWithRecovery(checkpoint, root, options, retainRecovery => store.restore(checkpoint.snapshot!, async files => {
 			const preview = files.slice(0, 20).map(file => `  ${file}`).join('\n');
 			const confirmed = await this.host.confirmRestore(
 				`Restore ${files.length} changed paths to this checkpoint? Tracked and non-ignored untracked files are restored; the staging area is preserved as captured. A recovery checkpoint will be retained.\n${preview}${files.length > 20 ? '\n  …' : ''}${options.conversationToo ? '\nThe conversation will also be rewound.' : ''}`,
 			);
 			if (this.getWorkspaceRoot() !== root) { throw new Error('Workspace changed while confirming restore.'); }
 			return confirmed;
-		});
-		if (!recovery) {
-			return;
-		}
-		await this.mutateIndex(index => this.pruneIndex([...index, {
-			id: randomUUID(), conversationId: options.conversationId ?? checkpoint.conversationId,
-			turnIndex: this.conversationStore.load(options.conversationId ?? checkpoint.conversationId)?.messages.length ?? checkpoint.turnIndex,
-			capturedAt: Date.now(), userMessage: 'Recovery point before checkpoint restore',
-			kind: 'git', gitSha: recovery.commit, baseRef: recovery.head,
-			snapshot: recovery, summary: 'Recovery point before restore',
-		}]), recovery.workspaceRoot);
-		this._onDidChange.fire();
-		this.host.notifier.info('Workspace restored. The previous state is available as a recovery checkpoint.');
-
-		if (options.conversationToo) {
-			this.rewindConversation(checkpoint, options.conversationId);
-		}
+		}, retainRecovery));
 	}
 
 	/**
@@ -322,19 +307,52 @@ export class CheckpointManager implements Disposable {
 	private fileStorageRoot(): string { return this.host.storageRoot ?? path.join(os.homedir(), '.son-of-anton', 'file-checkpoints'); }
 
 	private async restoreFiles(checkpoint: Checkpoint, root: string, options: RestoreOptions): Promise<void> {
-		const recovery = await new FileSnapshotStore(root, this.fileStorageRoot()).restore(checkpoint.fileSnapshot!, async files => {
+		await this.restoreWithRecovery(checkpoint, root, options, retainRecovery => new FileSnapshotStore(root, this.fileStorageRoot()).restore(checkpoint.fileSnapshot!, async files => {
 			const preview = files.slice(0, 20).map(file => `  ${file}`).join('\n');
 			const confirmed = await this.host.confirmRestore(`Restore ${files.length} changed paths? A recovery checkpoint will retain the current files. Dependencies and VCS internals are excluded.\n${preview}${files.length > 20 ? '\n  …' : ''}${options.conversationToo ? '\nThe conversation will also be rewound.' : ''}`);
 			if (this.getWorkspaceRoot() !== root) { throw new Error('Workspace changed while confirming restore.'); }
 			return confirmed;
-		});
-		if (!recovery) { return; }
-		await this.mutateIndex(index => this.pruneIndex([...index, {
-			id: randomUUID(), conversationId: options.conversationId ?? checkpoint.conversationId, turnIndex: this.conversationStore.load(options.conversationId ?? checkpoint.conversationId)?.messages.length ?? checkpoint.turnIndex,
-			capturedAt: Date.now(), userMessage: 'Recovery point before checkpoint restore', kind: 'fs', fileSnapshot: recovery, summary: 'Recovery point before restore',
-		}]), root);
-		this._onDidChange.fire(); this.host.notifier.info('Workspace restored. The previous state is available as a recovery checkpoint.');
-		if (options.conversationToo) { this.rewindConversation(checkpoint, options.conversationId); }
+		}, retainRecovery));
+	}
+
+	private async restoreWithRecovery(
+		checkpoint: Checkpoint, root: string, options: RestoreOptions,
+		restore: (retain: (snapshot: FileSnapshot | GitSnapshot, markRetained: () => void) => Promise<void>) => Promise<FileSnapshot | GitSnapshot | undefined>,
+	): Promise<void> {
+		let recoveryCheckpoint: Checkpoint | undefined; let recoveryIndexed = false;
+		const protectedIds = new Set([checkpoint.id]); this.activeRestores.add(protectedIds);
+		try {
+			const recovery = await restore(async (snapshot, markRetained) => {
+				const strategy = 'commit' in snapshot ? { kind: 'git' as const, snapshot, gitSha: snapshot.commit, baseRef: snapshot.head } : { kind: 'fs' as const, fileSnapshot: snapshot };
+				recoveryCheckpoint = {
+					id: randomUUID(), conversationId: options.conversationId ?? checkpoint.conversationId, turnIndex: this.conversationStore.load(options.conversationId ?? checkpoint.conversationId)?.messages.length ?? checkpoint.turnIndex,
+					capturedAt: Date.now(), userMessage: 'Recovery point before checkpoint restore', summary: 'Recovery point before restore', ...strategy,
+				};
+				protectedIds.add(recoveryCheckpoint.id);
+				try {
+					await this.mutateIndex(index => this.pruneIndex([...index, recoveryCheckpoint!]), root, () => { recoveryIndexed = true; markRetained(); });
+				} catch (error) {
+					if (!recoveryIndexed) { throw new Error('Restore cancelled because its recovery checkpoint could not be saved. The workspace files were not changed; try again after history storage is available.', { cause: error }); }
+					this.warnRestoreCleanup(error);
+				}
+				// A subscriber failure cannot make a snapshot store discard indexed recovery.
+				try { this._onDidChange.fire(); } catch { /* The durable index remains authoritative. */ }
+				if (this.getWorkspaceRoot() !== root) { throw new Error('Workspace changed while saving restore recovery.'); }
+			});
+			if (!recovery) { return; }
+			protectedIds.delete(checkpoint.id);
+			// Retain recovery through final pruning even if a newer capture arrived
+			// during restore. This may exceed the count by one until a later capture.
+			try { await this.mutateIndex(index => this.pruneIndex(index), root); }
+			catch (error) { this.warnRestoreCleanup(error); }
+			this._onDidChange.fire(); this.host.notifier.info('Workspace restored. The previous state is available as a recovery checkpoint.');
+			if (options.conversationToo) { this.rewindConversation(checkpoint, options.conversationId); }
+		} finally { this.activeRestores.delete(protectedIds); }
+	}
+
+	private warnRestoreCleanup(error: unknown): void {
+		try { this.host.notifier.warn(`The restore recovery checkpoint is saved, but checkpoint cleanup failed: ${String(error)}`); }
+		catch { /* Reporting must not change whether a recovery snapshot is retained. */ }
 	}
 
 	/**
@@ -398,8 +416,9 @@ export class CheckpointManager implements Disposable {
 	}
 
 	private pruneIndex(index: Checkpoint[]): Checkpoint[] {
-		const retained = index.filter(checkpoint => checkpoint.branchConversationIds?.length);
-		return [...retained, ...index.filter(checkpoint => !checkpoint.branchConversationIds?.length).sort((a, b) => b.capturedAt - a.capturedAt).slice(0, this.getMaxCount())];
+		const restoring = new Set([...this.activeRestores].flatMap(ids => [...ids]));
+		const retained = index.filter(checkpoint => checkpoint.branchConversationIds?.length || restoring.has(checkpoint.id));
+		return [...retained, ...index.filter(checkpoint => !checkpoint.branchConversationIds?.length && !restoring.has(checkpoint.id)).reverse().sort((a, b) => b.capturedAt - a.capturedAt).slice(0, this.getMaxCount())];
 	}
 
 }

@@ -67,6 +67,9 @@ export class AcpAgent extends BaseAgent {
 			const result = await this.runtime.run({
 				agent: this.definition, cwd: this.cwd,
 				conversationId,
+				// The fallback UUID is private to this call and cannot be reused for
+				// recovery. Explicit host conversation/task IDs remain durable.
+				persistRecovery: options?.conversationId !== undefined,
 				initialContext: this.instructions(),
 				images: options?.images,
 				modeId: options?.mode === 'plan' ? 'plan' : undefined,

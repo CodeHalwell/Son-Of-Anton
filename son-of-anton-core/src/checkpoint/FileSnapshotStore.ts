@@ -108,15 +108,21 @@ export class FileSnapshotStore {
 		const before = new Map(current.files.map(file => [file.file, file])); const after = new Map(target.files.map(file => [file.file, file]));
 		return [...new Set([...before.keys(), ...after.keys()])].filter(file => before.get(file)?.digest !== after.get(file)?.digest || before.get(file)?.mode !== after.get(file)?.mode).sort();
 	}
-	/** Preview, recheck edits made during confirmation, retain a recovery snapshot, and roll back failed restores. */
-	async restore(snapshot: FileSnapshot, confirm: (files: readonly string[]) => Promise<boolean>): Promise<FileSnapshot | undefined> {
+	/**
+	 * Preview and recheck edits before restoring. A host may durably retain recovery
+	 * before mutation; markRetained must run at that commit even if later work fails.
+	 */
+	async restore(snapshot: FileSnapshot, confirm: (files: readonly string[]) => Promise<boolean>, retainRecovery?: (recovery: FileSnapshot, markRetained: () => void) => Promise<void>): Promise<FileSnapshot | undefined> {
 		const key = (await this.identity()).workspaceRoot; const previous = FileSnapshotStore.locks.get(key) ?? Promise.resolve();
 		let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
 		const queued = previous.then(() => gate); FileSnapshotStore.locks.set(key, queued); await previous;
 		try {
-			const target = await this.validate(snapshot); const recovery = await this.capture(); const before = await this.validate(recovery); let mutationStarted = false;
+			const target = await this.validate(snapshot); const recovery = await this.capture(); const before = await this.validate(recovery); let mutationStarted = false; let recoveryRetained = false; let restoreFailure: unknown;
 			try {
 				const files = this.changed(target, before); if (!await confirm(files)) { return undefined; }
+				// A host must make the pre-restore snapshot reachable before files change.
+				// Recheck the workspace after that asynchronous persistence boundary.
+				if (retainRecovery) { await retainRecovery(recovery, () => { recoveryRetained = true; }); recoveryRetained = true; }
 				const current = await this.readWorkspace(snapshot.workspaceRoot);
 				if (this.changed(before, { snapshot: recovery, files: current.files }).length) { throw new Error('Files changed while confirming. Review the checkpoint again before restoring.'); }
 				await this.validate(snapshot);
@@ -130,7 +136,16 @@ export class FileSnapshotStore {
 					throw new Error(`Restore failed; the previous files were recovered. Recovery: ${this.directory(recovery)}`, { cause: error });
 				}
 				return recovery;
-			} finally { if (!mutationStarted) { await this.release(recovery); } }
+			} catch (error) { restoreFailure = error; throw error; }
+			finally {
+				if (!mutationStarted && !recoveryRetained) {
+					try { await this.release(recovery); }
+					catch (cleanupError) {
+						if (restoreFailure) { throw new AggregateError([restoreFailure, cleanupError], `${restoreFailure instanceof Error ? restoreFailure.message : String(restoreFailure)} Unused recovery files could not be removed from ${this.directory(recovery)}.`, { cause: restoreFailure }); }
+						throw cleanupError;
+					}
+				}
+			}
 		} finally { release(); if (FileSnapshotStore.locks.get(key) === queued) { FileSnapshotStore.locks.delete(key); } }
 	}
 	private async verifyAncestors(file: string, root: string): Promise<void> {

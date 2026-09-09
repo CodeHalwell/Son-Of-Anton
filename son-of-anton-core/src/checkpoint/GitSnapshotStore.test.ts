@@ -8,7 +8,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
-import { GitSnapshotStore } from './GitSnapshotStore';
+import { GitSnapshotStore, type GitSnapshot } from './GitSnapshotStore';
 
 describe('Git workspace checkpoints', () => {
 	let root: string;
@@ -92,4 +92,21 @@ describe('Git workspace checkpoints', () => {
 		assert.equal(await store.restore(snapshot, async () => false), undefined);
 		assert.deepEqual([await read('file.txt'), git('for-each-ref', '--format=%(refname)', 'refs/son-of-anton')], ['keep', refs]);
 	});
+
+	test('indexed recovery refs survive callback failure and subsequent garbage collection', async () => {
+		const target = await store.capture(); await write('file.txt', 'staged'); git('add', 'file.txt'); await write('file.txt', 'unstaged');
+		const before = { head: git('rev-parse', 'HEAD'), index: git('write-tree'), status: git('status', '--porcelain'), stash: git('stash', 'list') };
+		let retained: GitSnapshot | undefined;
+		await assert.rejects(store.restore(target, async () => true, async (snapshot, markRetained) => { retained = snapshot; markRetained(); throw new Error('after indexing failure'); }), /after indexing failure/);
+		assert.equal(await read('file.txt'), 'unstaged'); assert.deepEqual({ head: git('rev-parse', 'HEAD'), index: git('write-tree'), status: git('status', '--porcelain'), stash: git('stash', 'list') }, before);
+		assert.ok(retained); git('gc', '--prune=now'); await store.validate(retained); await write('file.txt', 'later'); await store.restore(retained, async () => true);
+		assert.equal(await read('file.txt'), 'unstaged'); assert.equal(git('show', ':file.txt'), 'staged');
+	});
+
+	test('edits made while indexing recovery are rechecked and keep their retained ref', async () => {
+		const target = await store.capture(); await write('file.txt', 'before indexing'); let retained: GitSnapshot | undefined;
+		await assert.rejects(store.restore(target, async () => true, async (snapshot, markRetained) => { retained = snapshot; markRetained(); await write('file.txt', 'edited during indexing'); }), /changed while confirming/);
+		assert.equal(await read('file.txt'), 'edited during indexing'); assert.ok(retained); await store.validate(retained);
+	});
+
 });

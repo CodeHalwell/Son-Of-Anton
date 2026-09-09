@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { FileSnapshotStore } from './FileSnapshotStore';
+import { FileSnapshotStore, type FileSnapshot } from './FileSnapshotStore';
 
 async function fixture(t: TestContext) {
 	const directory = await fs.mkdtemp(join(tmpdir(), 'sota-file-checkpoint-'));
@@ -82,4 +82,14 @@ test('capture rejects a file that grows after the descriptor has been inspected'
 	});
 	await assert.rejects(store.capture(), /File changed while capturing/);
 	assert.equal(changed, true);
+});
+
+
+test('a host commit marker preserves recovery when its retention callback subsequently fails', async t => {
+	const { root, store } = await fixture(t); await fs.writeFile(join(root, 'file'), 'target'); const target = await store.capture(); await fs.writeFile(join(root, 'file'), 'pre-restore');
+	let retained: FileSnapshot | undefined;
+	await assert.rejects(store.restore(target, async () => true, async (snapshot, markRetained) => { retained = snapshot; markRetained(); throw new Error('workspace changed after persistence'); }), /workspace changed after persistence/);
+	assert.equal(await fs.readFile(join(root, 'file'), 'utf8'), 'pre-restore'); assert.ok(retained);
+	await fs.writeFile(join(root, 'file'), 'subsequent edit'); await store.restore(retained, async () => true);
+	assert.equal(await fs.readFile(join(root, 'file'), 'utf8'), 'pre-restore');
 });

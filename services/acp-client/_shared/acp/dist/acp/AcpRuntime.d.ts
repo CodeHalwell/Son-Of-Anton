@@ -5,6 +5,8 @@ export interface AcpTurn {
     cwd: string;
     /** Stable per conversation and specialist. Never share this across unrelated work. */
     conversationId: string;
+    /** Defaults to true. One-shot callers with their own durable results can skip host recovery reads and writes. */
+    persistRecovery?: boolean;
     text: string;
     images?: readonly AcpImage[];
     /** Read-only mode must also be explicitly negotiated through modeId. */

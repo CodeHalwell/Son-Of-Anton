@@ -10,6 +10,8 @@ The subsequent analysis of `2e7de85d5bf` (analysis `1747912351`, merge `4e1b074d
 
 Analysis `1748197929` of review commit `0c64c36550b` (merge `5130a252e4b229f3caea9be94d60bba599c941b5`) confirmed those corrections with zero results and no analysis errors or warnings. All nine prior PR alerts are marked fixed.
 
+The later analysis `1748624129` of review commit `37d8d58e022` (merge `cb67d0120d90fc6d33d33807694911bd0cc63906`, completed September 9, 2026) also reported zero results with no errors or warnings. The merge parents were verified against that exact PR revision and main; all nine alerts remained fixed.
+
 ## Provider catalog network boundary
 
 CodeQL alerts [787](https://github.com/CodeHalwell/Son-Of-Anton/security/code-scanning/787) and [788](https://github.com/CodeHalwell/Son-Of-Anton/security/code-scanning/788) trace the CLI's JSON settings reader into the catalog request URL and authorization header. These are intentional uses of a user's configured provider endpoint and credential. The alerts have not been suppressed or dismissed.

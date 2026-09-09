@@ -32,7 +32,7 @@ async function captureFailureFixture(t: import('node:test').TestContext) {
 		notifier: { info() {}, warn: message => { warnings.push(message); faults.warn?.(message); }, error: message => assert.fail(message) },
 	});
 	t.after(() => manager.dispose());
-	return { manager, faults, warnings, root };
+	return { manager, faults, warnings, root, state, config, directory };
 }
 
 test('failed checkpoint indexing removes only the new file payload and repeated failures do not accumulate snapshots', async t => {
@@ -178,4 +178,117 @@ test('checkpoint capture and history use one index when Windows host path casing
 	assert.equal(await fs.readFile(join(root, 'file'), 'utf8'), 'one');
 	assert.equal(reopened.listAll().length, 2);
 	assert.deepEqual([...values.keys()], persistedKeys);
+});
+
+
+test('failed restore recovery indexing leaves files unchanged and repeated retries leave no orphan snapshots', async t => {
+	const { manager, faults, root } = await captureFailureFixture(t);
+	const original = await fs.readFile(join(root, 'file')); const target = await manager.capture('parent', 1, 'target'); assert.ok(target?.fileSnapshot);
+	await fs.writeFile(join(root, 'file'), 'pre-restore contents'); await fs.writeFile(join(root, 'later'), 'precious new file');
+	const failedRecoveries: FileSnapshot[] = [];
+	faults.beforeWrite = async checkpoints => {
+		const recovery = checkpoints.find(checkpoint => checkpoint.id !== target.id)!; assert.ok(recovery.fileSnapshot); failedRecoveries.push(recovery.fileSnapshot);
+		assert.equal(await fs.readFile(join(root, 'file'), 'utf8'), 'pre-restore contents');
+		throw new Error('history disk full');
+	};
+	for (let attempt = 0; attempt < 3; attempt++) {
+		await assert.rejects(manager.restore(target.id, { conversationToo: true }), /workspace files were not changed/);
+		assert.equal(await fs.readFile(join(root, 'later'), 'utf8'), 'precious new file');
+	}
+	assert.equal(await fs.readFile(join(root, 'file'), 'utf8'), 'pre-restore contents');
+	for (const snapshot of failedRecoveries) { await assert.rejects(fs.access(snapshotDirectory(snapshot)), { code: 'ENOENT' }); }
+	assert.deepEqual(await fs.readdir(dirname(snapshotDirectory(target.fileSnapshot))), [target.fileSnapshot.id]);
+	assert.deepEqual(manager.listAll().map(checkpoint => checkpoint.id), [target.id]);
+	faults.beforeWrite = undefined;
+	await manager.restore(target.id, { conversationToo: false });
+	assert.deepEqual(await fs.readFile(join(root, 'file')), original); await assert.rejects(fs.access(join(root, 'later')), { code: 'ENOENT' });
+	const recovery = manager.list('parent').find(checkpoint => checkpoint.id !== target.id); assert.ok(recovery?.fileSnapshot); assert.equal(manager.size(), 2);
+	await manager.restore(recovery.id, { conversationToo: false });
+	assert.equal(await fs.readFile(join(root, 'file'), 'utf8'), 'pre-restore contents'); assert.equal(await fs.readFile(join(root, 'later'), 'utf8'), 'precious new file');
+});
+
+test('edits during recovery indexing abort restore and retain a visible recovery across manager restart', async t => {
+	const { manager, faults, root, state, config, directory } = await captureFailureFixture(t);
+	const target = await manager.capture('parent', 0, 'target'); assert.ok(target?.fileSnapshot); await fs.writeFile(join(root, 'file'), 'before restore');
+	faults.beforeWrite = async checkpoints => { if (checkpoints.some(checkpoint => checkpoint.id !== target.id)) { await fs.writeFile(join(root, 'file'), 'edited during persistence'); } };
+	await assert.rejects(manager.restore(target.id, { conversationToo: false }), /changed while confirming/);
+	assert.equal(await fs.readFile(join(root, 'file'), 'utf8'), 'edited during persistence');
+	const recovery = manager.list('parent').find(checkpoint => checkpoint.id !== target.id); assert.ok(recovery?.fileSnapshot); await fs.access(snapshotDirectory(recovery.fileSnapshot)); await fs.access(snapshotDirectory(target.fileSnapshot));
+	faults.beforeWrite = undefined;
+	const reopened = new CheckpointManager({ load: () => ({ messages: [], summary: {} }), update() {} }, state, { storageRoot: join(directory, 'storage'), getWorkspaceRoot: () => root, config, confirmRestore: async () => true, notifier: { info() {}, warn: message => assert.fail(message), error: message => assert.fail(message) } }); t.after(() => reopened.dispose());
+	assert.equal(reopened.get(recovery.id)?.fileSnapshot?.id, recovery.fileSnapshot.id);
+	await reopened.restore(recovery.id, { conversationToo: false }); assert.equal(await fs.readFile(join(root, 'file'), 'utf8'), 'before restore');
+});
+
+test('post-commit restore pruning and notifier failures cannot discard indexed recovery', async t => {
+	const { manager, faults, root, warnings } = await captureFailureFixture(t);
+	const original = await fs.readFile(join(root, 'file')); const target = await manager.capture('parent', 0, 'target'); assert.ok(target?.fileSnapshot); await fs.writeFile(join(root, 'file'), 'retain me');
+	let writes = 0; faults.beforeWrite = async () => { if (++writes === 2) { throw new Error('post-commit pruning failed'); } };
+	faults.warn = () => { throw new Error('warning subscriber unavailable'); };
+	await manager.restore(target.id, { conversationToo: false }); assert.deepEqual(await fs.readFile(join(root, 'file')), original);
+	const recovery = manager.list('parent').find(checkpoint => checkpoint.id !== target.id); assert.ok(recovery?.fileSnapshot); await fs.access(snapshotDirectory(recovery.fileSnapshot));
+	assert.ok(warnings.some(message => message.includes('recovery checkpoint is saved')));
+});
+
+test('failed file application keeps pre-restore recovery indexed and files recoverable', async t => {
+	const { manager, root } = await captureFailureFixture(t);
+	const target = await manager.capture('parent', 0, 'target'); assert.ok(target?.fileSnapshot); await fs.writeFile(join(root, 'file'), 'pre-restore files');
+	const rename = fs.rename; let rejected = false; const canonical = await fs.realpath(join(root, 'file'));
+	t.mock.method(fs, 'rename', async (...args: Parameters<typeof rename>) => { if (!rejected && String(args[1]) === canonical) { rejected = true; throw new Error('workspace temporarily unavailable'); } return rename(...args); });
+	await assert.rejects(manager.restore(target.id, { conversationToo: false }), /previous files were recovered/);
+	assert.equal(await fs.readFile(join(root, 'file'), 'utf8'), 'pre-restore files');
+	const recovery = manager.list('parent').find(checkpoint => checkpoint.id !== target.id); assert.ok(recovery?.fileSnapshot); await fs.access(snapshotDirectory(recovery.fileSnapshot));
+});
+
+
+test('a concurrent capture and restore recovery both remain reachable at the count limit', async t => {
+	const { manager, root } = await captureFailureFixture(t);
+	const target = await manager.capture('parent', 0, 'target'); assert.ok(target?.fileSnapshot); await fs.writeFile(join(root, 'file'), 'pre-restore contents');
+	const prototype = FileSnapshotStore.prototype as unknown as { apply(target: unknown, current: unknown): Promise<void> };
+	const apply = prototype.apply; let entered!: () => void; let proceed!: () => void;
+	const started = new Promise<void>(resolve => { entered = resolve; }); const gate = new Promise<void>(resolve => { proceed = resolve; }); let calls = 0;
+	t.mock.method(prototype, 'apply', async function (this: FileSnapshotStore, targetManifest: unknown, currentManifest: unknown) { if (++calls === 1) { entered(); await gate; } return apply.call(this, targetManifest, currentManifest); });
+	const restoring = manager.restore(target.id, { conversationToo: false });
+	let concurrent: Checkpoint | undefined;
+	try {
+		await started; await new Promise<void>(resolve => setTimeout(resolve, 2));
+		concurrent = await manager.capture('other', 0, 'newer capture'); assert.ok(concurrent?.fileSnapshot);
+		assert.ok(manager.get(concurrent.id)); await fs.access(snapshotDirectory(concurrent.fileSnapshot));
+	} finally { proceed(); await restoring; }
+	const recovery = manager.list('parent').find(checkpoint => checkpoint.id !== target.id); assert.ok(recovery?.fileSnapshot); assert.ok(concurrent?.fileSnapshot);
+	assert.ok(manager.get(concurrent.id)); await fs.access(snapshotDirectory(recovery.fileSnapshot)); await fs.access(snapshotDirectory(concurrent.fileSnapshot));
+	assert.equal(manager.size(), 2, 'one ordinary checkpoint plus the just-used restore recovery');
+});
+
+test('failed unused-recovery cleanup keeps the index failure and identifies retained files', async t => {
+	const { manager, root, faults } = await captureFailureFixture(t); const target = await manager.capture('parent', 0, 'target'); assert.ok(target?.fileSnapshot); await fs.writeFile(join(root, 'file'), 'unchanged');
+	const indexError = new Error('original history failure'); const cleanupError = new Error('cleanup denied'); let recovery: FileSnapshot | undefined;
+	faults.beforeWrite = async checkpoints => { recovery = checkpoints.find(checkpoint => checkpoint.id !== target.id)?.fileSnapshot; throw indexError; };
+	t.mock.method(FileSnapshotStore.prototype, 'release', async () => { throw cleanupError; });
+	await assert.rejects(manager.restore(target.id, { conversationToo: false }), error => {
+		assert.ok(error instanceof AggregateError); assert.match(error.message, /workspace files were not changed/); assert.equal(syncFs.realpathSync.native(error.message.match(/removed from (.*)\.$/)![1]), snapshotDirectory(recovery!));
+		assert.equal((error.errors[0] as Error).cause, indexError); assert.equal(error.errors[1], cleanupError); return true;
+	});
+	assert.equal(await fs.readFile(join(root, 'file'), 'utf8'), 'unchanged'); assert.ok(recovery); await fs.access(snapshotDirectory(recovery)); assert.equal(manager.size(), 1);
+});
+
+
+test('failed Git restore indexing preserves staged and working files, HEAD and stash without orphan recovery refs', async t => {
+	const { manager, faults, root } = await captureFailureFixture(t);
+	const git = (...args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+	git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.invalid'); git('add', '.'); git('commit', '-qm', 'initial');
+	await fs.writeFile(join(root, 'file'), 'stash contents'); git('stash', 'push', '-qm', 'existing user stash');
+	const target = await manager.capture('parent', 0, 'target'); assert.ok(target?.snapshot);
+	await fs.writeFile(join(root, 'file'), 'staged contents'); git('add', 'file'); await fs.writeFile(join(root, 'file'), 'unstaged contents'); await fs.writeFile(join(root, 'scratch'), 'untracked contents');
+	const inspect = async () => ({ head: git('rev-parse', 'HEAD'), stash: git('stash', 'list'), index: git('write-tree'), status: git('status', '--porcelain'), file: await fs.readFile(join(root, 'file'), 'utf8'), scratch: await fs.readFile(join(root, 'scratch'), 'utf8') });
+	const before = await inspect(); const refs = git('for-each-ref', '--format=%(refname)', 'refs/son-of-anton/checkpoints/'); let failures = 0;
+	faults.beforeWrite = async checkpoints => { const recovery = checkpoints.find(checkpoint => checkpoint.id !== target.id); assert.ok(recovery?.snapshot); assert.equal(git('rev-parse', recovery.snapshot.ref), recovery.snapshot.commit); failures++; throw new Error('Git recovery history unavailable'); };
+	for (let attempt = 0; attempt < 2; attempt++) {
+		await assert.rejects(manager.restore(target.id, { conversationToo: true }), /workspace files were not changed/);
+		assert.deepEqual(await inspect(), before); assert.equal(git('for-each-ref', '--format=%(refname)', 'refs/son-of-anton/checkpoints/'), refs);
+	}
+	assert.equal(failures, 2); faults.beforeWrite = undefined;
+	await manager.restore(target.id, { conversationToo: false }); const recovery = manager.list('parent').find(checkpoint => checkpoint.id !== target.id); assert.ok(recovery?.snapshot);
+	assert.equal(git('rev-parse', 'HEAD'), before.head); assert.equal(git('stash', 'list'), before.stash); git('gc', '--prune=now');
+	await manager.restore(recovery.id, { conversationToo: false }); assert.deepEqual(await inspect(), before);
 });

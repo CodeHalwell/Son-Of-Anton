@@ -184,7 +184,13 @@ class AcpRuntime {
     }
     key(turn) {
         // Hash invocation configuration: environment secrets must not appear in diagnostics or keys.
-        const fingerprint = (0, node_crypto_1.createHash)('sha256').update(JSON.stringify([turn.agent, turn.mcpServers ?? [], turn.modeId, turn.readOnly])).digest('hex');
+        const configuration = [turn.agent, turn.mcpServers ?? [], turn.modeId, turn.readOnly];
+        // Keep existing durable recovery keys unchanged, while preventing a
+        // one-shot caller from reusing a durable conversation's remote session.
+        if (turn.persistRecovery === false) {
+            configuration.push('ephemeral');
+        }
+        const fingerprint = (0, node_crypto_1.createHash)('sha256').update(JSON.stringify(configuration)).digest('hex');
         return JSON.stringify([turn.conversationId, turn.cwd, fingerprint]);
     }
     reportRecoveryStorageIssue(phase, error) {
@@ -339,11 +345,13 @@ class AcpRuntime {
         try {
             const fresh = !worker.ready;
             let saved;
-            try {
-                saved = this.sessionStore?.get(job.key);
-            }
-            catch (error) {
-                this.reportRecoveryStorageIssue('read', error);
+            if (job.turn.persistRecovery !== false) {
+                try {
+                    saved = this.sessionStore?.get(job.key);
+                }
+                catch (error) {
+                    this.reportRecoveryStorageIssue('read', error);
+                }
             }
             let resumed = false;
             if (fresh) {
@@ -384,8 +392,10 @@ class AcpRuntime {
             ].join('\n\n') : '';
             const context = [job.turn.initialContext, restore].filter(Boolean).join('\n\n');
             const text = fresh && !resumed && context ? `${context}\n\n${job.turn.text}` : job.turn.text;
-            record = { version: 1, conversationId: job.turn.conversationId, sessionId: worker.connection.remoteSessionId, state: 'running', transcript: [...(saved?.transcript ?? []), `User: ${job.turn.text}${job.turn.images?.length ? `\n[${job.turn.images.length} image attachment(s); image bytes are not retained in recovery context]` : ''}\nAssistant: [turn interrupted before completion]`], updatedAt: Date.now() };
-            await this.saveRecoveryRecord(job, record, 'before-prompt');
+            if (job.turn.persistRecovery !== false) {
+                record = { version: 1, conversationId: job.turn.conversationId, sessionId: worker.connection.remoteSessionId, state: 'running', transcript: [...(saved?.transcript ?? []), `User: ${job.turn.text}${job.turn.images?.length ? `\n[${job.turn.images.length} image attachment(s); image bytes are not retained in recovery context]` : ''}\nAssistant: [turn interrupted before completion]`], updatedAt: Date.now() };
+                await this.saveRecoveryRecord(job, record, 'before-prompt');
+            }
             job.controller.signal.throwIfAborted();
             promptStarted = true;
             const result = await worker.connection.prompt(text, {
@@ -433,7 +443,9 @@ class AcpRuntime {
                     job.turn.onUpdate?.(update);
                 },
             });
-            record.state = result.stopReason === 'end_turn' ? 'settled' : 'interrupted';
+            if (record) {
+                record.state = result.stopReason === 'end_turn' ? 'settled' : 'interrupted';
+            }
             completedResult = result;
         }
         catch (error) {
