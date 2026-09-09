@@ -17,8 +17,10 @@ function deferred() {
 interface TestSession {
 	setupMessageHandler(): void;
 	currentModel: ModelId;
+	currentSpecialistId: string;
+	currentMode: string;
 	handleConversationDeleted(id: string): void;
-	handleSendMessage(message: { text: string; conversationId?: string; includeWorkspaceContext?: boolean; mentionsKinded?: Array<{ kind: string }> }): Promise<void>;
+	handleSendMessage(message: { text: string; conversationId?: string; includeWorkspaceContext?: boolean; mentionsKinded?: NonNullable<ChatMessage['request']>['mentionsKinded']; attachments?: string[]; model?: ModelId; chatMode?: 'plan' | 'act' }): Promise<void>;
 	switchConversation(id: string): void;
 	clearConversation(): void;
 	abortInFlight(): void;
@@ -30,7 +32,7 @@ interface TestSession {
 function createSession() {
 	const messages: Array<{ type: string; [key: string]: unknown }> = [];
 	const models = new Map<string, ModelId>();
-	let receive: (message: { type: string; conversationId?: string; model?: ModelId; id?: string }) => Promise<void>;
+	let receive: (message: { type: string; conversationId?: string; model?: ModelId; id?: string; specialistId?: string; chatMode?: string }) => Promise<void>;
 	const conversations = new Map<string, ChatMessage[]>([['first', []], ['second', []]]);
 	const started = new Map<string, ReturnType<typeof deferred>>();
 	const releases = new Map<string, ReturnType<typeof deferred>>();
@@ -195,6 +197,25 @@ suite('Chat turn ownership', () => {
 		await fixture.session.handleSendMessage({ text: '', mentionsKinded: [{ kind: 'terminal' }], includeWorkspaceContext: false });
 		assert.equal(fixture.conversations.get('first')?.[0]?.role, 'user');
 		assert.ok(fixture.messages.some(message => message.type === 'requestStarted'));
+	});
+
+	test('saved user requests retain composer references without resolved context bodies', async () => {
+		const fixture = createSession();
+		const input = { text: 'Explain the failure', attachments: ['terminal-output'], mentionsKinded: [{ kind: 'file' as const, path: 'src/main.ts' }], includeWorkspaceContext: false, model: 'haiku' as const, chatMode: 'plan' as const };
+		await fixture.session.handleSendMessage(input);
+		input.attachments.push('current-file'); input.mentionsKinded[0].path = 'changed.ts';
+		const saved = fixture.conversations.get('first')?.[0];
+		assert.deepEqual({ request: saved?.request, model: saved?.model, specialist: saved?.specialistId }, { request: { text: 'Explain the failure', attachments: ['terminal-output'], mentions: undefined, mentionsKinded: [{ kind: 'file', path: 'src/main.ts' }], includeWorkspaceContext: false, chatMode: 'plan' }, model: 'haiku', specialist: 'anton' });
+	});
+
+	test('specialist selection persists immediately and stale composer preference changes are ignored', async () => {
+		const fixture = createSession();
+		await fixture.receive({ type: 'selectSpecialist', conversationId: 'first', specialistId: 'anton-code' });
+		assert.equal(fixture.models.has('first'), true, 'selection saved before a prompt is sent');
+		await fixture.receive({ type: 'selectSpecialist', conversationId: 'second', specialistId: 'anton-test' });
+		await fixture.receive({ type: 'selectSpecialist', conversationId: 'first', specialistId: 'not-an-agent' });
+		await fixture.receive({ type: 'modeChange', conversationId: 'second', chatMode: 'plan' });
+		assert.deepEqual({ specialist: fixture.session.currentSpecialistId, mode: fixture.session.currentMode }, { specialist: 'anton-code', mode: 'act' });
 	});
 
 	test('context failures end the loading state with a visible error', async () => {

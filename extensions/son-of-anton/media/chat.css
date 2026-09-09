@@ -5977,7 +5977,7 @@ textarea.ui-block-form-input {
 .msg-body pre { border: 1px solid var(--sota-border); border-radius: 8px; font-size: 12px; }
 .msg-body .code-block pre { border: 0; border-radius: 0; }
 .msg-body { overflow-wrap: anywhere; min-width: 0; }
-.msg-actions { position: static; display: flex; width: fit-content; justify-content: flex-start; margin-top: 10px; opacity: .65; }
+.msg-actions { position: static; pointer-events: auto; display: flex; width: fit-content; justify-content: flex-start; margin-top: 10px; opacity: .65; }
 .msg-assistant:hover .msg-actions, .msg-actions:focus-within { opacity: 1; }
 .composer-host { position: relative; flex-shrink: 0; }
 .composer { padding: 10px 12px 0; }
@@ -6122,3 +6122,8 @@ body.vscode-light { color-scheme: light; }
 .integration-warnings { padding: 10px; border: 1px solid var(--sota-border); border-radius: 6px; overflow-wrap: anywhere; }
 .integration-warnings summary { cursor: pointer; }
 #integrationMore { margin-top: 12px; }
+
+.prompt-restore-notice { display: flex; align-items: center; gap: 10px; padding: 9px 11px; border: 1px solid var(--sota-border); border-radius: 7px; color: var(--sota-fg-muted); font-size: 11px; line-height: 1.5; }
+.prompt-restore-notice[hidden] { display: none; }
+.prompt-restore-notice span { flex: 1; min-width: 0; }
+.prompt-restore-notice button { flex-shrink: 0; border: 0; border-radius: 4px; padding: 5px 7px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); font: inherit; cursor: pointer; }

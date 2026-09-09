@@ -450,14 +450,9 @@
 		// missing) joined with `from->to`. Reset on conversation load/clear
 		// and on every fresh `agentPlan`.
 		const renderedHandoffPairs = new Set();
-		// Cache the most recent user message text so the assistant's
-		// "Regenerate" inline action can re-emit it without round-tripping
-		// to the host. Cleared on `clearConversation`.
+		// Keep the visible prompt separate from its reusable composer references.
 		let lastUserPrompt = '';
-		// Mirror used by Up-Arrow recall when the textarea is empty. Distinct
-		// from `lastUserPrompt` because regenerate consumes the persisted
-		// content (which may be a mention summary), whereas recall wants the
-		// exact text the user typed last time.
+		let lastPromptDraft = null;
 		let lastSentUserText = '';
 
 		// --- Phase 87: command history recall -----------------------------
@@ -500,9 +495,59 @@
 		const contextPreview = document.getElementById('workspaceContextPreview');
 		const contextSummary = document.getElementById('workspaceContextSummary');
 		const refreshContext = document.getElementById('refreshContext');
+		const promptRestoreNotice = document.getElementById('promptRestoreNotice');
+		let previousPromptDraft = null;
+		function captureComposerDraft() {
+			return { text: messageInput.value, attachments: [...attachments], mentions: mentions.map(mention => ({ ...mention })), images: [...imageAttachments], model: currentModel, agent: currentAgent, mode: currentMode, includeContext: includeContext.checked };
+		}
+		function clearPromptRestore() { previousPromptDraft = null; promptRestoreNotice.hidden = true; }
+		function applyPromptDraft(draft) {
+			messageInput.value = draft.text || '';
+			attachments = [...(draft.attachments || [])];
+			mentions = (draft.mentions || []).map(mention => ({ ...mention }));
+			imageAttachments = [...(draft.images || [])];
+			includeContext.checked = draft.includeContext !== false;
+			if (Object.hasOwn(MODEL_METADATA_RAW, draft.model)) currentModel = draft.model;
+			if (SPECIALISTS.some(specialist => specialist.id === draft.agent)) currentAgent = draft.agent;
+			if (draft.mode === 'plan' || draft.mode === 'act') currentMode = draft.mode;
+			updateModelLabel(); updateModelMenuChecks(); updateAgentLabel(); updateAgentMenuChecks(); updateHeaderSubtitle(); updateModeUi();
+			historyIndex = -1; historyDraft = '';
+			closeSlashPopup(); closeMentionPopup(); closeMenus();
+			renderContextChips(); updateContextPreview();
+			messageInput.style.height = 'auto';
+			messageInput.style.height = Math.min(Math.max(messageInput.scrollHeight, 64), 240) + 'px';
+			vscode.postMessage({ type: 'selectModel', conversationId: activeConversationId, model: currentModel });
+			vscode.postMessage({ type: 'selectSpecialist', conversationId: activeConversationId, specialistId: currentAgent });
+			vscode.postMessage({ type: 'modeChange', conversationId: activeConversationId, chatMode: currentMode });
+			selectTab('chat'); messageInput.focus();
+		}
+		function reusePrompt(draft, conversationId) {
+			if (!draft || isStreaming || conversationId !== activeConversationId) return;
+			previousPromptDraft = captureComposerDraft();
+			applyPromptDraft(draft);
+			promptRestoreNotice.hidden = false;
+		}
+		document.getElementById('undoPromptRestore').addEventListener('click', () => {
+			const previous = previousPromptDraft;
+			clearPromptRestore();
+			if (previous) applyPromptDraft(previous);
+		});
+		function promptDraftFromHistory(msg) {
+			const request = msg.request;
+			const parts = Array.isArray(msg.content) ? msg.content : [{ type: 'text', text: msg.content }];
+			const kinded = Array.isArray(request?.mentionsKinded) ? request.mentionsKinded : (request?.mentions || []).map(path => ({ kind: path === '[workspace]' ? 'workspace' : 'file', path }));
+			const restoredMentions = kinded.filter(mention => mention && typeof mention.kind === 'string').map(mention => ({ ...mention, label: mention.kind === 'url' ? '@url ' + mention.url : mention.path || '@' + mention.kind }));
+			return {
+				text: typeof request?.text === 'string' ? request.text : parts.filter(part => part.type === 'text').map(part => part.text).join('\n'),
+				attachments: Array.isArray(request?.attachments) ? request.attachments.filter(id => Object.hasOwn(ATTACH_LABELS, id)) : [],
+				mentions: restoredMentions,
+				images: parts.filter(part => part.type === 'image').map((part, index) => ({ id: 'reused-' + index, mime: part.mimeType, base64: part.base64Data, name: part.name })),
+				model: msg.model, agent: msg.specialistId || 'anton', mode: request?.chatMode || 'act', includeContext: request?.includeWorkspaceContext !== false,
+			};
+		}
 		function persistDraft() {
 			if (!activeConversationId) return;
-			const draft = { text: messageInput.value, attachments: [...attachments], mentions: [...mentions], images: [...imageAttachments], model: currentModel, includeContext: includeContext.checked };
+			const draft = captureComposerDraft();
 			drafts.delete(activeConversationId);
 			drafts.set(activeConversationId, draft);
 			while (drafts.size > 20) drafts.delete(drafts.keys().next().value);
@@ -520,6 +565,7 @@
 				return;
 			}
 			persistDraft();
+			clearPromptRestore();
 			activeConversationId = id;
 			const draft = drafts.get(id);
 			messageInput.value = draft?.text || '';
@@ -1977,17 +2023,18 @@
 		}
 
 		/**
-		 * Build the inline action toolbar (copy / regenerate / feedback)
-		 * for a finalised assistant message. The toolbar is positioned
-		 * absolutely inside the body and fades in on hover. Wired to
+		 * Build the inline action toolbar (copy / reuse prompt / feedback)
+		 * for a finalised assistant message. The toolbar sits below the response. Wired to
 		 * `postMessage`-driven handlers; feedback events are visual-only
 		 * pending host-side wiring in a future phase.
 		 *
-		 * `source` is the raw markdown text we want copy/regenerate to
+		 * `source` is the raw markdown text we want copy/reuse to
 		 * reference; passed in rather than scraped from the DOM so the
 		 * exact authored content survives the markdown round-trip.
 		 */
-		function buildAssistantActions(source, isLatest) {
+		function buildAssistantActions(source) {
+			const prompt = lastPromptDraft;
+			const conversationId = activeConversationId;
 			const bar = document.createElement('div');
 			bar.className = 'msg-actions';
 			bar.setAttribute('role', 'toolbar');
@@ -2008,33 +2055,16 @@
 			});
 			bar.appendChild(copy);
 
-			// Regenerate — only meaningful on the most recent assistant turn.
-			const regen = document.createElement('button');
-			regen.type = 'button';
-			regen.className = 'msg-action msg-action-regen';
-			regen.title = 'Regenerate response';
-			regen.setAttribute('aria-label', 'Regenerate response');
-			regen.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13 8a5 5 0 1 1-1.46-3.54"/><path d="M13 3v3h-3"/></svg>';
-			if (!isLatest) {
-				regen.hidden = true;
-			}
-			regen.addEventListener('click', () => {
-				if (isStreaming || !lastUserPrompt) return;
-				// Re-emit the last user prompt as a fresh send. We don't
-				// rebuild a user bubble — the previous one stays visible —
-				// so the replay matches the typical "regenerate" UX.
-				setStreamingState(true);
-				startStreamingMessage(getCurrentAgentDisplayName(), currentAgent);
-				vscode.postMessage({
-					type: 'sendMessage',
-					text: lastUserPrompt,
-					model: currentModel,
-					attachments: [],
-					specialistId: currentAgent,
-					chatMode: currentMode,
-				});
-			});
-			bar.appendChild(regen);
+			const reuse = document.createElement('button');
+			reuse.type = 'button';
+			reuse.className = 'msg-action msg-action-reuse';
+			reuse.title = uiText('reusePrompt');
+			reuse.setAttribute('aria-label', uiText('reusePrompt'));
+			reuse.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13 8a5 5 0 1 1-1.46-3.54"/><path d="M13 3v3h-3"/></svg>';
+			reuse.hidden = !prompt;
+			reuse.disabled = isStreaming;
+			reuse.addEventListener('click', () => reusePrompt(prompt, conversationId));
+			bar.appendChild(reuse);
 
 			// Feedback (visual only). The host-side handler is a future phase;
 			// we still emit `feedback` postMessage events for the eventual
@@ -2068,19 +2098,9 @@
 			return bar;
 		}
 
-		/**
-		 * Hide the regenerate button on every assistant message except the
-		 * most recent. Called when a new assistant turn is started so prior
-		 * regenerate buttons disappear.
-		 */
-		function refreshRegenerateAffordance() {
-			const all = messageList.querySelectorAll('.msg-assistant');
-			all.forEach((node, idx) => {
-				const regen = node.querySelector('.msg-action-regen');
-				if (regen) {
-					regen.hidden = idx !== all.length - 1;
-				}
-			});
+		/** Keep request actions unavailable while their agent is still running. */
+		function refreshPromptReuseAffordance() {
+			messageList.querySelectorAll('.msg-action-reuse').forEach(button => { button.disabled = isStreaming; });
 		}
 
 		/**
@@ -2329,25 +2349,25 @@
 		function resetEarlierHistory() {
 			earlierHistory = []; historyButton?.remove(); historyButton = null;
 		}
-		function historyOptions(msg) { return { timestamp: msg.timestamp, specialistId: msg.specialistId || historySpecialist, usageUnavailable: msg.usageUnavailable === true }; }
+		function historyOptions(msg) { return { timestamp: msg.timestamp, specialistId: msg.specialistId || historySpecialist, usageUnavailable: msg.usageUnavailable === true, promptDraft: msg.role === 'user' ? promptDraftFromHistory(msg) : undefined }; }
 		function loadEarlierHistory() {
 			if (!earlierHistory.length) return;
 			const before = new Set(messageList.children);
 			const anchor = messageList.querySelector('.msg');
 			const anchorTop = anchor?.getBoundingClientRect().top;
-			const saved = { index: nextConversationIndex, role: lastSenderRole, assistant: lastAssistantSpecialist, prompt: lastUserPrompt };
+			const saved = { index: nextConversationIndex, role: lastSenderRole, assistant: lastAssistantSpecialist, prompt: lastUserPrompt, promptDraft: lastPromptDraft };
 			const page = earlierHistory.splice(Math.max(0, earlierHistory.length - 100));
-			nextConversationIndex = earlierHistory.length; lastSenderRole = null; lastAssistantSpecialist = null;
+			nextConversationIndex = earlierHistory.length; lastSenderRole = null; lastAssistantSpecialist = null; lastPromptDraft = null;
 			renderingHistory = true;
 			try { for (const msg of page) addMessage(msg.role, msg.content, historyOptions(msg)); }
-			finally { renderingHistory = false; nextConversationIndex = saved.index; lastSenderRole = saved.role; lastAssistantSpecialist = saved.assistant; lastUserPrompt = saved.prompt; }
+			finally { renderingHistory = false; nextConversationIndex = saved.index; lastSenderRole = saved.role; lastAssistantSpecialist = saved.assistant; lastUserPrompt = saved.prompt; lastPromptDraft = saved.promptDraft; }
 			const fragment = document.createDocumentFragment();
 			for (const child of [...messageList.children]) { if (!before.has(child)) fragment.appendChild(child); }
 			messageList.insertBefore(fragment, anchor);
 			if (earlierHistory.length) historyButton.textContent = 'Show Earlier Messages (' + earlierHistory.length + ')';
 			else { historyButton.remove(); historyButton = null; }
 			if (anchor && anchorTop !== undefined) messageList.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
-			refreshRegenerateAffordance();
+			refreshPromptReuseAffordance();
 		}
 		function addMessage(role, content, opts) {
 			opts = opts || {};
@@ -2379,10 +2399,10 @@
 				body.className = 'msg-body';
 				if (isStructured) {
 					const text = renderStructuredContent(body, content);
-					body.appendChild(buildAssistantActions(text, true));
+					body.appendChild(buildAssistantActions(text));
 				} else {
 					body.innerHTML = renderMarkdown(content);
-					body.appendChild(buildAssistantActions(content, true));
+					body.appendChild(buildAssistantActions(content));
 				}
 				// Hydrate any persisted ui-block placeholders to live blocks.
 				if (typeof window.__sotaHydrateUiBlocks === 'function') {
@@ -2410,6 +2430,7 @@
 				if (role === 'user') {
 					lastAssistantSpecialist = null;
 					lastUserPrompt = userText;
+					lastPromptDraft = opts.promptDraft || { ...captureComposerDraft(), text: userText };
 					// Phase 68 — record the rendered prompt length so the user
 					// tooltip can show "Length: N chars" without re-walking the
 					// DOM. Uses the visible text (post-attachment-resolution) so
@@ -2437,7 +2458,7 @@
 				}
 			}
 			lastSenderRole = role;
-			if (!renderingHistory) { refreshRegenerateAffordance(); scrollToBottom(); updateEmptyState(); }
+			if (!renderingHistory) { refreshPromptReuseAffordance(); scrollToBottom(); updateEmptyState(); }
 			return wrapper;
 		}
 
@@ -2506,7 +2527,7 @@
 			messageList.appendChild(wrapper);
 			lastSenderRole = 'assistant';
 			lastAssistantSpecialist = resolvedId;
-			refreshRegenerateAffordance();
+			refreshPromptReuseAffordance();
 			scrollToBottom();
 			currentAssistantDiv = body;
 			updateEmptyState();
@@ -2552,6 +2573,7 @@
 
 		function setStreamingState(streaming) {
 			isStreaming = streaming;
+			refreshPromptReuseAffordance();
 			sendBtn.classList.toggle('is-streaming', streaming);
 			sendBtn.title = streaming ? 'Stop generating' : 'Send (Enter)';
 			sendBtn.setAttribute('aria-label', streaming ? 'Stop generating' : 'Send');
@@ -2607,6 +2629,9 @@
 
 			if (!text && mentions.length === 0 && attachments.length === 0 && imageAttachments.length === 0) return;
 
+			clearPromptRestore();
+			const submittedDraft = { ...captureComposerDraft(), text };
+
 			// Build the user bubble. When images are attached we render them
 			// as a structured array (image parts followed by the text part)
 			// so the bubble shows thumbnails BEFORE the typed text — mirrors
@@ -2617,6 +2642,7 @@
 			if (mentions.length > 0) {
 				bubbleParts.push(mentions.map(m => '`' + (m.label || m.path || m.kind || '') + '`').join(' '));
 			}
+			if (attachments.length) bubbleParts.push(attachments.map(id => '`' + (ATTACH_LABELS[id] || id) + '`').join(' '));
 			const bubbleText = bubbleParts.join(' ');
 			if (imageAttachments.length > 0) {
 				const structured = imageAttachments.map(img => ({
@@ -2626,11 +2652,11 @@
 					name: img.name,
 				}));
 				structured.push({ type: 'text', text: bubbleText || '(image attachment)' });
-				addMessage('user', structured, { timestamp: Date.now() });
+				addMessage('user', structured, { timestamp: Date.now(), promptDraft: submittedDraft });
 			} else {
-				addMessage('user', bubbleText || '(no text)', { timestamp: Date.now() });
+				addMessage('user', bubbleText || '(no text)', { timestamp: Date.now(), promptDraft: submittedDraft });
 			}
-			// Regenerate / Up-Arrow recall both want the user's typed text
+			// Up-Arrow recall keeps the user's typed text
 			// without the mention-chip annotation tail, so they round-trip
 			// cleanly when re-sent.
 			lastUserPrompt = text;
@@ -3974,6 +4000,7 @@
 			const target = e.target.closest('.popover-item');
 			if (!target) return;
 			currentAgent = target.dataset.agent || 'anton';
+			vscode.postMessage({ type: 'selectSpecialist', conversationId: activeConversationId, specialistId: currentAgent });
 			updateAgentLabel();
 			updateAgentMenuChecks();
 			updateHeaderSubtitle();
@@ -3990,7 +4017,7 @@
 			if (normalised === currentMode) return;
 			currentMode = normalised;
 			updateModeUi();
-			vscode.postMessage({ type: 'modeChange', chatMode: currentMode });
+			vscode.postMessage({ type: 'modeChange', conversationId: activeConversationId, chatMode: currentMode });
 		}
 
 		planActButtons.forEach((btn) => {
@@ -4262,6 +4289,8 @@
 					lastSubtaskAssignee = null;
 					renderedHandoffPairs.clear();
 					lastUserPrompt = '';
+					lastPromptDraft = null;
+					clearPromptRestore();
 					nextConversationIndex = 0;
 					checkpointsByTurnIndex.clear();
 					if (message.lastMode === 'plan' || message.lastMode === 'act') {
@@ -4280,7 +4309,7 @@
 							historyButton = document.createElement('button'); historyButton.className = 'secondary-button'; historyButton.textContent = 'Show Earlier Messages (' + start + ')';
 							historyButton.addEventListener('click', loadEarlierHistory); messageList.prepend(historyButton);
 						}
-						refreshRegenerateAffordance();
+						refreshPromptReuseAffordance();
 						const lastUser = messageList.querySelector('.msg-user:last-of-type') || [...messageList.querySelectorAll('.msg-user')].pop();
 						if (lastUser) updateTranscriptTaskHeader(Number(lastUser.dataset.conversationIndex), lastUserPrompt);
 						const meter = document.getElementById('transcriptTaskMeter'); if (meter && message.messages.findLast(msg => msg.role === 'assistant')?.usageUnavailable) meter.textContent = uiText('usageUnavailable');
@@ -4314,6 +4343,8 @@
 					lastSubtaskAssignee = null;
 					renderedHandoffPairs.clear();
 					lastUserPrompt = '';
+					lastPromptDraft = null;
+					clearPromptRestore();
 					lastSentUserText = '';
 					nextConversationIndex = 0;
 					checkpointsByTurnIndex.clear();
@@ -4588,9 +4619,8 @@
 		 * Extract a `<<sota:suggestions>>[...]<<sota:end>>` JSON array from
 		 * the raw assistant text and append a row of quick-pick chips below
 		 * the assistant message. Clicking a chip drops the suggestion into
-		 * the composer and submits it as the next user turn — fast follow-
-		 * ups without retyping. Silently no-ops when the sentinel is absent
-		 * or the JSON is malformed.
+		 * the composer for review, preserving the previous draft with Undo.
+		 * Silently no-ops when the sentinel is absent or its JSON is malformed.
 		 */
 		function renderFollowupSuggestions(rawText, assistantDiv) {
 			const match = rawText.match(/<<sota:suggestions>>\s*([\s\S]*?)\s*<<sota:end>>/);
@@ -4623,16 +4653,8 @@
 				chip.type = 'button';
 				chip.className = 'msg-followup-chip';
 				chip.textContent = suggestion;
-				chip.addEventListener('click', () => {
-					const input = document.getElementById('chatInput');
-					if (input) {
-						input.value = suggestion;
-						input.focus();
-					}
-					if (typeof sendMessage === 'function') {
-						sendMessage();
-					}
-				});
+				const conversationId = activeConversationId;
+				chip.addEventListener('click', () => reusePrompt({ ...captureComposerDraft(), text: suggestion }, conversationId));
 				strip.appendChild(chip);
 			}
 			assistantDiv.appendChild(strip);
@@ -4651,8 +4673,8 @@
 			// content — sufficient for clipboard use without needing to
 			// reassemble the markdown source.
 			const source = currentAssistantDiv.textContent || '';
-			currentAssistantDiv.appendChild(buildAssistantActions(source, true));
-			refreshRegenerateAffordance();
+			currentAssistantDiv.appendChild(buildAssistantActions(source));
+			refreshPromptReuseAffordance();
 		}
 
 		// --- Phase 68: per-message hover details popover ---

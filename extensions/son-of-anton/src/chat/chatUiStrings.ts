@@ -7,6 +7,9 @@ import * as vscode from 'vscode';
 /** Localized labels shared with the isolated chat webview. */
 export function getChatUiStrings(): Record<string, string> {
 	return {
+		reusePrompt: vscode.l10n.t('Reuse Prompt'),
+		promptRestored: vscode.l10n.t('Prompt restored. Review context before sending; file and terminal attachments use their current contents.'),
+		undoPromptRestore: vscode.l10n.t('Undo'),
 		captureTerminalOutput: vscode.l10n.t('Capture Terminal Output'),
 		terminalCaptureHelp: vscode.l10n.t('Attach output from the active terminal with the attachment menu or @terminal. Captures commands run after Anton starts, including output from running commands. Requires VS Code shell integration; keeps the latest lines within 16 KiB.'),
 		terminalAttachmentHelp: vscode.l10n.t('Attach the latest command and output from the active terminal when you send. Requires shell integration.'),

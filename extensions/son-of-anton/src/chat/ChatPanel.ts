@@ -59,6 +59,8 @@ export interface ChatMessage {
 	/** Preserve the author when a conversation contains several specialists. */
 	specialistId?: string;
 	usageUnavailable?: boolean;
+	/** Original composer references, without resolved file or terminal bodies. */
+	request?: { text: string; attachments?: string[]; mentions?: string[]; mentionsKinded?: KindedMention[]; includeWorkspaceContext: boolean; chatMode: ChatMode };
 	model?: ModelId;
 	timestamp: number;
 }
@@ -1571,6 +1573,12 @@ export class ChatSession {
 							this.saveConversation();
 						}
 						break;
+					case 'selectSpecialist':
+						if (message.conversationId === this.currentConversationId && typeof message.specialistId === 'string' && getSpecialist(message.specialistId)) {
+							this.currentSpecialistId = message.specialistId;
+							this.saveConversation();
+						}
+						break;
 					case 'browseAcpAdapters':
 						await vscode.commands.executeCommand('sota.browseAcpAdapters');
 						break;
@@ -1612,6 +1620,7 @@ export class ChatSession {
 						await this.handleSendMessage(message);
 						break;
 					case 'modeChange': {
+						if (message.conversationId && message.conversationId !== this.currentConversationId) { break; }
 						// Plan/Act toggle from the composer toolbar pill. Persist
 						// the choice on the conversation summary so reloading and
 						// switching conversations both restore the right mode.
@@ -2952,6 +2961,15 @@ export class ChatSession {
 			role: 'user',
 			content: persistedContent,
 			model,
+			specialistId,
+			request: {
+				text: rawText,
+				attachments: message.attachments ? [...message.attachments] : undefined,
+				mentions: message.mentions ? [...message.mentions] : undefined,
+				mentionsKinded: message.mentionsKinded?.map(mention => ({ ...mention })),
+				includeWorkspaceContext: message.includeWorkspaceContext !== false,
+				chatMode: mode,
+			},
 			timestamp: Date.now(),
 		};
 
@@ -4999,6 +5017,7 @@ export class ChatSession {
 				<div class="popup mention-popup" id="mentionPopup" hidden role="listbox" aria-label="Workspace mentions"></div>
 				<div class="context-chips" id="contextChips"></div>
 				<span class="draft-status" id="draftStatus" hidden></span>
+				<div class="prompt-restore-notice" id="promptRestoreNotice" role="status" hidden><span data-ui-text="promptRestored"></span><button type="button" id="undoPromptRestore" data-ui-text="undoPromptRestore"></button></div>
 				<div class="composer-shell">
 					<textarea class="composer-input" aria-label="Message Anton" id="messageInput" placeholder="Ask Anton anything…" rows="3"></textarea>
 					<div class="composer-toolbar">
