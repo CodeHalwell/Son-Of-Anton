@@ -245,7 +245,8 @@ export class ProviderDiscovery {
 			}
 			for (const [label, wireId] of entries) {
 				if (typeof wireId !== 'string' || !wireId.trim() || wireId.length > 512) { throw new Error('Invalid configured model ID'); }
-				models.push({ id: discoveredModelId(id, wireId), provider: id, model: wireId, label: id === 'zai' ? wireId : `${label} · ${wireId}`, chat: id === 'bedrock' ? wireId.includes('anthropic.claude') : 'unknown', tools: 'unknown', images: 'unknown', fetchedAt: Date.now() });
+				if (id === 'foundry' && (!label || label.length > 512 || /[\u0000-\u001f\u007f]/.test(label))) { throw new Error('Invalid configured model family'); }
+				models.push({ id: discoveredModelId(id, wireId), provider: id, model: wireId, ...(id === 'foundry' ? { modelFamily: label } : {}), label: id === 'zai' ? wireId : `${label} · ${wireId}`, chat: id === 'bedrock' ? wireId.includes('anthropic.claude') : 'unknown', tools: 'unknown', images: 'unknown', fetchedAt: Date.now() });
 			}
 			configurationComplete = true;
 		} catch { models = this.previousConfiguredModels(id); }

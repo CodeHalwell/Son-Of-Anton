@@ -12,6 +12,8 @@ export interface DiscoveredModel {
     provider: CatalogProvider;
     acpAdapterId?: string;
     model: string;
+    /** Host-configured semantic model key; deployment names and labels do not imply request capabilities. */
+    modelFamily?: string;
     label: string;
     chat: CapabilityAvailability;
     images: CapabilityAvailability;

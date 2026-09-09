@@ -16,6 +16,7 @@ import { registerEditorOverlay } from './codeGraph/EditorOverlay';
 import { registerResponseFeedback } from './chat/ResponseFeedback';
 import { ConversationStore } from './chat/ConversationStore';
 import { activateConversationHistory } from './chat/activateConversationHistory';
+import { cleanupConversationResources } from './chat/cleanupConversationResources';
 import { ConversationActions } from './chat/ConversationActions';
 import { ConversationListProvider } from './chat/ConversationListProvider';
 import { InlineEditProvider } from './inline/InlineEdit';
@@ -643,12 +644,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		},
 	});
 	context.subscriptions.push(checkpointManager);
-	conversationStore.setPermanentDeleteCleanup(async id => {
-		await Promise.all([
-			agentBridge.forgetConversation(id).catch(error => console.warn('[acp] Recovery cleanup failed', error)),
-			checkpointManager.deleteFor(id).catch(error => console.warn('[checkpoint] Cleanup failed', error)),
-		]);
-	});
+	conversationStore.setPermanentDeleteCleanup(id => cleanupConversationResources(id, {
+		acp: conversationId => agentBridge.forgetConversation(conversationId),
+		checkpoint: conversationId => checkpointManager.deleteFor(conversationId),
+	}, (resource, error) => console.warn(`[${resource}] Conversation cleanup failed`, error)));
 
 	// Task board (Phase 82). Shared model that mirrors orchestrator plan +
 	// subtask events into a per-conversation kanban state. Wired to the

@@ -14,6 +14,8 @@ export interface DiscoveredModel {
 	provider: CatalogProvider;
 	acpAdapterId?: string;
 	model: string;
+	/** Host-configured semantic model key; deployment names and labels do not imply request capabilities. */
+	modelFamily?: string;
 	label: string;
 	chat: CapabilityAvailability;
 	images: CapabilityAvailability;
@@ -83,9 +85,10 @@ function validatedModel(model: DiscoveredModel): DiscoveredModel | undefined {
 			? discoveredAcpModelId(model.acpAdapterId, model.model)
 			: discoveredModelId(model.provider, model.acpAdapterId ? `${model.acpAdapterId}/${model.model}` : model.model);
 		if (!providers.has(model.provider) || model.id !== identifier
+			|| model.modelFamily !== undefined && (typeof model.modelFamily !== 'string' || !model.modelFamily || model.modelFamily.length > 512 || /[\u0000-\u001f\u007f]/.test(model.modelFamily))
 			|| ![true, false, 'unknown'].includes(model.chat) || ![true, false, 'unknown'].includes(model.images) || ![true, false, 'unknown'].includes(model.tools)) { return undefined; }
 		const previous = models.get(model.id);
-		return previous?.capabilitySource === 'verified' && previous.verifiedAt && Date.now() - previous.verifiedAt < 24 * 60 * 60 * 1000 && model.tools === 'unknown'
+		return previous?.modelFamily === model.modelFamily && previous?.capabilitySource === 'verified' && previous.verifiedAt && Date.now() - previous.verifiedAt < 24 * 60 * 60 * 1000 && model.tools === 'unknown'
 			? { ...model, tools: previous.tools, capabilitySource: previous.capabilitySource, verifiedAt: previous.verifiedAt } : { ...model };
 	} catch { return undefined; /* Malformed cached/catalog entries must not break activation. */ }
 }

@@ -181,6 +181,7 @@ export class ConversationStore implements vscode.Disposable {
 	private readonly observedDeletions = new Set<string>();
 	private readonly deletionNotifications = new Set<string>();
 	private readonly cleanupScheduled = new Set<string>();
+	private readonly failedDeletionCleanups = new Set<string>();
 
 	constructor(
 		private readonly context: vscode.ExtensionContext,
@@ -243,6 +244,8 @@ export class ConversationStore implements vscode.Disposable {
 
 	/** Await pending writes and deletion cleanup, including after UI disposal. */
 	async flush(): Promise<void> {
+		// Retry prior auxiliary failures once per explicit drain, never in the same failed attempt.
+		for (const id of this.failedDeletionCleanups) { this.scheduleDeletionCleanup(id); }
 		let tail: Promise<void>;
 		do { tail = this.pendingWrite; await tail; } while (tail !== this.pendingWrite);
 		const failure = this.writeFailure ?? this.failedWrites.values().next().value;
@@ -298,8 +301,8 @@ export class ConversationStore implements vscode.Disposable {
 		if (this.cleanupScheduled.has(id)) { return; }
 		this.cleanupScheduled.add(id);
 		this.enqueue(id, async () => {
-			try { await cleanup(id); this.notifyPermanentDeletion(id); }
-			catch (error) { this.cleanupScheduled.delete(id); throw error; }
+			try { await cleanup(id); this.failedDeletionCleanups.delete(id); this.notifyPermanentDeletion(id); }
+			catch (error) { this.cleanupScheduled.delete(id); this.failedDeletionCleanups.add(id); throw error; }
 		});
 	}
 

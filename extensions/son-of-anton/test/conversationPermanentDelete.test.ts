@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import * as vscode from 'vscode';
 import { ConversationStore, type ConversationSummary } from '../src/chat/ConversationStore';
 import { ConversationStorage } from '../src/chat/ConversationStorage';
+import { cleanupConversationResources } from '../src/chat/cleanupConversationResources';
 import type { ChatMessage } from '../src/chat/ChatPanel';
 
 const indexKey = 'sota.conversations.index';
@@ -159,6 +160,55 @@ suite('Permanent conversation deletion', () => {
 			});
 		});
 	}
+
+	for (const failedResource of ['acp', 'checkpoint'] as const) {
+		test(`${failedResource} cleanup failure stays incomplete until a later ${failedResource === 'acp' ? 'flush' : 'lifecycle scan'} retries successfully`, async () => {
+			await fixture(true, async store => {
+				const record = store.create([message('delete with auxiliary cleanup')]); const id = record.summary.id; store.delete(id); await store.flush();
+				const calls = { acp: 0, checkpoint: 0 }; const retained = new Set(['acp', 'checkpoint']); const logged: string[] = []; const completed: string[] = [];
+				const peerStarted = deferred(); const releasePeer = deferred(); const originalFailure = new Error(`${failedResource} storage unavailable`);
+				const clean = async (resource: 'acp' | 'checkpoint', conversationId: string) => {
+					assert.equal(conversationId, id); calls[resource]++;
+					if (calls[resource] === 1) {
+						if (resource === failedResource) { throw originalFailure; }
+						peerStarted.resolve(); await releasePeer.promise;
+					}
+					retained.delete(resource);
+				};
+				store.setPermanentDeleteCleanup(conversationId => cleanupConversationResources(conversationId, { acp: nextId => clean('acp', nextId), checkpoint: nextId => clean('checkpoint', nextId) }, (resource, error) => { assert.equal(error, originalFailure); logged.push(resource); }));
+				store.onDidPermanentlyDelete(nextId => completed.push(nextId)); await store.flush();
+				store.permanentDelete(id); let settled = false;
+				const failedDrain = store.flush().finally(() => { settled = true; });
+				const failure = assert.rejects(failedDrain, error => error instanceof AggregateError && error.errors[0] === originalFailure);
+				try {
+					await peerStarted.promise; await new Promise<void>(resolve => setImmediate(resolve));
+					assert.deepEqual({ settled, completed, calls }, { settled: false, completed: [], calls: { acp: 1, checkpoint: 1 } });
+				} finally { releasePeer.resolve(); await failure; }
+				assert.deepEqual({ logged, completed, retained: [...retained], transcript: store.load(id, true) }, { logged: [failedResource], completed: [], retained: [failedResource], transcript: undefined });
+				if (failedResource === 'checkpoint') { (store as unknown as { scanDeletions(): void }).scanDeletions(); }
+				await Promise.all([store.flush(), store.flush()]);
+				assert.deepEqual({ calls, completed, retained: [...retained] }, { calls: { acp: 2, checkpoint: 2 }, completed: [id], retained: [] });
+				await store.flush(); assert.deepEqual(calls, { acp: 2, checkpoint: 2 });
+			});
+		});
+	}
+
+	test('repeated auxiliary failures retry at most once per later flush and report both errors', async () => {
+		await fixture(true, async store => {
+			const record = store.create([message('retry after persistent cleanup error')]); const id = record.summary.id; store.delete(id); await store.flush();
+			const calls = { acp: 0, checkpoint: 0 }; const completed: string[] = []; let failing = true;
+			const clean = async (resource: 'acp' | 'checkpoint') => { calls[resource]++; if (failing) { throw new Error(`${resource} unavailable`); } };
+			store.setPermanentDeleteCleanup(conversationId => cleanupConversationResources(conversationId, { acp: () => clean('acp'), checkpoint: () => clean('checkpoint') }, () => {}));
+			store.onDidPermanentlyDelete(nextId => completed.push(nextId)); await store.flush(); store.permanentDelete(id);
+			for (const count of [1, 2]) {
+				await assert.rejects(store.flush(), error => error instanceof AggregateError && error.errors.length === 2);
+				await new Promise<void>(resolve => setImmediate(resolve));
+				assert.deepEqual({ calls, completed }, { calls: { acp: count, checkpoint: count }, completed: [] });
+			}
+			failing = false; await store.flush();
+			assert.deepEqual({ calls, completed }, { calls: { acp: 3, checkpoint: 3 }, completed: [id] });
+		});
+	});
 
 	test('fallback deletion waits for an older delayed save and both deletion writes', async () => {
 		await fixture(false, async (store, state) => {

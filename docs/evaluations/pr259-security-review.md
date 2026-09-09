@@ -8,6 +8,8 @@ The later completed analysis of review commit `7e43e3af174` (analysis `174760878
 
 The subsequent analysis of `2e7de85d5bf` (analysis `1747912351`, merge `4e1b074d239888bf4f3351a653e7c5bc6352d08c`) flagged four test-fixture patterns while the five earlier alerts remained fixed. Provider tests now compare parsed URL origins and hostnames exactly. Conversation subprocess tests pass records as data rather than interpolating them into executable code. These changes strengthen the assertions and fixture boundary; the findings were not suppressed or dismissed.
 
+Analysis `1748197929` of review commit `0c64c36550b` (merge `5130a252e4b229f3caea9be94d60bba599c941b5`) confirmed those corrections with zero results and no analysis errors or warnings. All nine prior PR alerts are marked fixed.
+
 ## Provider catalog network boundary
 
 CodeQL alerts [787](https://github.com/CodeHalwell/Son-Of-Anton/security/code-scanning/787) and [788](https://github.com/CodeHalwell/Son-Of-Anton/security/code-scanning/788) trace the CLI's JSON settings reader into the catalog request URL and authorization header. These are intentional uses of a user's configured provider endpoint and credential. The alerts have not been suppressed or dismissed.

@@ -2287,18 +2287,15 @@ export class LlmClient {
 
 		const supportsImages = modelSupportsImages(options.model);
 		const tokenLimit = options.maxTokens ?? 4096;
-		// Azure routes Foundry calls to the user's deployment, not the model id
-		// shown in the picker. `max_tokens` works on all gpt-3/4/4o deployments
-		// across all API versions; `max_completion_tokens` is required by the
-		// gpt-5/o1/o3/o4 reasoning families. Sending both is safe — Azure
-		// ignores the field that doesn't apply — and it's the only way to
-		// support older API versions (`2024-02-01`, `2024-06-01`,
-		// `2024-08-01-preview`) which reject `max_completion_tokens` outright.
-		const isReasoningFamily = /foundry-(gpt-5|o1|o3|o4|custom)/i.test(options.model);
+		// Azure's deployment name is opaque. Retain the configured model family
+		// independently of the catalog route/display label when choosing the API
+		// contract: reasoning models reject max_tokens; older classic deployments
+		// reject max_completion_tokens. Unknown custom families retain max_tokens.
+		const modelFamily = getDiscoveredModel(options.model)?.modelFamily ?? options.model;
+		const isReasoningFamily = /^foundry-(?:gpt-5(?:\.\d+)*|o1|o3|o4)(?:-|$)/i.test(modelFamily);
 		const body: Record<string, unknown> = {
 			model: modelId,
-			max_tokens: tokenLimit,
-			...(isReasoningFamily ? { max_completion_tokens: tokenLimit } : {}),
+			...(isReasoningFamily ? { max_completion_tokens: tokenLimit } : { max_tokens: tokenLimit }),
 			messages: [
 				systemMessage,
 				...serializeOpenAIMessages(options.messages, supportsImages),
@@ -2322,10 +2319,12 @@ export class LlmClient {
 		};
 		applyAdvancedHeaders(headers, this.config.get<string>('foundryCustomHeaders'));
 
-		// Phase 4 — reasoning effort for the Foundry-hosted reasoning families.
-		if (/foundry-(o[0-9]|gpt-5)/.test(options.model)) {
+		// The original o1 mini/preview models require completion-token limits
+		// without supporting the separately configurable reasoning effort.
+		if (isReasoningFamily && !/^foundry-o1-(?:mini|preview)(?:-|$)/i.test(modelFamily)) {
 			const effort = (this.config.get<string>('reasoningEffort') ?? 'medium').trim();
-			if (effort && ['low', 'medium', 'high', 'auto'].includes(effort)) {
+			// Auto leaves the provider's default in effect; it is not an API value.
+			if (['low', 'medium', 'high'].includes(effort)) {
 				body['reasoning_effort'] = effort;
 			}
 		}
@@ -3193,7 +3192,7 @@ export class LlmClient {
 				return;
 			}
 		}
-		const apiKey = await this.resolveCredential('sota.secrets.lmstudioApiKey', 'lmstudioApiKey', ['LMSTUDIO_API_KEY']);
+		const apiKey = await this.resolveCredential('sota.secrets.lmstudioApiKey', 'lmstudioApiKey', ['LMSTUDIO_API_KEY', 'LM_API_TOKEN']);
 		const baseUrl = (this.config.get<string>('lmstudioBaseUrl') ?? '').trim().replace(/\/+$/, '') || 'http://localhost:1234';
 		yield* this.streamOpenAICompatible(options, {
 			provider: 'lmstudio',
@@ -3295,9 +3294,9 @@ export class LlmClient {
 	 * `sota.togetherCustomModel`.
 	 */
 	private async *streamTogether(options: LlmRequestOptions): AsyncGenerator<LlmStreamEvent> {
-		const apiKey = await this.resolveCredential('sota.secrets.togetherApiKey', 'togetherApiKey', ['TOGETHER_API_KEY']);
+		const apiKey = await this.resolveCredential('sota.secrets.togetherApiKey', 'togetherApiKey', ['TOGETHER_API_KEY', 'TOGETHERAI_API_KEY']);
 		if (!apiKey) {
-			yield { type: 'error', error: 'Together credentials not configured. Set sota.togetherApiKey in settings, or TOGETHER_API_KEY env var.' };
+			yield { type: 'error', error: 'Together credentials not configured. Set sota.togetherApiKey in settings, or TOGETHER_API_KEY / TOGETHERAI_API_KEY env var.' };
 			return;
 		}
 		let modelId = this.getModelId(options.model);
