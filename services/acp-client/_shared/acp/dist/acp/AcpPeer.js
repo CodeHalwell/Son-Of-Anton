@@ -13,6 +13,7 @@ class AcpPeer {
     output;
     handlers;
     maxFrameBytes;
+    maxOutboundFrameBytes;
     decoder = new node_string_decoder_1.StringDecoder('utf8');
     buffer = '';
     bufferedBytes = 0;
@@ -23,11 +24,12 @@ class AcpPeer {
     closed = false;
     closedController = new AbortController();
     signal = this.closedController.signal;
-    constructor(input, output, handlers = {}, maxFrameBytes = 4 * 1024 * 1024) {
+    constructor(input, output, handlers = {}, maxFrameBytes = 4 * 1024 * 1024, maxOutboundFrameBytes = maxFrameBytes) {
         this.input = input;
         this.output = output;
         this.handlers = handlers;
         this.maxFrameBytes = maxFrameBytes;
+        this.maxOutboundFrameBytes = maxOutboundFrameBytes;
         input.on('data', this.onData);
         input.on('end', this.onEnd);
         input.on('error', this.onError);
@@ -122,7 +124,7 @@ class AcpPeer {
         }
         const frame = JSON.stringify(message) + '\n';
         const bytes = Buffer.byteLength(frame);
-        if (bytes > this.maxFrameBytes || this.queuedBytes + bytes > this.maxFrameBytes * 2) {
+        if (bytes > this.maxOutboundFrameBytes || this.queuedBytes + bytes > this.maxOutboundFrameBytes * 2) {
             const error = new Error('ACP output backpressure limit reached');
             this.dispose(error);
             throw error;

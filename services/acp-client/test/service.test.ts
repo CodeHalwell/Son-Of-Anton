@@ -12,11 +12,12 @@ import { ACPDispatcher } from '../src/dispatcher';
 import { AgentRegistry } from '../src/registry/agentRegistry';
 import { createServer } from '../src/server';
 import type { SessionEvent } from '../src/types';
+import { discoveredAcpModelId, getDiscoveredModel } from '../_shared/acp/dist/llm/DiscoveredModels';
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, modelId?: string) {
 	const root = await mkdtemp(path.join(os.tmpdir(), 'sota-acp-service-'));
 	const config = path.join(root, 'agents.json');
-	await writeFile(config, JSON.stringify({ agents: [{ id: 'fixture', name: 'Fixture', transport: 'stdio', command: process.execPath, args: [path.resolve(process.cwd(), '../../son-of-anton-core/test/fixtures/acp-agent.cjs')], capabilities: ['analysis'], costTier: 'local' }] }));
+	await writeFile(config, JSON.stringify({ agents: [{ id: 'fixture', name: 'Fixture', transport: 'stdio', command: process.execPath, args: [path.resolve(process.cwd(), '../../son-of-anton-core/test/fixtures/acp-agent.cjs')], modelId, env: modelId ? { FIXTURE_MODEL_IDS: JSON.stringify([modelId]) } : undefined, capabilities: ['analysis'], costTier: 'local' }] }));
 	const registry = new AgentRegistry(config); await registry.load();
 	const client = new ACPClientImpl(registry, root);
 	t.after(async () => { await client.shutdown(); await rm(root, { recursive: true, force: true }); });
@@ -34,6 +35,14 @@ test('dispatch subscribes before prompting, captures immediate completion and re
 	const { client } = await fixture(t);
 	const result = await new ACPDispatcher(client).dispatchTask({ taskId: 'one', protocol: 'acp', agentId: 'fixture', task: 'hello' });
 	assert.deepEqual([result.status, result.events.map(event => event.type), client.getActiveSessions().length], ['completed', ['message', 'complete'], 0]);
+});
+test('the packaged runtime negotiates advertised models and registers their transitive catalog dependency', async t => {
+	const modelId = 'm'.repeat(512);
+	const { client } = await fixture(t, modelId);
+	const result = await new ACPDispatcher(client).dispatchTask({ taskId: 'catalog', protocol: 'acp', agentId: 'fixture', task: 'hello' });
+	assert.equal(result.status, 'completed');
+	assert.equal(getDiscoveredModel(discoveredAcpModelId('fixture', modelId))?.model, modelId);
+	assert.equal(client.getActiveSessions().length, 0);
 });
 test('session continuation reuses the agent and stops fail without hanging dispatch', async t => {
 	const { client } = await fixture(t); const session = await client.createSession('fixture', {});

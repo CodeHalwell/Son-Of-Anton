@@ -10,6 +10,7 @@ export declare class AcpPeer {
     private readonly output;
     private readonly handlers;
     private readonly maxFrameBytes;
+    private readonly maxOutboundFrameBytes;
     private readonly decoder;
     private buffer;
     private bufferedBytes;
@@ -20,7 +21,7 @@ export declare class AcpPeer {
     private closed;
     private readonly closedController;
     readonly signal: AbortSignal;
-    constructor(input: Readable, output: Writable, handlers?: AcpPeerHandlers, maxFrameBytes?: number);
+    constructor(input: Readable, output: Writable, handlers?: AcpPeerHandlers, maxFrameBytes?: number, maxOutboundFrameBytes?: number);
     get isConnected(): boolean;
     get pendingCount(): number;
     request<T>(method: string, params?: unknown, options?: {

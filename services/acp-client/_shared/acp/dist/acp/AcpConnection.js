@@ -21,11 +21,14 @@ class AcpConnection {
     sessionId;
     active;
     stopping;
+    transportStopping;
+    processError;
     exited = false;
     exitPromise;
     spawned;
     initialization;
     availableModes = [];
+    availableModels = [];
     constructor(definition, cwd) {
         this.definition = definition;
         this.cwd = cwd;
@@ -43,16 +46,16 @@ class AcpConnection {
                     }
                 }
             },
-            close: () => { void this.stop(); },
-        });
+            close: () => { void this.stopAfterProcessExit(); },
+        }, 4 * 1024 * 1024, 32 * 1024 * 1024);
         // Drain diagnostics without retaining unlimited logs or leaking provider credentials.
         this.child.stderr.resume();
         this.child.stdin.on('error', () => { });
         this.child.stdout.on('error', () => { });
         this.child.stderr.on('error', () => { });
         this.exitPromise = new Promise(resolve => {
-            const exit = () => { this.exited = true; this.peer.dispose(new Error(`ACP agent ${definition.id} exited`)); resolve(); };
-            this.child.once('exit', exit);
+            const exit = (error) => { this.processError = error; this.exited = true; this.peer.dispose(error); resolve(); };
+            this.child.once('exit', (code, signal) => exit(new Error(`ACP agent ${definition.id} exited (${signal ?? code})`)));
             this.child.once('error', exit);
         });
         this.spawned = new Promise((resolve, reject) => { this.child.once('spawn', resolve); this.child.once('error', reject); });
@@ -67,7 +70,15 @@ class AcpConnection {
             protocolVersion: protocol_1.ACP_VERSION,
             clientInfo: { name: 'son-of-anton', version: '1.0.0' },
             clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-        }, { signal });
+        }, { signal }).catch(async (error) => {
+            if (!this.peer.isConnected) {
+                await this.stopAfterProcessExit();
+                if (!signal?.aborted && (this.processError?.code === 'ENOENT' || /^ACP (?:stream closed|connection (?:is )?closed)$/.test(error.message))) {
+                    throw this.processError ?? error;
+                }
+            }
+            throw error;
+        });
         if (!(0, protocol_1.object)(result) || result.protocolVersion !== protocol_1.ACP_VERSION) {
             throw new Error(`ACP agent ${this.definition.id} did not negotiate protocol version ${protocol_1.ACP_VERSION}`);
         }
@@ -93,6 +104,7 @@ class AcpConnection {
         }
         this.sessionId = result.sessionId;
         this.availableModes = result.modes?.availableModes?.map(mode => mode.id) ?? [];
+        await this.selectModel(result.models?.availableModels, signal);
         if (modeId) {
             if (!Array.isArray(result.modes?.availableModes) || !result.modes.availableModes.some(mode => mode.id === modeId)) {
                 throw new Error(`ACP agent does not advertise the required mode: ${modeId}`);
@@ -100,6 +112,37 @@ class AcpConnection {
             await this.peer.request('session/set_mode', { sessionId: this.sessionId, modeId }, { signal });
         }
         return result.sessionId;
+    }
+    /** Load only a settled session. Replay notifications are deliberately not forwarded as live work. */
+    async loadSession(sessionId, mcpServers = [], signal, modeId) {
+        if (!this.initialization) {
+            await this.initialize(signal);
+        }
+        if (!this.initialization?.agentCapabilities?.loadSession) {
+            throw new Error('ACP adapter does not support loading sessions');
+        }
+        if (this.sessionId) {
+            throw new Error('ACP connection already owns a session');
+        }
+        const result = await this.peer.request('session/load', { sessionId, cwd: this.cwd, mcpServers }, { signal });
+        this.sessionId = sessionId;
+        this.availableModes = result?.modes?.availableModes?.map(mode => mode.id) ?? [];
+        await this.selectModel(result?.models?.availableModels, signal);
+        if (modeId) {
+            if (!this.availableModes.includes(modeId)) {
+                throw new Error(`ACP agent does not advertise the required mode: ${modeId}`);
+            }
+            await this.peer.request('session/set_mode', { sessionId, modeId }, { signal });
+        }
+    }
+    async selectModel(models, signal) {
+        this.availableModels = Array.isArray(models) ? models.filter(model => (0, protocol_1.object)(model) && (0, protocol_1.isValidAcpModelId)(model.modelId) && typeof model.name === 'string').slice(0, 500).map(model => ({ id: model.modelId, name: model.name.slice(0, 200) })) : [];
+        if (this.definition.modelId) {
+            if (!this.availableModels.some(model => model.id === this.definition.modelId)) {
+                throw new Error('The ACP adapter does not advertise the selected model. Refresh its catalog or choose another model.');
+            }
+            await this.peer.request('session/set_model', { sessionId: this.sessionId, modelId: this.definition.modelId }, { signal });
+        }
     }
     async prompt(text, options) {
         if (!this.sessionId) {
@@ -109,6 +152,10 @@ class AcpConnection {
             throw new Error('ACP session already has an active prompt');
         }
         options.signal.throwIfAborted();
+        (0, protocol_1.validateImages)(options.images);
+        if (options.images?.length && !this.initialization?.agentCapabilities?.promptCapabilities?.image) {
+            throw new Error('This ACP adapter does not advertise image support. Select an image-capable adapter or remove the attachments.');
+        }
         this.active = options;
         let killTimer;
         const cancel = () => {
@@ -122,7 +169,7 @@ class AcpConnection {
         options.signal.addEventListener('abort', cancel, { once: true });
         try {
             const result = await this.peer.request('session/prompt', {
-                sessionId: this.sessionId, prompt: [{ type: 'text', text }],
+                sessionId: this.sessionId, prompt: [{ type: 'text', text }, ...(options.images ?? []).map(image => ({ type: 'image', data: image.data, mimeType: image.mimeType }))],
             }, { timeoutMs: options.timeoutMs ?? 600_000 });
             if (options.signal.aborted) {
                 throw (0, protocol_1.abortError)();
@@ -146,6 +193,20 @@ class AcpConnection {
             }
             this.active = undefined;
         }
+    }
+    stopAfterProcessExit() {
+        // Windows command shims can close stdio before cross-spawn reports ENOENT.
+        // Give the process a bounded chance to report its real failure before killing it.
+        return this.transportStopping ??= Promise.resolve().then(async () => {
+            if (!this.exited) {
+                let timer;
+                await Promise.race([this.exitPromise, new Promise(resolve => { timer = setTimeout(resolve, 250); })]);
+                if (timer) {
+                    clearTimeout(timer);
+                }
+            }
+            await this.stop();
+        });
     }
     stop() {
         if (this.stopping) {

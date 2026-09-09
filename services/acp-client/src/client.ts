@@ -6,9 +6,9 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
-import { AcpRuntime } from '../_shared/acp/dist/AcpRuntime';
-import { AcpConnection } from '../_shared/acp/dist/AcpConnection';
-import { cancelledPermission, object, type AcpPermissionRequest, type AcpPermissionResult, type AcpUpdate } from '../_shared/acp/dist/protocol';
+import { AcpRuntime } from '../_shared/acp/dist/acp/AcpRuntime';
+import { AcpConnection } from '../_shared/acp/dist/acp/AcpConnection';
+import { cancelledPermission, object, type AcpPermissionRequest, type AcpPermissionResult, type AcpUpdate } from '../_shared/acp/dist/acp/protocol';
 import { AgentRegistry } from './registry/agentRegistry';
 import type { ACPClient, AgentCapabilities, Session, SessionConfig, SessionContext, SessionEvent, SessionStatus } from './types';
 
