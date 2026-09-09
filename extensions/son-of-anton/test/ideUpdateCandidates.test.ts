@@ -31,8 +31,35 @@ suite('Verified IDE update candidates', () => {
 	test('verified version excludes the current build when installed commit metadata is absent', async () => {
 		const current = fixture('1.2.3');
 		assert.deepEqual(await verifiedReleaseCandidates([current.release], { ...installed, commit: undefined }, 'darwin-arm64', 'stable', false, async () => current.manifest), []);
-		const mismatched = current.manifest.replace('"ideVersion":"1.2.3"', '"ideVersion":"1.2.4"');
-		await assert.rejects(verifiedReleaseCandidates([current.release], installed, 'darwin-arm64', 'stable', false, async () => mismatched), /Invalid IDE build manifest/);
+		const newer = fixture('1.2.4', nextCommit), mismatched = newer.manifest.replace('"ideVersion":"1.2.4"', '"ideVersion":"1.2.5"');
+		await assert.rejects(verifiedReleaseCandidates([newer.release], installed, 'darwin-arm64', 'stable', false, async () => mismatched), /Invalid IDE build manifest/);
+	});
+	test('backfilled lower versions never become updates, regardless of publication date or missing installed metadata', async () => {
+		const fixtures = [fixture('1.2.2', nextCommit, '2026-01-05T00:00:00Z'), fixture('1.2.3', nextCommit, '2026-01-04T00:00:00Z'), fixture('1.2.4', nextCommit, '2026-01-02T00:00:00Z')];
+		for (const metadata of [installed, { ...installed, date: undefined, commit: undefined }]) {
+			const fetched: string[] = [];
+			const candidates = await verifiedReleaseCandidates(fixtures.map(entry => entry.release), metadata, 'darwin-arm64', 'stable', false, async release => { fetched.push(release.tag_name); return fixtures.find(entry => entry.release === release)!.manifest; });
+			assert.deepEqual({ versions: candidates.map(entry => entry.release.tag_name), fetched }, { versions: ['ide-v1.2.4'], fetched: ['ide-v1.2.4'] });
+		}
+	});
+	test('normal updates use numeric triplet and preview precedence while retaining nightly chronology', async () => {
+		const cases: Array<[string, string, boolean]> = [
+			['1.2.9', '1.2.10', true], ['1.10.0', '1.9.99', false], ['2.0.0', '1.99.99', false],
+			['1.2.3-preview.2', '1.2.3-preview.10', true], ['1.2.3-preview.10', '1.2.3-preview.2', false],
+			['1.2.3-nightly.20260908', '1.2.3-nightly.20260909', true], ['1.2.3-nightly.20260909', '1.2.3-nightly.20260908', false],
+			['1.2.3-dev', '1.2.3-nightly', true], ['1.2.3-preview', '1.2.3-preview.1', true],
+			['1.2.3-rc.1', '1.2.3', true], ['1.2.3', '1.2.3-rc.1', false],
+			['1.2.3-beta.1', '1.2.3-beta.a', true], ['1.2.3-beta.z', '1.2.3-beta.9', false],
+			['1.2.3-beta.a', '1.2.3-beta.Z', false], ['1.2.3-nightly.1', '1.2.3-nightly.1', false],
+			['1.2.3+build.2', '1.2.3', false], ['1.2.3-preview.1+build.2', '1.2.3-preview.2', true],
+		];
+		for (const [version, candidate, eligible] of cases) {
+			const entry = fixture(candidate, nextCommit);
+			const candidates = await verifiedReleaseCandidates([entry.release], { ...installed, version }, 'darwin-arm64', 'preview', false, async () => entry.manifest);
+			assert.equal(candidates.length, Number(eligible), `${candidate} after ${version}`);
+		}
+		const olderPublication = fixture('1.2.3-nightly.20260909', nextCommit, '2025-12-31T00:00:00Z');
+		assert.deepEqual(await verifiedReleaseCandidates([olderPublication.release], { ...installed, version: '1.2.3-nightly.20260908' }, 'darwin-arm64', 'preview', false, async () => olderPublication.manifest), []);
 	});
 	test('rollback keeps verified older builds and never offers the installed commit', async () => {
 		const older = fixture('1.2.2', nextCommit, '2025-12-30T00:00:00Z'), same = fixture('1.2.1', commit, '2025-12-29T00:00:00Z'), newer = fixture('1.2.4', nextCommit);
@@ -74,7 +101,7 @@ suite('Verified IDE update candidates', () => {
 			stub.window.showQuickPick = async () => { throw new Error('No picker without explicit review'); };
 			stub.window.showErrorMessage = (async (message: string) => { errors.push(message); return undefined; }) as typeof stub.window.showErrorMessage;
 			const target = `${process.platform}-${arch()}`, current = fixture('1.2.3', commit, '2026-01-03T00:00:00Z', target), next = fixture('1.2.4', nextCommit, '2026-01-02T00:00:00Z', target);
-			const fixtures = [current, next];
+			const backfilled = fixture('1.2.2', nextCommit, '2026-01-04T00:00:00Z', target), fixtures = [backfilled, current, next];
 			globalThis.fetch = async (input, init) => {
 				const url = String(input); requests.push(url); assert.ok(init?.signal, 'Every metadata request has a deadline and disposal signal');
 				if (url.startsWith('https://api.github.com/')) { assert.equal(init?.redirect, 'error'); return new Response(JSON.stringify(fixtures.map(entry => entry.release))); }
@@ -85,7 +112,7 @@ suite('Verified IDE update candidates', () => {
 			await verificationStarted; assert.deepEqual(messages, [], 'Startup must not announce unverified candidates');
 			unblock(); await notification;
 			assert.deepEqual(messages, ['Son of Anton ide-v1.2.4 is available.']);
-			assert.deepEqual(errors, []); assert.equal(requests.length, 3);
+			assert.deepEqual(errors, []); assert.equal(requests.length, 2);
 		} finally {
 			unblock(); for (const subscription of subscriptions) { subscription.dispose(); }
 			Object.assign(stub, { env: original.env, version: original.version });

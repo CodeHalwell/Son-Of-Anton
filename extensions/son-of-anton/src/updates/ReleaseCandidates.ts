@@ -9,13 +9,39 @@ export interface InstalledBuild { commit?: string; date?: string; version: strin
 export interface ReleaseCandidate { release: IdeRelease; installer: Installer }
 export const MAX_RELEASE_CANDIDATES = 100;
 
+/** SemVer precedence for IDE triplets and prereleases; build metadata does not change ordering. */
+function compareVersions(candidate: string, installed: string): number | undefined {
+	const parse = (version: string) => /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(version);
+	const next = parse(candidate), current = parse(installed);
+	if (!next || !current) { return undefined; }
+	for (let index = 1; index <= 3; index++) {
+		const left = BigInt(next[index]), right = BigInt(current[index]);
+		if (left !== right) { return left > right ? 1 : -1; }
+	}
+	if (next[4] === current[4]) { return 0; }
+	if (next[4] === undefined) { return 1; }
+	if (current[4] === undefined) { return -1; }
+	const nextParts = next[4].split('.'), currentParts = current[4].split('.');
+	for (let index = 0; index < Math.max(nextParts.length, currentParts.length); index++) {
+		const left = nextParts[index], right = currentParts[index];
+		if (left === undefined) { return -1; }
+		if (right === undefined) { return 1; }
+		if (left === right) { continue; }
+		const leftNumeric = /^\d+$/.test(left), rightNumeric = /^\d+$/.test(right);
+		if (leftNumeric && rightNumeric) { const a = BigInt(left), b = BigInt(right); if (a === b) { continue; } return a > b ? 1 : -1; }
+		if (leftNumeric !== rightNumeric) { return leftNumeric ? -1 : 1; }
+		return left > right ? 1 : -1;
+	}
+	return 0;
+}
+
 /** Verify identity before advertising an update; source dates alone cannot identify the installed release. */
 export async function verifiedReleaseCandidates(releases: IdeRelease[], installed: InstalledBuild, target: string, channel: ReleaseChannel, rollback: boolean, readManifest: (release: IdeRelease) => Promise<string>): Promise<ReleaseCandidate[]> {
 	const installedAt = installed.date ? Date.parse(installed.date) : NaN;
 	const installedCommit = /^[a-f\d]{40}$/i.test(installed.commit ?? '') ? installed.commit!.toLowerCase() : undefined;
 	const candidates = eligibleReleases(releases.slice(0, MAX_RELEASE_CANDIDATES), channel).filter(release => rollback
 		? Number.isFinite(installedAt) && Date.parse(release.published_at) < installedAt
-		: Number.isFinite(installedAt) ? Date.parse(release.published_at) > installedAt : release.tag_name.localeCompare(`ide-v${installed.version}`, undefined, { numeric: true }) > 0);
+		: compareVersions(release.tag_name.slice('ide-v'.length), installed.version) === 1 && (!Number.isFinite(installedAt) || Date.parse(release.published_at) > installedAt));
 	const verified: ReleaseCandidate[] = [];
 	let readable = 0, firstFailure: unknown;
 	// One bounded batch at a time preserves release order and limits metadata request concurrency.

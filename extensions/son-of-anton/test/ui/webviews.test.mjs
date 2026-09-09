@@ -1078,6 +1078,36 @@ test('board dependency planner validates cycles and previews a scoped scheduling
 	assert.ok(message.expectedRevision.includes('foundation'));
 });
 
+test('dependency drafts reset atomically when switching tasks or receiving a new board revision', async t => {
+	const page = await openSurface(t, 'board', 1200);
+	const tasks = [
+		{ ...fixture.snapshot.tasks[1], id: 'foundation', instruction: 'Build foundation', dependencies: [], state: 'ready' },
+		{ ...fixture.snapshot.tasks[1], id: 'interface', instruction: 'Build interface', dependencies: ['foundation'], state: 'backlog' },
+		{ ...fixture.snapshot.tasks[1], id: 'tests', instruction: 'Add tests', dependencies: ['foundation'], state: 'backlog' },
+	];
+	await post(page, { ...fixture, snapshot: { ...fixture.snapshot, tasks } }); await frames(page);
+	await page.getByRole('button', { name: 'Dependencies', exact: true }).click();
+	const select = page.getByRole('combobox', { name: 'Task to edit dependencies' });
+	const interfaceBox = page.getByRole('checkbox', { name: /Build interface/ });
+	const foundationBox = page.getByRole('checkbox', { name: /Build foundation/ });
+	const apply = page.getByRole('button', { name: 'Apply Dependencies' });
+	for (let iteration = 0; iteration < 6; iteration++) {
+		await select.selectOption('foundation'); await interfaceBox.check();
+		await select.focus(); await select.selectOption('tests');
+		assert.deepEqual({ focused: await select.evaluate(element => element === document.activeElement), foundation: await foundationBox.isChecked(), interface: await interfaceBox.isChecked(), applyDisabled: await apply.isDisabled() }, { focused: true, foundation: true, interface: false, applyDisabled: true });
+		await interfaceBox.check(); await apply.click();
+	}
+	const requests = await page.evaluate(() => sentMessages.filter(message => message.type === 'set-dependencies'));
+	assert.equal(requests.length, 6);
+	assert.ok(requests.every(message => message.taskId === 'tests' && JSON.stringify(message.dependencies) === JSON.stringify(['foundation', 'interface'])));
+	await post(page, { ...fixture, snapshot: { ...fixture.snapshot, tasks: tasks.map(task => task.id === 'tests' ? { ...task, dependencies: [] } : task) } }); await frames(page);
+	assert.deepEqual({ selected: await select.inputValue(), foundation: await foundationBox.isChecked(), interface: await interfaceBox.isChecked(), applyDisabled: await apply.isDisabled() }, { selected: 'tests', foundation: false, interface: false, applyDisabled: true });
+	await post(page, { ...fixture, snapshot: { ...fixture.snapshot, tasks: tasks.slice(0, 2) } }); await frames(page);
+	assert.deepEqual({ selected: await select.inputValue(), interface: await interfaceBox.isChecked(), applyDisabled: await apply.isDisabled() }, { selected: 'foundation', interface: false, applyDisabled: true });
+	await post(page, { ...fixture, snapshot: { ...fixture.snapshot, tasks: tasks.slice(0, 2).map(task => task.id === 'foundation' ? { ...task, state: 'in-progress' } : task) } }); await frames(page);
+	assert.equal(await interfaceBox.isDisabled(), true);
+});
+
 test('bounded timeline evicts both ends while preserving response drafts, votes and checkpoints', async t => {
 	const page = await openSurface(t, 'chat', 420);
 	const messages = Array.from({ length: 1000 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `Message ${index}`, timestamp: index + 1, ...(index % 2 ? {} : { request: { text: `Prompt ${index}`, attachments: ['terminal-output'], includeWorkspaceContext: false } }) }));

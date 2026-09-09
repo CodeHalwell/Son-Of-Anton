@@ -44,6 +44,12 @@ export interface ProviderDiscoverySnapshot {
 	software: DiscoveredSoftware[];
 	providers: DiscoveredProvider[];
 }
+interface DiscoveryRefresh {
+	includeLocal: boolean;
+	promise: Promise<ProviderDiscoverySnapshot>;
+	resolve(value: ProviderDiscoverySnapshot): void;
+	reject(error: unknown): void;
+}
 interface ProviderSpec {
 	id: CatalogProvider;
 	name: string;
@@ -83,7 +89,9 @@ const ttlMs = 60 * 60 * 1000;
 /** Read-only discovery: no CLI execution, tool enabling, model loading, sign-in or inference requests. */
 export class ProviderDiscovery {
 	private value: ProviderDiscoverySnapshot;
-	private pending?: Promise<ProviderDiscoverySnapshot>;
+	private pending?: DiscoveryRefresh;
+	private queued?: DiscoveryRefresh;
+	private cachedIncludeLocal?: boolean;
 	private controller = new AbortController();
 	private disposed = false;
 	constructor(private readonly deps: {
@@ -97,6 +105,8 @@ export class ProviderDiscovery {
 	}) {
 		const cached = deps.state?.get<ProviderDiscoverySnapshot>(storageKey);
 		this.value = validSnapshot(cached) ? cached : { version: 1, updatedAt: 0, software: [], providers: [] };
+		const local = this.value.providers.filter(provider => provider.id === 'ollama' || provider.id === 'lmstudio');
+		if (local.length) { this.cachedIncludeLocal = local.some(provider => provider.catalogStatus !== 'disabled'); }
 		for (const provider of this.value.providers) { registerDiscoveredModels(provider.models); }
 	}
 
@@ -117,14 +127,46 @@ export class ProviderDiscovery {
 		this.value = this.snapshot();
 		await this.deps.state?.update(storageKey, this.value);
 	}
-	dispose(): void { this.disposed = true; this.controller.abort(); }
+	dispose(): void {
+		this.disposed = true; this.controller.abort();
+		const error = new Error('Provider discovery is disposed');
+		this.pending?.reject(error); this.queued?.reject(error); this.queued = undefined;
+	}
 
 	refresh(options: { force?: boolean; includeLocal?: boolean } = {}): Promise<ProviderDiscoverySnapshot> {
 		if (this.disposed) { return Promise.reject(new Error('Provider discovery is disposed')); }
-		if (this.pending) { return this.pending; }
-		if (!options.force && this.value.updatedAt && Date.now() - this.value.updatedAt < ttlMs) { return Promise.resolve(this.snapshot()); }
-		this.pending = this.scan(options.includeLocal ?? false).finally(() => { this.pending = undefined; });
-		return this.pending;
+		const includeLocal = options.includeLocal ?? false;
+		if (this.pending) {
+			const requested = this.queued ?? this.pending;
+			if (!options.force && includeLocal === requested.includeLocal) { return requested.promise; }
+			// A scan may already have read the old key/endpoint. Coalesce changes into
+			// one future scan, whose distinct promise cannot resolve with that old result.
+			// Latest options win while queued; another change during that scan can queue one successor.
+			this.queued ??= this.createRefresh(includeLocal);
+			this.queued.includeLocal = includeLocal;
+			return this.queued.promise;
+		}
+		if (!options.force && includeLocal === this.cachedIncludeLocal && this.value.updatedAt && Date.now() - this.value.updatedAt < ttlMs) { return Promise.resolve(this.snapshot()); }
+		const refresh = this.createRefresh(includeLocal); this.startRefresh(refresh); return refresh.promise;
+	}
+
+	private createRefresh(includeLocal: boolean): DiscoveryRefresh {
+		let resolve!: DiscoveryRefresh['resolve']; let reject!: DiscoveryRefresh['reject'];
+		const promise = new Promise<ProviderDiscoverySnapshot>((accept, fail) => { resolve = accept; reject = fail; });
+		return { includeLocal, promise, resolve, reject };
+	}
+
+	private startRefresh(refresh: DiscoveryRefresh): void {
+		this.pending = refresh;
+		void this.scan(refresh.includeLocal).then(snapshot => {
+			if (this.disposed) { refresh.reject(new Error('Provider discovery is disposed')); }
+			else { this.cachedIncludeLocal = refresh.includeLocal; refresh.resolve(snapshot); }
+		}, error => refresh.reject(error)).then(() => {
+			if (this.pending !== refresh) { return; }
+			this.pending = undefined;
+			const queued = this.queued; this.queued = undefined;
+			if (queued && !this.disposed) { this.startRefresh(queued); }
+		});
 	}
 
 	private async scan(includeLocal: boolean): Promise<ProviderDiscoverySnapshot> {
