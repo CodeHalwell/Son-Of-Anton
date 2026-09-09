@@ -73,7 +73,8 @@ import { HealthMonitor } from './monitoring/HealthMonitor';
 import { CheckpointManager } from 'son-of-anton-core/checkpoint/CheckpointManager';
 import { registerAcpRegistryCommands } from './integrations/AcpRegistryCommands';
 import { CouncilController } from './council/CouncilController';
-import { TaskBoardModel, BoardTask, SubtaskState } from './board/TaskBoardModel';
+import { reassignBoardTask, refreshBoardPlan } from './board/BoardReassignment';
+import { TaskBoardModel, BoardTask } from './board/TaskBoardModel';
 import { TaskBoardPanel } from './board/TaskBoardPanel';
 import { TaskBoardSidebarView } from './board/TaskBoardSidebarView';
 import { AgentEvent, AgentPlan } from './chat/agentEvents';
@@ -860,33 +861,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		vscode.commands.registerCommand('sota.openTaskBoard', (conversationId?: string) => {
 			const activeId = typeof conversationId === 'string' && conversationStore.load(conversationId) ? conversationId : conversationStore.getInitialConversation()?.summary.id;
 
-			// Best-effort hydration: if the orchestrator already has a live plan
-			// (e.g. the user proposed a plan, then opened the board before
-			// approving), seed the model from that plan so the board renders
-			// tiles immediately rather than showing the empty state.
-			if (activeId) {
-				const existingSnapshot = taskBoardModel.getSnapshot(activeId);
-				if (!existingSnapshot) {
-					const plan = agentBridge.getActivePlan();
-					if (plan?.conversationId === activeId) {
-						const tasks: BoardTask[] = plan.subtasks.map(subtask => ({
-							id: subtask.id,
-							instruction: subtask.instruction,
-							assignee: subtask.assignee,
-							scopeFiles: subtask.scopeFiles,
-							dependencies: subtask.dependencies,
-							state: subtaskStatusToBoardState(subtask.status),
-						}));
-						taskBoardModel.setPlan(activeId, tasks);
-					}
-				}
-			}
+			if (activeId) { refreshBoardPlan(taskBoardModel, agentBridge, activeId); }
 
 			TaskBoardPanel.createOrShow(
 				context,
 				taskBoardModel,
 				conversationStore,
 				{
+					refreshPlan: conversationId => refreshBoardPlan(taskBoardModel, agentBridge, conversationId),
 					updateDependencies: (conversationId, taskId, dependencies, taskIds) => agentBridge.updatePlanDependencies(conversationId, taskId, dependencies, taskIds),
 					revealSubtaskInChat: (taskId) => {
 						// Best-effort: surface the chat view and rely on the user
@@ -905,11 +887,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 						// that work should begin".
 						void runApprove();
 					},
-					reassignSubtask: (taskId, newAssignee) => {
-						if (activeId) {
-							taskBoardModel.reassign(activeId, taskId, newAssignee);
-						}
-					},
+					reassignSubtask: (conversationId, taskId, newAssignee, expectedRevision) => reassignBoardTask(taskBoardModel, agentBridge, conversationId, taskId, newAssignee, expectedRevision),
 					rerunSubtask: (taskId) => {
 						if (council?.runBoardTask(taskId)) { return; }
 						// Re-running a single tile in v1 just resets it to ready
@@ -1815,18 +1793,6 @@ async function runSubscriptionSignIn(opts: {
 	}
 }
 
-function subtaskStatusToBoardState(status: 'pending' | 'in_progress' | 'completed' | 'failed'): SubtaskState {
-	switch (status) {
-		case 'in_progress': return 'in-progress';
-		case 'completed': return 'done';
-		case 'failed': return 'failed';
-		case 'pending':
-		default:
-			// `backlog` is the safe default; `recomputeStates` promotes to
-			// `ready` immediately if dependencies are satisfied.
-			return 'backlog';
-	}
-}
 
 /**
  * Fold a single `AgentEvent` into the board model. Only the structured
@@ -1841,24 +1807,16 @@ function applyAgentEventToBoard(model: TaskBoardModel, conversationId: string, e
 	switch (event.type) {
 		case 'plan-proposed': {
 			const plan: AgentPlan = event.plan;
-			// Plans are emitted from the orchestrator with positional ids
-			// that match `parsePlan`'s `${planId}-subtask-${i}` scheme. We
-			// reconstruct the same id sequence here so a later subtask
-			// event keyed on `subtaskId` finds its tile.
+			// Legacy stored plans remain displayable, but only current execution IDs are editable.
 			const tasks: BoardTask[] = plan.subtasks.map((subtask, index) => ({
-				id: `board-${conversationId}-${index}`,
+				id: subtask.id ?? `board-${conversationId}-${index}`,
 				instruction: subtask.instruction,
 				assignee: subtask.assignee,
 				scopeFiles: subtask.scopeFiles,
 				dependencies: subtask.dependencies,
 				state: 'backlog',
 			}));
-			// Re-key tasks to use the orchestrator's actual subtask ids if we
-			// can recover them — the AgentPlan shape doesn't carry them today,
-			// so we generate stable per-conversation ids and map by index.
-			// `subtask-started` events carry the orchestrator's id; we patch
-			// it onto the board tile in the started branch below.
-			model.setPlan(conversationId, tasks);
+			model.setPlan(conversationId, tasks, plan.id && plan.subtasks.every(subtask => !!subtask.id) ? plan.id : undefined);
 			return;
 		}
 		case 'subtask-ready': {

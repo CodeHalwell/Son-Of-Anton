@@ -375,6 +375,19 @@ test('board: complete lifecycle, filters, keyboard card actions and responsive l
 	await screenshot(page, 'task-board-narrow');
 });
 
+test('board: assignment controls send the displayed plan revision without optimistic changes', async t => {
+	const page = await openSurface(t, 'board');
+	const first = { ...fixture, snapshot: { ...fixture.snapshot, executionPlanId: 'plan-first', tasks: [{ ...fixture.snapshot.tasks[1], id: 'plan-first-subtask-0' }] } };
+	await post(page, first); const selector = page.getByRole('combobox', { name: /Assign task/ }); await selector.waitFor();
+	assert.ok(await selector.locator('option[value="anton-docs"]').count());
+	await selector.selectOption('anton-test'); const sent = await page.evaluate(() => sentMessages.filter(message => message.type === 'reassign').at(-1));
+	assert.deepEqual({ conversationId: sent.conversationId, taskId: sent.taskId, newAssignee: sent.newAssignee, planId: JSON.parse(sent.expectedRevision)[0] }, { conversationId: 'ui-fixture', taskId: 'plan-first-subtask-0', newAssignee: 'anton-test', planId: 'plan-first' });
+	assert.equal(await selector.inputValue(), 'anton-code'); assert.equal(await page.locator('.tile').getAttribute('data-assignee'), 'anton-code');
+	const next = { ...first, snapshot: { ...first.snapshot, tasks: [{ ...first.snapshot.tasks[0], assignee: 'anton-test', scopeFiles: ['changed.ts'] }] } };
+	await post(page, next); await selector.selectOption('anton-docs'); const later = await page.evaluate(() => sentMessages.filter(message => message.type === 'reassign').at(-1)); assert.notEqual(later.expectedRevision, sent.expectedRevision);
+	await post(page, { ...next, snapshot: { ...next.snapshot, executionPlanId: undefined } }); assert.equal(await page.getByRole('combobox', { name: /Assign task/ }).count(), 0);
+});
+
 test('chat controls: code actions execute under the shipped content security policy', async t => {
 	const page = await openSurface(t, 'chat', 420);
 	const code = '// path: src/example.ts\nexport const answer = 42;';

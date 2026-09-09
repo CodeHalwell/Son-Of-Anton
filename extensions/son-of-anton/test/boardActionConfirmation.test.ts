@@ -33,7 +33,7 @@ function fixture() {
 		boardActionQueue: Promise.resolve(), activeChatStreams: new Map(), pendingReruns: new Set(), disposables: [], model,
 		panel: { dispose() {}, webview: { postMessage: (message: typeof snapshots[number]) => { snapshots.push(message); } } },
 		conversationStore: { list: () => [{ id: 'first', title: 'First' }, { id: 'second', title: 'Second' }] },
-		handlers: { reassignSubtask: (taskId: string, assignee: string) => model.reassign(panel.currentConversationId!, taskId, assignee) },
+		handlers: { reassignSubtask: (conversationId: string, taskId: string, assignee: string) => model.reassign(conversationId, taskId, assignee) },
 	}) as PanelHarness;
 	const send = (action: Omit<BoardActionMessage, 'type'>, conversationId = 'first') => panel.handleMessage({ type: 'board-action', conversationId, ...action });
 	return { panel, model, snapshots, send };

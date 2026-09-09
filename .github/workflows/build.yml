@@ -34,6 +34,8 @@ jobs:
 
       - name: Install system dependencies
         run: |
+          # Chrome is already installed; its unrelated repository can be mid-publication.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
           sudo apt-get update -y
           sudo apt-get install -y build-essential pkg-config libx11-dev libx11-xcb-dev libxkbfile-dev libnotify-bin libkrb5-dev
 
@@ -101,6 +103,8 @@ jobs:
 
       - name: Install system dependencies
         run: |
+          # Chrome is already installed; its unrelated repository can be mid-publication.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
           sudo apt-get update -y
           sudo apt-get install -y build-essential pkg-config libx11-dev libx11-xcb-dev libxkbfile-dev libnotify-bin libkrb5-dev
 
@@ -153,6 +157,8 @@ jobs:
 
       - name: Install system dependencies
         run: |
+          # Chrome is already installed; its unrelated repository can be mid-publication.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
           sudo apt-get update -y
           sudo apt-get install -y build-essential pkg-config libx11-dev libx11-xcb-dev libxkbfile-dev libnotify-bin libkrb5-dev
 
@@ -196,6 +202,8 @@ jobs:
 
       - name: Install system dependencies
         run: |
+          # Chrome is already installed; its unrelated repository can be mid-publication.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
           sudo apt-get update -y
           sudo apt-get install -y build-essential pkg-config libkrb5-dev libx11-dev libx11-xcb-dev libxkbfile-dev libnotify-bin xvfb libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64
 
@@ -425,6 +433,8 @@ jobs:
 
       - name: Install system dependencies
         run: |
+          # Chrome is already installed; its unrelated repository can be mid-publication.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
           sudo apt-get update -y
           sudo apt-get install -y build-essential pkg-config libx11-dev libx11-xcb-dev libxkbfile-dev libnotify-bin libkrb5-dev libsecret-1-dev
 

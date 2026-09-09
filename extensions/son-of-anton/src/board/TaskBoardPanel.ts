@@ -10,7 +10,7 @@ export type { ChatToolDefinition } from './webview/protocol';
 import { ConversationStore } from '../chat/ConversationStore';
 import { getPersona, getRoster } from 'son-of-anton-core/chat/personas';
 import { BoardSnapshot, BoardTask, TaskBoardModel } from './TaskBoardModel';
-import { dependencyRevision } from './webview/dependencyGraph';
+import { boardEditRevision } from './webview/dependencyGraph';
 
 /**
  * Optional hooks the panel calls back into the host with. Wired in
@@ -19,13 +19,14 @@ import { dependencyRevision } from './webview/dependencyGraph';
  * direct access to the agent stack.
  */
 export interface TaskBoardPanelHandlers {
+	readonly refreshPlan?: (conversationId: string) => void;
 	readonly updateDependencies?: (conversationId: string, taskId: string, dependencies: readonly string[], taskIds: readonly string[]) => void;
 	/** User clicked a tile — host should reveal that subtask in the chat transcript. */
 	readonly revealSubtaskInChat?: (taskId: string) => void;
 	/** Drag from `Ready` -> `In Progress`. Host should re-fire `executeSubtask`. */
 	readonly dispatchSubtask?: (taskId: string) => void;
 	/** Drag tile across columns to change assignee. */
-	readonly reassignSubtask?: (taskId: string, newAssignee: string) => void;
+	readonly reassignSubtask?: (conversationId: string, taskId: string, newAssignee: string, expectedRevision: string) => void;
 	/** User dragged a `Done` tile back to `Ready` and confirmed re-run. */
 	readonly rerunSubtask?: (taskId: string) => void;
 	/**
@@ -209,9 +210,8 @@ export class TaskBoardPanel {
 				return;
 			case 'reassign': {
 				const m = message as ReassignMessage;
-				if (typeof m.taskId === 'string' && typeof m.newAssignee === 'string') {
-					this.handlers.reassignSubtask?.(m.taskId, m.newAssignee);
-				}
+				try { this.reassignSubtask(m.taskId, m.newAssignee, m.expectedRevision); }
+				catch (error) { void vscode.window.showErrorMessage(String(error)); }
 				return;
 			}
 			case 'rerun':
@@ -225,6 +225,8 @@ export class TaskBoardPanel {
 				}
 				return;
 			case 'refresh':
+				try { if (this.currentConversationId) { this.handlers.refreshPlan?.(this.currentConversationId); } }
+				catch (error) { void vscode.window.showErrorMessage(String(error)); }
 				this.pushSnapshot();
 				return;
 			case 'review-council':
@@ -246,6 +248,13 @@ export class TaskBoardPanel {
 				this.handleChatRuntime(message as ChatRuntimeMessage);
 				return;
 		}
+	}
+
+	private reassignSubtask(taskId: string, newAssignee: string, expectedRevision: string): void {
+		const conversationId = this.currentConversationId; if (!conversationId) { return; }
+		if (!getPersona(newAssignee)) { throw new Error('Proposed assignee is not a registered specialist.'); }
+		if (!this.handlers.reassignSubtask) { throw new Error('Execution plan editing is not configured.'); }
+		this.handlers.reassignSubtask(conversationId, taskId, newAssignee, expectedRevision);
 	}
 
 	private async editDependencies(taskId: string, dependencies: readonly string[], expectedRevision: string): Promise<void> {
@@ -278,13 +287,13 @@ export class TaskBoardPanel {
 		const snapshot = this.model.getSnapshot(conversationId); if (!snapshot) { return; }
 		if (message.cardId && !snapshot.tasks.some(task => task.id === message.cardId)) { throw new Error('Proposed board action refers to a missing task.'); }
 		if (message.assignee && !getPersona(message.assignee)) { throw new Error('Proposed assignee is not a registered specialist.'); }
-		const revision = dependencyRevision(snapshot.tasks);
+		const revision = boardEditRevision(snapshot);
 		const action = vscode.l10n.t('Apply Board Proposal');
 		const confirmed = await vscode.window.showInformationMessage(vscode.l10n.t('Apply the assistant’s proposed board change?'), { modal: true, detail: JSON.stringify(message, null, 2) }, action);
 		if (confirmed !== action || !isCurrent()) { return; }
 		const current = this.model.getSnapshot(conversationId);
-		if (!current || dependencyRevision(current.tasks) !== revision) { throw new Error('Board changed while reviewing this proposal. Ask for a fresh proposal.'); }
-		this.handleBoardAction(message);
+		if (!current || boardEditRevision(current) !== revision) { throw new Error('Board changed while reviewing this proposal. Ask for a fresh proposal.'); }
+		this.handleBoardAction(message, revision);
 	}
 
 	/**
@@ -293,7 +302,7 @@ export class TaskBoardPanel {
 	 * route them into the same `TaskBoardModel` mutations the user-driven
 	 * drag-drop path uses, so the visible board state stays in lockstep.
 	 */
-	private handleBoardAction(message: BoardActionMessage): void {
+	private handleBoardAction(message: BoardActionMessage, expectedRevision: string): void {
 		const conversationId = this.currentConversationId;
 		if (!conversationId) {
 			return;
@@ -311,7 +320,7 @@ export class TaskBoardPanel {
 				return;
 			case 'setCardAssignee':
 				if (typeof message.cardId === 'string' && typeof message.assignee === 'string') {
-					this.handlers.reassignSubtask?.(message.cardId, message.assignee);
+					this.reassignSubtask(message.cardId, message.assignee, expectedRevision);
 				}
 				return;
 			case 'setCardPriority':
@@ -416,6 +425,7 @@ export class TaskBoardPanel {
 		return {
 			conversationId: snapshot.conversationId,
 			createdAt: snapshot.createdAt,
+			executionPlanId: snapshot.executionPlanId,
 			tasks: snapshot.tasks.map((t: BoardTask) => ({
 				id: t.id,
 				instruction: t.instruction,

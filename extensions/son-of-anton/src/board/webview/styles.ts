@@ -107,6 +107,7 @@ select { padding: 7px 24px 7px 10px; border: 1px solid var(--sota-border); borde
 .task-detail-body { font-size: 11px; color: var(--sota-muted); border-top: 1px solid var(--sota-border); margin-top: 10px; }
 .task-detail-body ul { padding-left: 16px; }
 .task-detail-body code { font-family: var(--vscode-editor-font-family, monospace); }
+.tile-assignee select { min-width: 0; max-width: 100%; flex: 1; background: var(--vscode-dropdown-background); color: var(--vscode-foreground); border: 1px solid var(--vscode-panel-border); border-radius: 4px; padding: 3px; }
 .tile-assignee { display: flex; align-items: center; gap: 7px; margin: 13px 0 8px; }
 .avatar { display: grid; place-items: center; width: 23px; height: 23px; border-radius: 6px; background: var(--sota-raised); font-size: 10px; font-weight: 600; }
 .tile-name { color: var(--sota-muted); font-size: 11px; }

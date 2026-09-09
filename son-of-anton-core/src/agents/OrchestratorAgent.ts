@@ -18,6 +18,7 @@ import {
 import { AgentEvent } from './agentEvents';
 import { BaseAgent, AgentContext, truncateForTaskTitle } from './BaseAgent';
 import { loadAgentPrompt } from './promptLoader';
+import { planEditRevision } from './planEditing';
 import {
 	AgentHandle,
 	ExecutionPlan,
@@ -88,6 +89,27 @@ export class OrchestratorAgent extends BaseAgent {
 		};
 		for (const id of graph.keys()) { visit(id); }
 		target.dependencies = [...dependencies];
+	}
+
+	/** Commit a Board assignment only against the same idle plan and complete task revision. */
+	reassignPlanSubtask(conversationId: string, planId: string, taskId: string, newAssignee: string, expectedRevision: string): void {
+		const plan = this.activePlan;
+		if (!plan || plan.conversationId !== conversationId || plan.approved || plan.subtasks.some(task => task.status !== 'pending')) { throw new Error('Only the owning conversation’s pending, unapproved plan can be edited.'); }
+		if (plan.id !== planId || planEditRevision(plan.id, plan.subtasks) !== expectedRevision) { throw new Error('Execution plan changed. Refresh the board before reassigning a task.'); }
+		const specialist = this.specialists.get(newAssignee as AgentHandle);
+		if (!specialist) { throw new Error('The selected specialist is not registered for execution.'); }
+		const target = plan.subtasks.find(task => task.id === taskId); if (!target) { throw new Error('Task is not in the active execution plan.'); }
+		if (target.assignee === specialist.handle) { return; }
+		// Move the existing declaration without changing its files or access type.
+		// A read-only task remains read-only when assigned to a different specialist.
+		const matchingFiles = (entry: ScopeEntry) => JSON.stringify([...entry.files].sort()) === JSON.stringify([...target.scopeFiles].sort());
+		const identified = plan.scopeDeclaration.entries.filter(entry => entry.subtaskId === target.id);
+		const candidates = identified.length ? identified : plan.scopeDeclaration.entries.filter(entry => entry.subtaskId === undefined && entry.agent === target.assignee && matchingFiles(entry));
+		if (identified.length > 1 || (target.scopeFiles.length && candidates.length !== 1)) { throw new Error('Task scope no longer has an unambiguous execution declaration. Refresh the plan before reassigning it.'); }
+		const scope = candidates.length === 1 ? candidates[0] : undefined;
+		if (scope && (scope.agent !== target.assignee || !matchingFiles(scope))) { throw new Error('Task scope no longer matches its execution declaration. Refresh the plan before reassigning it.'); }
+		if (scope) { scope.subtaskId = target.id; scope.agent = specialist.handle; }
+		target.assignee = specialist.handle;
 	}
 
 	protected getRoleDescription(): string {
@@ -260,7 +282,9 @@ export class OrchestratorAgent extends BaseAgent {
 		structuredEmit?.({
 			type: 'plan-proposed',
 			plan: {
+				id: plan.id,
 				subtasks: plan.subtasks.map(subtask => ({
+					id: subtask.id,
 					instruction: subtask.instruction,
 					assignee: subtask.assignee,
 					scopeFiles: subtask.scopeFiles,
@@ -1056,6 +1080,7 @@ export class OrchestratorAgent extends BaseAgent {
 
 						// Build scope declaration
 						scopeEntries.push({
+							subtaskId: subtask.id,
 							agent: subtask.assignee,
 							files: subtask.scopeFiles,
 							accessType: subtask.assignee === 'anton-security' ? 'read' : 'write',

@@ -180,6 +180,8 @@ export interface ScopeDeclaration {
  * A single scope entry mapping an agent to files it will touch.
  */
 export interface ScopeEntry {
+	/** Stable ownership even when different tasks share files or are reassigned. */
+	subtaskId?: string;
 	agent: AgentHandle;
 	files: string[];
 	accessType: 'read' | 'write';

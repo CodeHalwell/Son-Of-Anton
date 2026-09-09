@@ -9,7 +9,7 @@ import { resolveChatSpecialist } from './ChatModelRouting';
 import { assembleTurnContext, type TurnContext } from './TurnContext';
 import type { ProviderFinder } from '../providers/ProviderFinder';
 import { globalScopedConfig } from './globalScopedConfig';
-import { LlmClient, LlmContentPart, LlmMessage, ModelId, supportsAgenticToolLoop, ToolDefinition as LlmToolDefinition } from 'son-of-anton-core/llm/LlmClient';
+import { LlmClient, LlmContentPart, LlmMessage, ModelId, modelSupportsImages, supportsAgenticToolLoop, ToolDefinition as LlmToolDefinition } from 'son-of-anton-core/llm/LlmClient';
 import { ToolRegistry, createInstrumentedWorkspaceToolContext, type ApprovalRequest } from '../tools/registry';
 import { clearActiveApproval, getActiveApproval, setActiveApproval } from './approvalRegistry';
 import type { HookRunner } from 'son-of-anton-core/persistence/HookRunner';
@@ -3119,6 +3119,15 @@ export class ChatSession {
 		this.currentModel = model;
 		this.currentSpecialistId = specialistId;
 		if (specialistId !== requestedSpecialistId) { this.postChatSelection(model, requestedSpecialistId); }
+		const usesAgentBridge = !!this.agentBridge && (this.agentBridge.hasAgent(specialistId) || ((approveOverride || rejectOverride) && this.agentBridge.hasAgent('anton')));
+		if (!usesAgentBridge && !modelSupportsImages(model)) {
+			if (hasImages) { throw new Error(vscode.l10n.t('This model does not support image attachments. Select an image-capable model or remove the attachments.')); }
+			// Direct chat resends every user/assistant row below, including the
+			// structured images restored from history. Local system rows are excluded.
+			if (this.conversation.some(row => (row.role === 'user' || row.role === 'assistant') && Array.isArray(row.content) && row.content.some(part => part.type === 'image'))) {
+				throw new Error(vscode.l10n.t('This conversation includes images that the selected model cannot read. Select an image-capable model or start a new chat.'));
+			}
+		}
 
 		// H17 — `pre-prompt` lifecycle hook. Fires AFTER slash-command
 		// interception so handled commands don't pay the script latency,
@@ -3296,7 +3305,7 @@ export class ChatSession {
 		// drive the agent backend instead of the direct-LLM path. The legacy path
 		// remains as a fallback for specialists that aren't in the agent stack
 		// yet (e.g. anton-spec) and for sessions where no bridge was supplied.
-		if (this.agentBridge && (this.agentBridge.hasAgent(specialistId) || ((approveOverride || rejectOverride) && this.agentBridge.hasAgent('anton')))) {
+		if (usesAgentBridge) {
 			// Workspace context is now injected as a system-prompt section by
 			// `BaseAgent.buildSystemPrompt` via `request.workspaceContextSnapshot`,
 			// so the user's typed text stays clean — no prepending.
@@ -3367,13 +3376,6 @@ export class ChatSession {
 			}];
 		});
 
-		// Anthropic's content-block tool_result form is the canonical way to
-		// round-trip results, but our LlmMessage.content is plain text. Rather
-		// than refactor the whole message shape, we serialise tool results into
-		// a single synthetic user message. The model loses the structured
-		// tool_use_id correlation but still receives the data — a pragmatic
-		// shortcut for non-content-block-aware clients. Tracked for future
-		// upgrade once LlmMessage gains content-block support.
 		// `assistantBuffer` is what we feed BACK to the model as the assistant's
 		// last turn (per-loop reset). `fullAssistantText` is what we persist —
 		// the user-visible accumulation across all loop turns, including
@@ -3399,8 +3401,9 @@ export class ChatSession {
 		try {
 			toolLoop: while (turn < MAX_TOOL_TURNS && current()) {
 				turn++;
-				const pendingToolCalls: Array<{ id: string; name: string; input: Record<string, unknown> }> = [];
+				const pendingToolCalls: Array<{ id: string; name: string; input: Record<string, unknown>; thoughtSignature?: string }> = [];
 				let stopReason: string | undefined;
+				let reasoningContent: string | undefined;
 
 				try {
 					for await (const event of this.llmClient.streamRequest({
@@ -3417,7 +3420,7 @@ export class ChatSession {
 							fullAssistantText += event.token;
 							post({ type: 'streamToken', token: event.token });
 						} else if (event.type === 'tool-call') {
-							pendingToolCalls.push({ id: event.id, name: event.name, input: event.input });
+							pendingToolCalls.push({ id: event.id, name: event.name, input: event.input, thoughtSignature: event.thoughtSignature });
 							// Render a structured tool-call card in the webview
 							// instead of the previous italic markdown marker. The
 							// host doesn't append anything to the visible token
@@ -3439,6 +3442,7 @@ export class ChatSession {
 							}
 						} else if (event.type === 'complete') {
 							stopReason = event.stopReason;
+							reasoningContent = event.reasoningContent;
 							const willLoop = stopReason === 'tool_use' && pendingToolCalls.length > 0 && turn < MAX_TOOL_TURNS;
 							// Only emit messageComplete on the FINAL turn so the
 							// webview doesn't flip out of streaming state mid-loop.
@@ -3538,10 +3542,10 @@ export class ChatSession {
 					break;
 				}
 
-				// Execute pending tool calls and assemble a synthetic user
-				// follow-up. The execution context is shared across calls in the
+				// Execute pending tool calls and retain their correlated results.
+				// The execution context is shared across calls in the
 				// same send (per Phase 19 spec) so we don't pay per-call setup.
-				const resultLines: string[] = ['[Tool results]'];
+				const resultParts: LlmContentPart[] = [];
 				for (const call of pendingToolCalls) {
 					if (!current()) { break toolLoop; }
 					// Phase 41: gate tools whose definition declares
@@ -3619,15 +3623,12 @@ export class ChatSession {
 					// output via the webview's inline edit form before the next
 					// LLM turn read it, substitute the edited content. The map
 					// is consumed once per call.id; the edited string takes the
-					// place of `result.content` in BOTH the next-turn synthetic
-					// follow-up message AND the persisted sentinel below so the
+					// place of `result.content` in BOTH the next-turn structured
+					// result message AND the persisted sentinel below so the
 					// model reads (and reloads see) the user-curated version.
 					const finalContent = this.editedToolResults.get(call.id) ?? result.content;
 					const userEdited = this.editedToolResults.has(call.id);
-					resultLines.push(`${call.name}(${inputJson}) → ${status}`);
-					resultLines.push('```');
-					resultLines.push(finalContent);
-					resultLines.push('```');
+					resultParts.push({ type: 'tool_result', tool_use_id: call.id, content: finalContent, is_error: result.isError });
 
 					// Phase 63 — for `write_file` (and any future write-shaped
 					// tools that attach `metadata.kind === 'write'`), stash
@@ -3699,7 +3700,7 @@ export class ChatSession {
 						// sentinel is intentionally skipped to avoid showing a
 						// duplicate "tool ran" card next to the block. The
 						// model's transcript still receives the
-						// `result.content` summary via the synthetic follow-up
+						// `result.content` summary via the structured follow-up
 						// below.
 						const meta = result.metadata as { kind: 'ui-block'; component: string; props: Record<string, unknown>; blockId: string };
 						const uiPayload = { component: meta.component, props: meta.props, blockId: meta.blockId };
@@ -3762,9 +3763,7 @@ export class ChatSession {
 					}
 
 					// If the user cancelled mid-loop, bail out instead of
-					// pressing on to the next pending tool call. The synthetic
-					// follow-up will still be sent so the model sees the
-					// cancellation in its tool-result transcript on retry.
+					// pressing on to the next pending tool call or provider request.
 					if (approvalDecision && approvalDecision.action === 'cancel') {
 						aborted = true;
 						break;
@@ -3779,16 +3778,19 @@ export class ChatSession {
 					break;
 				}
 
-				const followUp = resultLines.join('\n');
-
-				// Append the assistant turn so far and a synthetic user message
-				// carrying the tool results. Don't push these into
+				// Preserve provider reasoning and tool identities for continuation.
+				// These opaque fields belong only to the provider request, not the
+				// visible transcript. Don't push these messages into
 				// `this.conversation` — they're transient inputs for the model,
 				// not user-typed messages worth persisting.
+				const assistantContent: LlmContentPart[] = [
+					...(assistantBuffer ? [{ type: 'text' as const, text: assistantBuffer }] : []),
+					...pendingToolCalls.map(call => ({ type: 'tool_use' as const, ...call })),
+				];
 				llmMessages = [
 					...llmMessages,
-					{ role: 'assistant', content: assistantBuffer },
-					{ role: 'user', content: followUp },
+					{ role: 'assistant', content: assistantContent, ...(reasoningContent ? { reasoningContent } : {}) },
+					{ role: 'user', content: resultParts },
 				];
 				assistantBuffer = '';
 			}

@@ -12,6 +12,7 @@
  * mount after that initial push if the bundle is still loading).
  */
 
+import { boardEditRevision } from './dependencyGraph';
 import { useEffect, useMemo, useState } from 'react';
 import { DependencyEditor } from './DependencyEditor';
 import { BoardChat } from './BoardChat';
@@ -168,6 +169,7 @@ function BoardInner({ state }: BoardInnerProps): JSX.Element {
 								state={col.state}
 								tasks={buckets[col.state]}
 								personasById={personasById}
+								assignment={state.snapshot?.executionPlanId && state.conversationId && tasks.every(task => ['backlog', 'ready'].includes(task.state)) ? { conversationId: state.conversationId, expectedRevision: boardEditRevision(state.snapshot), personas: state.personas } : undefined}
 							/>
 						))}
 					</section>

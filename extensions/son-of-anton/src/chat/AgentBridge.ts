@@ -295,6 +295,10 @@ export class AgentBridge {
 		this.stack.orchestrator.updatePlanDependencies(conversationId, taskId, dependencies, expectedTaskIds);
 	}
 
+	reassignPlanSubtask(conversationId: string, planId: string, taskId: string, newAssignee: string, expectedRevision: string): void {
+		this.stack.orchestrator.reassignPlanSubtask(conversationId, planId, taskId, newAssignee, expectedRevision);
+	}
+
 	/** An isolated task gets fresh agent state and tools rooted in its retained worktree. */
 	async runIsolatedSpecialist(root: string, handle: AgentHandle, prompt: string, emit: (event: AgentEvent) => void, token: vscode.CancellationToken): Promise<void> {
 		if (!await this.ensureWorkspaceTrust()) { throw new Error('Workspace trust is required'); }

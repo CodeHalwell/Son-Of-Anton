@@ -32,6 +32,7 @@ export interface BoardTaskView {
 export interface BoardSnapshotView {
 	readonly conversationId: string;
 	readonly createdAt: number;
+	readonly executionPlanId?: string;
 	readonly tasks: ReadonlyArray<BoardTaskView>;
 }
 
@@ -87,7 +88,7 @@ export type HostToWebviewMessage = SnapshotMessage | ChatRuntimeChunkMessage;
 
 /** Webview -> host: drag-drop / button actions on the existing protocol. */
 export interface DispatchMessage { readonly type: 'dispatch'; readonly taskId: string }
-export interface ReassignMessage { readonly type: 'reassign'; readonly taskId: string; readonly newAssignee: string }
+export interface ReassignMessage { readonly type: 'reassign'; readonly taskId: string; readonly newAssignee: string; readonly expectedRevision: string }
 export interface RerunMessage { readonly type: 'rerun'; readonly taskId: string }
 export interface RevealMessage { readonly type: 'reveal'; readonly taskId: string }
 export interface RefreshMessage { readonly type: 'refresh' }
@@ -146,7 +147,7 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
 		case 'refresh': case 'open-chat': case 'review-council': return true;
 		case 'review-proposal': case 'cancel-task': case 'dispatch': case 'rerun': case 'reveal': return text('taskId');
 		case 'set-dependencies': return text('taskId') && text('expectedRevision') && String(message.expectedRevision).length <= 1_000_000 && Array.isArray(message.dependencies) && message.dependencies.length <= 1000 && message.dependencies.every(id => typeof id === 'string' && id.length > 0 && id.length <= 500);
-		case 'reassign': return text('taskId') && text('newAssignee');
+		case 'reassign': return text('conversationId') && text('taskId') && text('newAssignee') && text('expectedRevision') && String(message.expectedRevision).length <= 1_000_000;
 		case 'cancel-chat': return text('requestId');
 		case 'board-action':
 			switch (message.action) {

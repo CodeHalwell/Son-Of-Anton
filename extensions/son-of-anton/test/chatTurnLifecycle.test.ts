@@ -128,30 +128,32 @@ async function* requestNativeTool(name: string): AsyncGenerator<LlmStreamEvent> 
 interface NativeRequestBody {
 	model: string;
 	tools?: Array<{ type: string; function: { name: string; description: string; parameters: ToolDefinition['inputSchema'] } }>;
-	messages: Array<{ role: string; content: string | Array<{ type: string; text?: string; image_url?: { url: string } }> }>;
+	messages: Array<{ role: string; reasoning_content?: string; tool_call_id?: string; tool_calls?: Array<{ id: string; type: string; function: { name: string; arguments: string } }>; content: string | Array<{ type: string; text?: string; image_url?: { url: string } }> }>;
 }
 
 async function withCatalogNativeSession(
-	options: { tools: CapabilityAvailability; images?: boolean; toolReply?: boolean; specialistFallback?: boolean },
+	options: { tools: CapabilityAvailability; images?: CapabilityAvailability; toolReply?: boolean; specialistFallback?: boolean; provider?: 'moonshot'; readTool?: boolean; frames?: (request: number) => object[] },
 	run: (fixture: ReturnType<typeof createSession> & { llm: LlmClient; model: ModelId; bodies: NativeRequestBody[]; definition: ToolDefinition; executed: string[] }) => Promise<void>,
 ): Promise<void> {
 	const rawModel = `chat-panel-${options.tools}-${options.images ?? false}-${options.toolReply ?? false}-${options.specialistFallback ?? false}`;
-	const model = discoveredModelId('openai', rawModel);
-	registerDiscoveredModels([{ id: model, provider: 'openai', model: rawModel, label: 'Offline chat fixture', chat: true, images: options.images ?? false, tools: options.tools, fetchedAt: Date.now() }]);
-	const definition: ToolDefinition = { name: 'write_file', description: 'Write the test fixture', inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } };
-	const llm = new LlmClient({ get: async () => 'synthetic-fixture-key', store: async () => {}, delete: async () => {} }, { get: <T>(key: string, fallback?: T): T => (key === 'openaiBaseUrl' ? 'https://fixture.invalid/v1' : fallback) as T });
+	const provider = options.provider ?? 'openai';
+	const model = discoveredModelId(provider, rawModel);
+	registerDiscoveredModels([{ id: model, provider, model: rawModel, label: 'Offline chat fixture', chat: true, images: options.images ?? false, tools: options.tools, fetchedAt: Date.now() }]);
+	const definition: ToolDefinition = { name: options.readTool ? 'read_file' : 'write_file', description: 'Access the test fixture', inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } };
+	const llm = new LlmClient({ get: async () => 'synthetic-fixture-key', store: async () => {}, delete: async () => {} }, { get: <T>(key: string, fallback?: T): T => (key === `${provider}BaseUrl` ? 'https://fixture.invalid/v1' : fallback) as T });
 	const originalFetch = globalThis.fetch; const bodies: NativeRequestBody[] = []; const executed: string[] = [];
 	globalThis.fetch = async (_input, init) => {
 		bodies.push(JSON.parse(String(init?.body)));
 		const frame = { choices: [{ delta: { content: 'Useful answer', ...(options.toolReply ? { tool_calls: [{ index: 0, id: 'unexpected-tool', function: { name: 'write_file', arguments: '{"path":"fixture.ts"}' } }] } : {}) }, finish_reason: options.toolReply ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 5 } };
-		return new Response(`data: ${JSON.stringify(frame)}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } });
+		const frames = options.frames?.(bodies.length) ?? [frame];
+		return new Response(`${frames.map(value => `data: ${JSON.stringify(value)}\n\n`).join('')}data: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } });
 	};
 	const f = createSession();
 	Object.assign(f.session, {
 		currentModel: model, currentSpecialistId: options.specialistFallback ? 'anton-spec' : 'anton',
 		agentBridge: options.specialistFallback ? { hasAgent: () => false } : undefined,
 		llmClient: llm, editedToolResults: new Map(),
-		toolRegistry: { definitions: () => [definition], get: () => ({ definition: { category: 'write', riskLevel: 'requiresApproval' } }), execute: async (name: string) => { executed.push(name); return { content: 'Written' }; } },
+		toolRegistry: { definitions: () => [definition], get: () => ({ definition: options.readTool ? { category: 'read', riskLevel: 'safe' } : { category: 'write', riskLevel: 'requiresApproval' } }), execute: async (name: string) => { executed.push(name); return { content: options.readTool ? 'Fixture contents' : 'Written' }; } },
 	});
 	try { await run({ ...f, llm, model, bodies, definition, executed }); }
 	finally { f.session.abortInFlight(); globalThis.fetch = originalFetch; }
@@ -385,6 +387,95 @@ suite('Chat turn ownership', () => {
 				}
 			});
 		}
+	});
+
+	test('direct image requests reject unsupported and unknown capability before hooks, context or persistence', async () => {
+		for (const images of [false, 'unknown'] as const) {
+			for (const specialistFallback of [false, true]) {
+				for (const chatMode of ['act', 'plan'] as const) {
+					await withCatalogNativeSession({ tools: true, images, specialistFallback }, async f => {
+						const effects: string[] = [];
+						Object.assign(f.session, {
+							hookRunner: { fire: async () => { effects.push('hook'); return { allowed: true }; } },
+							workspaceContext: { collect: async () => { effects.push('context'); return { markdown: 'Workspace', estimatedTokens: 1 }; } },
+							checkpointManager: { capture: async () => { effects.push('checkpoint'); return undefined; } },
+						});
+						await f.session.handleSendMessage({ text: 'Read this image', requestId: 'unsupported-image', chatMode, images: [{ mime: 'image/png', base64: 'YWJj' }] });
+						assert.deepEqual(effects, []); assert.deepEqual(f.bodies, []); assert.deepEqual(f.executed, []); assert.deepEqual(f.conversations.get('first'), []);
+						assert.equal(f.messages.some(message => ['messagePersisted', 'approvalRequest', 'requestStarted', 'checkpointCaptured'].includes(message.type)), false);
+						assert.match(String(f.messages.find(message => message.type === 'streamError')?.error), /image-capable model or remove the attachments/);
+						assert.equal(f.messages.find(message => message.type === 'requestSettled')?.requestId, 'unsupported-image'); assert.equal(f.session.abortController, undefined);
+					});
+				}
+			}
+		}
+	});
+
+	test('restored direct history images reject a text-only model without losing the existing conversation', async () => {
+		await withCatalogNativeSession({ tools: false, images: false, specialistFallback: true }, async f => {
+			const history: ChatMessage[] = [{ role: 'user', content: [{ type: 'image', mimeType: 'image/png', base64Data: 'YWJj' }, { type: 'text', text: 'Earlier screenshot' }], timestamp: 1 }];
+			f.conversations.set('second', history);
+			f.session.switchConversation('second'); f.session.currentModel = f.model;
+			await f.session.handleSendMessage({ text: 'Explain that screenshot again', requestId: 'history-image', includeWorkspaceContext: false });
+			assert.deepEqual(f.bodies, []); assert.deepEqual(f.conversations.get('second'), history);
+			assert.match(String(f.messages.findLast(message => message.type === 'streamError')?.error), /conversation includes images.*image-capable model or start a new chat/);
+			assert.equal(f.messages.findLast(message => message.type === 'requestSettled')?.requestId, 'history-image');
+		});
+	});
+
+	test('confirmed direct vision routes serialize fresh and restored images in Act and Plan modes', async () => {
+		for (const chatMode of ['act', 'plan'] as const) {
+			await withCatalogNativeSession({ tools: 'unknown', images: true, specialistFallback: true }, async f => {
+				f.conversations.set('second', [{ role: 'user', content: [{ type: 'image', mimeType: 'image/png', base64Data: 'YWJj' }, { type: 'text', text: 'Old screenshot' }], timestamp: 1 }]);
+				f.session.switchConversation('second'); f.session.currentModel = f.model;
+				await f.session.handleSendMessage({ text: 'Compare the screenshots', images: [{ mime: 'image/jpeg', base64: 'ZGVm' }], includeWorkspaceContext: false, chatMode });
+				const users = f.bodies[0].messages.filter(message => message.role === 'user');
+				assert.deepEqual(users.map(message => message.content), [
+					[{ type: 'image_url', image_url: { url: 'data:image/png;base64,YWJj' } }, { type: 'text', text: 'Old screenshot' }],
+					[{ type: 'image_url', image_url: { url: 'data:image/jpeg;base64,ZGVm' } }, { type: 'text', text: 'Compare the screenshots' }],
+				]);
+				assert.equal(f.conversations.get('second')?.at(-1)?.execution?.outcome, 'completed'); assert.equal(f.messages.some(message => message.type === 'streamError'), false);
+			});
+		}
+	});
+
+	test('Moonshot continuation preserves each round of reasoning and correlated tools without displaying or persisting reasoning', async () => {
+		await withCatalogNativeSession({ tools: true, provider: 'moonshot', readTool: true, specialistFallback: true, frames: request => request <= 3 ? [
+			{ choices: [{ delta: request <= 2 ? { reasoning_content: 'Opaque provider ' } : {} }] },
+			{ choices: [{ delta: { ...(request <= 2 ? { reasoning_content: `reasoning ${request}` } : {}), ...(request === 1 ? {} : { content: `Reading ${request}.` }), tool_calls: [{ index: 0, id: `call-${request}`, function: { name: 'read_file', arguments: JSON.stringify({ path: `file-${request}.ts` }) } }] }, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 10, completion_tokens: 5 } },
+		] : [{ choices: [{ delta: { content: 'Finished' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 5 } }] }, async f => {
+			const registry = (f.session as unknown as { toolRegistry: { execute(name: string): Promise<{ content: string; isError?: boolean }> } }).toolRegistry;
+			registry.execute = async name => { f.executed.push(name); return { content: `Result ${f.executed.length}`, isError: f.executed.length === 2 }; };
+			await f.session.handleSendMessage({ text: 'Investigate three files', includeWorkspaceContext: false });
+			assert.equal(f.bodies.length, 4); assert.equal(f.executed.length, 3);
+			for (let round = 1; round <= 3; round++) {
+				const wire = f.bodies[round].messages;
+				const assistants = wire.filter(message => message.role === 'assistant');
+				assert.equal(assistants.length, round);
+				assert.deepEqual(assistants.map(message => message.reasoning_content), ['Opaque provider reasoning 1', 'Opaque provider reasoning 2', undefined].slice(0, round));
+				assert.deepEqual(assistants[round - 1].tool_calls, [{ id: `call-${round}`, type: 'function', function: { name: 'read_file', arguments: JSON.stringify({ path: `file-${round}.ts` }) } }]);
+				assert.deepEqual(wire.filter(message => message.role === 'tool').map(message => ({ id: message.tool_call_id, result: message.content })), Array.from({ length: round }, (_, index) => ({ id: `call-${index + 1}`, result: `Result ${index + 1}` })));
+			}
+			assert.equal(f.bodies[1].messages.find(message => message.role === 'assistant')?.content, null, 'A reasoning-only tool call still needs a correlated assistant message');
+			assert.equal(f.conversations.get('first')?.at(-1)?.execution?.outcome, 'completed');
+			assert.doesNotMatch(JSON.stringify(f.messages), /Opaque provider/); assert.doesNotMatch(JSON.stringify(f.conversations.get('first')), /Opaque provider|reasoningContent/);
+			await f.session.handleSendMessage({ text: 'Thanks', includeWorkspaceContext: false });
+			assert.equal(f.bodies[4].messages.some(message => message.reasoning_content !== undefined || message.tool_calls?.length), false, 'Provider-only continuation metadata must not leak into another user turn');
+		});
+	});
+
+	test('cancelling Moonshot during a tool discards private continuation reasoning and starts no further request', async () => {
+		await withCatalogNativeSession({ tools: true, provider: 'moonshot', readTool: true, frames: () => [{ choices: [{ delta: { content: 'Visible progress', reasoning_content: 'Private cancellation reasoning', tool_calls: [{ index: 0, id: 'cancel-call', function: { name: 'read_file', arguments: '{"path":"file.ts"}' } }] }, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 10, completion_tokens: 5 } }] }, async f => {
+			const started = deferred(); const release = deferred();
+			const registry = (f.session as unknown as { toolRegistry: { execute(name: string): Promise<{ content: string }> } }).toolRegistry;
+			registry.execute = async name => { f.executed.push(name); started.resolve(); await release.promise; return { content: 'Late tool result' }; };
+			const running = f.session.handleSendMessage({ text: 'Read a file', includeWorkspaceContext: false, requestId: 'cancel-reasoning' });
+			try { await started.promise; f.session.abortController!.abort(); } finally { release.resolve(); await running; }
+			assert.equal(f.bodies.length, 1); assert.deepEqual(f.executed, ['read_file']);
+			assert.equal(f.conversations.get('first')?.at(-1)?.execution?.outcome, 'cancelled');
+			assert.equal(f.messages.findLast(message => message.type === 'requestSettled')?.requestId, 'cancel-reasoning');
+			assert.doesNotMatch(JSON.stringify(f.messages), /Private cancellation reasoning/); assert.doesNotMatch(JSON.stringify(f.conversations.get('first')), /Private cancellation reasoning|Late tool result/);
+		});
 	});
 
 	test('unknown tools and Plan mode reject unsolicited provider tool calls before approval or execution', async () => {

@@ -55,11 +55,13 @@ export interface BoardSnapshot {
 	readonly conversationId: string;
 	readonly tasks: ReadonlyArray<BoardTask>;
 	readonly createdAt: number;
+	readonly executionPlanId?: string;
 }
 
 interface BoardEntry {
 	readonly conversationId: string;
 	readonly createdAt: number;
+	readonly executionPlanId?: string;
 	tasks: BoardTask[];
 }
 
@@ -85,10 +87,11 @@ export class TaskBoardModel implements vscode.Disposable {
 	 * `plan-proposed` event arrives. Each subtask starts in `backlog` and is
 	 * promoted to `ready` by `recomputeStates`.
 	 */
-	setPlan(conversationId: string, tasks: BoardTask[]): void {
+	setPlan(conversationId: string, tasks: BoardTask[], executionPlanId?: string): void {
 		this.boards.set(conversationId, {
 			conversationId,
 			createdAt: Date.now(),
+			executionPlanId,
 			tasks: tasks.map(t => ({ ...t, dependencies: [...t.dependencies], scopeFiles: [...t.scopeFiles] })),
 		});
 		this.recomputeStates(conversationId);
@@ -168,6 +171,7 @@ export class TaskBoardModel implements vscode.Disposable {
 		return {
 			conversationId: board.conversationId,
 			createdAt: board.createdAt,
+			executionPlanId: board.executionPlanId,
 			tasks: board.tasks.map(t => ({ ...t, dependencies: [...t.dependencies], scopeFiles: [...t.scopeFiles] })),
 		};
 	}
