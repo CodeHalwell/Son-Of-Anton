@@ -186,7 +186,7 @@ jobs:
           node --test scripts/test/ide-release.test.mjs scripts/test/ide-package.test.mjs
       - name: IDE host regressions
         working-directory: extensions/son-of-anton
-        run: npm test -- --grep '^(Chat transcript write ownership|Conversation revision compare-and-swap|Conversation branch failure recovery|Provider Finder configuration boundary|Conversation history activation|Chat checkpoint index recovery|Permanent conversation deletion|ACP chat model routing|Impact navigation identities|Chat turn ownership|Board reassignment execution integration) ' --fail-zero
+        run: npm test -- --grep '^(Chat transcript write ownership|Conversation revision compare-and-swap|Conversation branch failure recovery|Provider Finder configuration boundary|Conversation history activation|Chat checkpoint index recovery|Permanent conversation deletion|ACP chat model routing|Impact navigation identities|Chat turn ownership|Board reassignment execution integration|Board dependency planning and agent proposals) ' --fail-zero
       - name: Graph watcher regressions
         run: node --test services/code-graph/mcp-server/test/incremental.test.mjs
       - name: Build native code graph

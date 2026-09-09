@@ -1095,7 +1095,7 @@ test('board dependency planner validates cycles and previews a scoped scheduling
 		{ ...fixture.snapshot.tasks[1], id: 'interface', instruction: 'Build interface', dependencies: ['foundation'], state: 'backlog' },
 		{ ...fixture.snapshot.tasks[1], id: 'tests', instruction: 'Add tests', dependencies: ['foundation'], state: 'backlog' },
 	];
-	await post(page, { ...fixture, snapshot: { ...fixture.snapshot, tasks } }); await frames(page);
+	await post(page, { ...fixture, snapshot: { ...fixture.snapshot, executionPlanId: 'dependency-plan', tasks } }); await frames(page);
 	await page.getByRole('button', { name: 'Dependencies', exact: true }).click();
 	await page.getByRole('checkbox', { name: /Build interface/ }).check();
 	assert.match(await page.getByRole('alert').textContent(), /cycle/);
@@ -1116,7 +1116,7 @@ test('dependency drafts reset atomically when switching tasks or receiving a new
 		{ ...fixture.snapshot.tasks[1], id: 'interface', instruction: 'Build interface', dependencies: ['foundation'], state: 'backlog' },
 		{ ...fixture.snapshot.tasks[1], id: 'tests', instruction: 'Add tests', dependencies: ['foundation'], state: 'backlog' },
 	];
-	await post(page, { ...fixture, snapshot: { ...fixture.snapshot, tasks } }); await frames(page);
+	await post(page, { ...fixture, snapshot: { ...fixture.snapshot, executionPlanId: 'dependency-plan', tasks } }); await frames(page);
 	await page.getByRole('button', { name: 'Dependencies', exact: true }).click();
 	const select = page.getByRole('combobox', { name: 'Task to edit dependencies' });
 	const interfaceBox = page.getByRole('checkbox', { name: /Build interface/ });
@@ -1131,12 +1131,39 @@ test('dependency drafts reset atomically when switching tasks or receiving a new
 	const requests = await page.evaluate(() => sentMessages.filter(message => message.type === 'set-dependencies'));
 	assert.equal(requests.length, 6);
 	assert.ok(requests.every(message => message.taskId === 'tests' && JSON.stringify(message.dependencies) === JSON.stringify(['foundation', 'interface'])));
-	await post(page, { ...fixture, snapshot: { ...fixture.snapshot, tasks: tasks.map(task => task.id === 'tests' ? { ...task, dependencies: [] } : task) } }); await frames(page);
+	await post(page, { ...fixture, snapshot: { ...fixture.snapshot, executionPlanId: 'dependency-plan', tasks: tasks.map(task => task.id === 'tests' ? { ...task, dependencies: [] } : task) } }); await frames(page);
 	assert.deepEqual({ selected: await select.inputValue(), foundation: await foundationBox.isChecked(), interface: await interfaceBox.isChecked(), applyDisabled: await apply.isDisabled() }, { selected: 'tests', foundation: false, interface: false, applyDisabled: true });
-	await post(page, { ...fixture, snapshot: { ...fixture.snapshot, tasks: tasks.slice(0, 2) } }); await frames(page);
+	await post(page, { ...fixture, snapshot: { ...fixture.snapshot, executionPlanId: 'dependency-plan', tasks: tasks.slice(0, 2) } }); await frames(page);
 	assert.deepEqual({ selected: await select.inputValue(), interface: await interfaceBox.isChecked(), applyDisabled: await apply.isDisabled() }, { selected: 'foundation', interface: false, applyDisabled: true });
-	await post(page, { ...fixture, snapshot: { ...fixture.snapshot, tasks: tasks.slice(0, 2).map(task => task.id === 'foundation' ? { ...task, state: 'in-progress' } : task) } }); await frames(page);
+	await post(page, { ...fixture, snapshot: { ...fixture.snapshot, executionPlanId: 'dependency-plan', tasks: tasks.slice(0, 2).map(task => task.id === 'foundation' ? { ...task, state: 'in-progress' } : task) } }); await frames(page);
 	assert.equal(await interfaceBox.isDisabled(), true);
+});
+
+test('dependency editing requires an entirely pending Board with a real execution plan', async t => {
+	const page = await openSurface(t, 'board', 1200);
+	const tasks = [
+		{ ...fixture.snapshot.tasks[1], id: 'pending', instruction: 'Pending work', dependencies: [], state: 'ready' },
+		{ ...fixture.snapshot.tasks[1], id: 'prerequisite', instruction: 'Earlier work', dependencies: [], state: 'ready' },
+	];
+	const snapshot = { ...fixture.snapshot, executionPlanId: 'pending-plan', tasks };
+	await post(page, { ...fixture, snapshot }); await frames(page);
+	await page.getByRole('button', { name: 'Dependencies', exact: true }).click();
+	const checkbox = page.getByRole('checkbox', { name: /Earlier work/ });
+	const apply = page.getByRole('button', { name: 'Apply Dependencies' });
+	await checkbox.check(); assert.equal(await apply.isEnabled(), true);
+	for (const state of ['done', 'failed', 'in-progress', 'review']) {
+		await post(page, { ...fixture, snapshot: { ...snapshot, tasks: [tasks[0], { ...tasks[1], state }] } }); await frames(page);
+		assert.equal(await checkbox.isDisabled(), true, state); assert.equal(await apply.isDisabled(), true, state);
+		assert.equal(await page.getByRole('combobox', { name: 'Task to edit dependencies' }).isEnabled(), true);
+		assert.equal(await page.getByRole('heading', { name: 'Scheduling Preview', exact: true }).isVisible(), true);
+		assert.match(await page.getByRole('status').filter({ hasText: 'pending execution plan' }).textContent(), /preview remains available/);
+	}
+	await post(page, { ...fixture, snapshot: { ...snapshot, executionPlanId: undefined } }); await frames(page);
+	assert.equal(await checkbox.isDisabled(), true); assert.equal(await apply.isDisabled(), true);
+	assert.equal(await page.evaluate(() => sentMessages.some(message => message.type === 'set-dependencies')), false);
+	await post(page, { ...fixture, snapshot }); await frames(page);
+	await checkbox.check(); await apply.click();
+	assert.equal(await page.evaluate(() => sentMessages.filter(message => message.type === 'set-dependencies').length), 1);
 });
 
 test('bounded timeline evicts both ends while preserving response drafts, votes and checkpoints', async t => {

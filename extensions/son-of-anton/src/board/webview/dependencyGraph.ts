@@ -19,12 +19,25 @@ export function dependencySchedule(tasks: readonly DependencyTask[]): Dependency
 	for (const task of tasks) {
 		if (new Set(task.dependencies).size !== task.dependencies.length || task.dependencies.some(id => id === task.id || !byId.has(id))) { throw new Error(`Invalid or missing dependency on ${task.id}.`); }
 	}
-	const pending = new Set(tasks.map(task => task.id)); const complete = new Set<string>(); const waves: string[][] = []; const blocking: Record<string, string[]> = {};
+	// Completed tasks satisfy their dependants immediately, but their saved
+	// links must still participate in validation of the complete graph.
+	const visiting = new Set<string>(); const visited = new Set<string>();
+	const visit = (id: string): void => {
+		if (visiting.has(id)) { throw new Error(`Dependency cycle: ${[...visiting, id].join(' → ')}`); }
+		if (visited.has(id)) { return; }
+		visiting.add(id); for (const dependency of byId.get(id)!.dependencies) { visit(dependency); }
+		visiting.delete(id); visited.add(id);
+	};
+	for (const id of byId.keys()) { visit(id); }
+	const pending = new Set(tasks.filter(task => task.state !== 'done').map(task => task.id));
+	const complete = new Set(tasks.filter(task => task.state === 'done').map(task => task.id));
+	const waves: string[][] = [];
+	const blocking: Record<string, string[]> = Object.fromEntries(tasks.map(task => [task.id, task.state === 'done' ? [] : task.dependencies.filter(dependency => !complete.has(dependency))]));
 	while (pending.size) {
 		const wave = [...pending].filter(id => byId.get(id)!.dependencies.every(dependency => complete.has(dependency)));
 		if (!wave.length) { throw new Error(`Dependency cycle: ${[...pending].join(' → ')}`); }
-		for (const id of wave) { pending.delete(id); complete.add(id); blocking[id] = byId.get(id)!.dependencies.filter(dependency => byId.get(dependency)!.state !== 'done'); }
-		const unfinished = wave.filter(id => byId.get(id)!.state !== 'done'); if (unfinished.length) { waves.push(unfinished); }
+		for (const id of wave) { pending.delete(id); complete.add(id); }
+		waves.push(wave);
 	}
 	return { waves, blocking };
 }

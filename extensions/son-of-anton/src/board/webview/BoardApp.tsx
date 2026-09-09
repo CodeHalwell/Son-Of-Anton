@@ -158,7 +158,7 @@ function BoardInner({ state }: BoardInnerProps): JSX.Element {
 						<div className="empty-workflow"><span>01 · Plan</span><span>02 · Build</span><span>03 · Review</span></div>
 					</section>
 				)}
-				{hasTasks && dependenciesOpen && <DependencyEditor key={state.conversationId} tasks={tasks} />}
+				{hasTasks && dependenciesOpen && <DependencyEditor key={state.conversationId} tasks={tasks} executionPlanId={state.snapshot?.executionPlanId} />}
 				{hasTasks && !dependenciesOpen && (
 					<section className="columns" aria-label="Task board" tabIndex={0}>
 						{visibleTasks.length === 0 && <div className="column-empty">No tasks match your filters.</div>}

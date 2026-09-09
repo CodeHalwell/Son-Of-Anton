@@ -14,7 +14,7 @@ interface DependencyDraft {
 }
 
 /** Editable prerequisite links and a deterministic preview of parallel scheduling waves. */
-export function DependencyEditor({ tasks }: { tasks: readonly BoardTaskView[] }): JSX.Element {
+export function DependencyEditor({ tasks, executionPlanId }: { tasks: readonly BoardTaskView[]; executionPlanId?: string }): JSX.Element {
 	const revision = dependencyRevision(tasks);
 	const [draft, setDraft] = useState<DependencyDraft>(() => ({ revision, selected: tasks[0]?.id ?? '', dependencies: [...(tasks[0]?.dependencies ?? [])] }));
 	const task = tasks.find(task => task.id === draft.selected) ?? tasks[0];
@@ -38,15 +38,14 @@ export function DependencyEditor({ tasks }: { tasks: readonly BoardTaskView[] })
 		catch (error) { return { schedule: undefined, error: error instanceof Error ? error.message : String(error) }; }
 	}, [revision, selected, dependencies]);
 	const changed = JSON.stringify([...(task?.dependencies ?? [])].sort()) !== JSON.stringify([...dependencies].sort());
-	const running = tasks.some(item => ['in-progress', 'review'].includes(item.state));
-	const editable = !running && !!task && ['backlog', 'ready'].includes(task.state);
+	const editable = !!executionPlanId && !!task && tasks.every(item => ['backlog', 'ready'].includes(item.state));
 	return <section className="dependency-editor" aria-label="Dependency planner">
 		<div className="dependency-controls">
 			<h2>Dependency Planner</h2><p>Choose prerequisites and preview what can run together. Apply updates the pending execution plan after confirmation.</p>
 			<label>Task<select aria-label="Task to edit dependencies" value={selected} onChange={event => selectTask(event.target.value)}>{tasks.map(item => <option key={item.id} value={item.id}>{item.instruction.slice(0, 80)}</option>)}</select></label>
 			<fieldset disabled={!editable}><legend>Prerequisites</legend><div className="dependency-options">{tasks.filter(item => item.id !== selected).map(item => <label key={item.id}><input type="checkbox" checked={dependencies.includes(item.id)} onChange={event => toggleDependency(item.id, event.target.checked)} /><span>{item.instruction}<small>{item.id} · {item.state}</small></span></label>)}</div></fieldset>
 			{preview.error && <p role="alert" className="dependency-error">{preview.error}</p>}
-			{running && <p role="status">Dependencies can be edited when the plan is idle.</p>}
+			{!editable && <p role="status">Dependencies can be edited only on a pending execution plan. The scheduling preview remains available.</p>}
 			<button type="button" className="primary-button" disabled={!editable || !changed || !!preview.error} onClick={() => postToHost({ type: 'set-dependencies', taskId: selected, dependencies: [...dependencies], expectedRevision: revision })}>Apply Dependencies</button>
 		</div>
 		<div className="dependency-preview" aria-label="Scheduling preview"><h3>Scheduling Preview</h3><p>Tasks in a wave have no prerequisite links to one another. Agent availability and file scope may limit concurrency.</p>
