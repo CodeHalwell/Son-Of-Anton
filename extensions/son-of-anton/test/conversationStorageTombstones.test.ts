@@ -22,8 +22,8 @@ async function fixture(run: (storage: ConversationStorage, directory: string, fo
 	try { await run(new ConversationStorage(directory, issue => issues.push(issue.message)), directory, path.join(directory, hash), path.join(directory, '.lifecycle', hash, 'deletion.json'), issues); }
 	finally { await fsp.rm(directory, { recursive: true, force: true }); }
 }
-function child(directory: string, script: string) {
-	const running = spawn(process.execPath, ['--require', 'tsx/cjs', '-e', `const { ConversationStorage, ConversationDeletedError } = require(process.argv[1]); const storage = new ConversationStorage(process.argv[2]); ${script}`, path.resolve('src/chat/ConversationStorage.ts'), directory], { stdio: ['pipe', 'pipe', 'pipe'] });
+function child(directory: string, scenario: { mode: 'reject' | 'stage'; record: ConversationRecord } | { mode: 'crash'; state: 'pending' | 'deleted' }) {
+	const running = spawn(process.execPath, ['--require', 'tsx/cjs', path.resolve('test/fixtures/conversationStorageWriter.ts'), directory, JSON.stringify(scenario)], { stdio: ['pipe', 'pipe', 'pipe'] });
 	let output = ''; let errors = ''; const staged = deferred();
 	running.stdout.on('data', data => { output += String(data); if (output.includes('staged')) { staged.resolve(); } });
 	running.stderr.on('data', data => { errors += String(data); });
@@ -40,7 +40,7 @@ suite('Permanent conversation tombstones', () => {
 			try {
 				await fsp.cp(folder, backup, { recursive: true }); await storage.delete('conversation');
 				await assert.rejects(new ConversationStorage(directory).save(before), ConversationDeletedError);
-				const writer = child(directory, `storage.save(${JSON.stringify(before)}).then(() => { throw new Error('Resurrected'); }).catch(error => { if (!(error instanceof ConversationDeletedError)) { console.error(error); process.exitCode = 1; } });`);
+				const writer = child(directory, { mode: 'reject', record: before });
 				await writer.done; assert.equal(fs.existsSync(folder), false);
 				await fsp.cp(backup, folder, { recursive: true });
 				assert.deepEqual({ load: storage.load('conversation'), list: storage.list(), asyncList: await storage.listAsync(), match: await storage.matches('conversation', 'retained') }, { load: undefined, list: [], asyncList: [], match: false });
@@ -53,7 +53,7 @@ suite('Permanent conversation tombstones', () => {
 	test('a staged writer in another process cannot commit across a pending delete barrier', async () => {
 		await fixture(async (storage, directory, _folder, marker) => {
 			await storage.save(record());
-			const writer = child(directory, `const lock = storage.withLifecycleLock.bind(storage); let calls = 0; storage.withLifecycleLock = async (id, operation) => { if (++calls === 2) { console.log('staged'); await new Promise(resolve => process.stdin.once('data', resolve)); } return lock(id, operation); }; storage.save(${JSON.stringify(record('stale body'))}).then(() => { throw new Error('Stale commit succeeded'); }).catch(error => { if (!/being deleted|permanently deleted/.test(error.message)) { console.error(error); process.exitCode = 1; } }).finally(() => process.stdin.destroy());`);
+			const writer = child(directory, { mode: 'stage', record: record('stale body') });
 			let deletion: Promise<void> | undefined;
 			try {
 				await writer.staged; const started = deferred(); const write = internal(storage).atomicWrite.bind(storage);
@@ -119,11 +119,11 @@ suite('Permanent conversation tombstones', () => {
 		});
 	});
 
-	for (const crashState of ['pending', 'deleted']) {
+	for (const crashState of ['pending', 'deleted'] as const) {
 		test(`process crash after ${crashState} marker recovers the correct durable state`, async () => {
 			await fixture(async (storage, directory, folder, marker) => {
 				await storage.save(record());
-				const writer = child(directory, `const write = storage.atomicWrite.bind(storage); storage.atomicWrite = async (file, body) => { await write(file, body); if (file.endsWith('deletion.json') && JSON.parse(body).state === '${crashState}') process.exit(0); }; storage.delete('conversation').catch(error => { console.error(error); process.exitCode = 1; });`);
+				const writer = child(directory, { mode: 'crash', state: crashState });
 				await writer.done; assert.equal(storage.isPermanentlyDeleted('conversation'), crashState === 'deleted');
 				await storage.cleanupDeleted();
 				assert.equal(fs.existsSync(marker), crashState === 'deleted'); assert.equal(fs.existsSync(folder), crashState === 'pending');

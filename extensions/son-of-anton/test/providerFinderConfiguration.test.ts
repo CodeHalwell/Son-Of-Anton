@@ -87,15 +87,15 @@ suite('Provider Finder configuration boundary', () => {
 			else { process.env.LMSTUDIO_API_KEY = 'private-key'; }
 			const snapshot = await finder.refresh({ force: true });
 			const provider = snapshot.providers.find(provider => provider.id === 'lmstudio')!;
-			assert.deepEqual([provider.catalogStatus, provider.credentialSource, provider.credentialStatus, provider.models.map(model => model.model), requests.some(request => request.url.startsWith('https://workspace.example'))], ['error', source, undefined, ['fixture-chat'], false]);
+			assert.deepEqual([provider.catalogStatus, provider.credentialSource, provider.credentialStatus, provider.models.map(model => model.model), requests.some(request => new URL(request.url).origin === 'https://workspace.example')], ['error', source, undefined, ['fixture-chat'], false]);
 			assert.match(provider.error ?? '', /endpoint in User settings/);
 			assert.equal(JSON.stringify(snapshot).includes('private-key'), false);
 			user.lmstudioBaseUrl = 'https://workspace.example:443/local/'; requests.length = 0;
 			assert.equal((await finder.refresh({ force: true })).providers.find(provider => provider.id === 'lmstudio')?.catalogStatus, 'ready');
-			assert.equal(requests.find(request => request.url.startsWith('https://workspace.example'))?.authorization, 'Bearer private-key');
+			assert.equal(requests.find(request => new URL(request.url).origin === 'https://workspace.example')?.authorization, 'Bearer private-key');
 			delete user.lmstudioBaseUrl; requests.length = 0;
 			assert.equal((await finder.refresh({ force: true })).providers.find(provider => provider.id === 'lmstudio')?.catalogStatus, 'error');
-			assert.equal(requests.some(request => request.authorization !== null || request.url.includes('workspace.example')), false);
+			assert.equal(requests.some(request => request.authorization !== null || new URL(request.url).hostname === 'workspace.example'), false);
 			workspace.lmstudioBaseUrl = 'http://localhost:1234'; requests.length = 0;
 			assert.equal((await finder.refresh({ force: true })).providers.find(provider => provider.id === 'lmstudio')?.catalogStatus, 'ready');
 			assert.deepEqual(requests.find(request => request.authorization !== null), { url: 'http://localhost:1234/api/v1/models', authorization: 'Bearer private-key', apiKey: null });
@@ -106,13 +106,13 @@ suite('Provider Finder configuration boundary', () => {
 		user.lmstudioBaseUrl = 'https://trusted.example/approved'; workspace.lmstudioBaseUrl = 'https://trusted.example/unapproved';
 		secrets.set('sota.secrets.lmstudioApiKey', 'private-key');
 		const provider = (await finder.refresh({ force: true })).providers.find(provider => provider.id === 'lmstudio')!;
-		assert.deepEqual([provider.catalogStatus, requests.some(request => request.url.startsWith('https://trusted.example'))], ['error', false]);
+		assert.deepEqual([provider.catalogStatus, requests.some(request => new URL(request.url).origin === 'https://trusted.example')], ['error', false]);
 	});
 
 	test('an authenticated workspace URL equivalent to the default server remains usable', async () => {
 		workspace.lmstudioBaseUrl = 'http://localhost:1234/'; secrets.set('sota.secrets.lmstudioApiKey', 'private-key');
 		assert.equal((await finder.refresh({ force: true })).providers.find(provider => provider.id === 'lmstudio')?.catalogStatus, 'ready');
-		assert.equal(requests.find(request => request.url.startsWith('http://localhost:1234'))?.authorization, 'Bearer private-key');
+		assert.equal(requests.find(request => new URL(request.url).origin === 'http://localhost:1234')?.authorization, 'Bearer private-key');
 	});
 
 	for (const source of ['secret-storage', 'environment', 'broker'] as const) {

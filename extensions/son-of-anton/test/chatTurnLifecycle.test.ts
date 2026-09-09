@@ -25,12 +25,13 @@ function deferred() {
 }
 
 interface TestSession {
+	postSystemMessage(text: string): void;
 	setupMessageHandler(): void;
 	currentModel: ModelId;
 	currentSpecialistId: string;
 	currentMode: string;
 	handleConversationDeleted(id: string): void;
-	handleSendMessage(message: { text: string; conversationId?: string; includeWorkspaceContext?: boolean; mentionsKinded?: NonNullable<ChatMessage['request']>['mentionsKinded']; attachments?: string[]; model?: ModelId; chatMode?: 'plan' | 'act'; images?: Array<{ mime: string; base64: string }> }): Promise<void>;
+	handleSendMessage(message: { text: string; requestId?: string; conversationId?: string; includeWorkspaceContext?: boolean; mentionsKinded?: NonNullable<ChatMessage['request']>['mentionsKinded']; attachments?: string[]; model?: ModelId; chatMode?: 'plan' | 'act'; images?: Array<{ mime: string; base64: string }> }): Promise<void>;
 	switchConversation(id: string): void;
 	clearConversation(): void;
 	abortInFlight(): void;
@@ -42,7 +43,7 @@ interface TestSession {
 function createSession() {
 	const messages: Array<{ type: string; [key: string]: unknown }> = [];
 	const models = new Map<string, ModelId>();
-	let receive: (message: { type: string; conversationId?: string; model?: ModelId; id?: string; specialistId?: string; chatMode?: string }) => Promise<void>;
+	let receive: (message: { type: string; conversationId?: string; model?: ModelId; id?: string; specialistId?: string; chatMode?: string; messageIndex?: number; responseId?: string; value?: string }) => Promise<void>;
 	const conversations = new Map<string, ChatMessage[]>([['first', []], ['second', []]]);
 	const started = new Map<string, ReturnType<typeof deferred>>();
 	const releases = new Map<string, ReturnType<typeof deferred>>();
@@ -56,6 +57,7 @@ function createSession() {
 		search() { return { items: this.list(), total: conversations.size }; },
 		async searchAsync() { return this.search(); },
 		getInitialConversation: () => { const id = conversations.keys().next().value; return id ? { summary: { id }, messages: conversations.get(id) ?? [] } : undefined; },
+		loadMessage: (id: string, index: number) => conversations.get(id)?.[index],
 		load: (id: string) => conversations.has(id) ? ({ summary: { id, lastModel: models.get(id) }, messages: conversations.get(id) ?? [] }) : undefined,
 		create: () => { conversations.set('fresh', []); return { summary: { id: 'fresh' }, messages: [] }; },
 	};
@@ -76,7 +78,7 @@ function createSession() {
 			},
 		},
 	}) as TestSession;
-	function send(text: string, extra: { includeWorkspaceContext?: boolean } = {}) {
+	function send(text: string, extra: { includeWorkspaceContext?: boolean; requestId?: string } = {}) {
 		const ready = deferred(); const release = deferred();
 		started.set(text, ready); releases.set(text, release);
 		return { done: session.handleSendMessage({ text, ...extra }), ready: ready.promise, release: release.resolve, emit: (event: AgentEvent) => emitters.get(text)?.(event) };
@@ -154,6 +156,93 @@ async function withCatalogNativeSession(
 }
 
 suite('Chat turn ownership', () => {
+	test('webview bootstrap replays the active binding and available transcript text without restarting', async () => {
+		const f = createSession();
+		Object.assign(f.session, { postHistorySnapshot() {}, postBoardSnapshot() {}, postCheckpointsForCurrentConversation() {}, refreshConnectionState: async () => {} });
+		const request = f.send('Reload question', { requestId: 'reloaded-request' }); await request.ready;
+		request.emit({ type: 'token', token: 'Before reload. ' });
+		await f.receive({ type: 'webviewReady' });
+		const resumed = f.messages.find(message => message.type === 'turnResumed')!;
+		assert.deepEqual({ requestId: resumed.requestId, userMessageIndex: resumed.userMessageIndex, assistantMessageIndex: resumed.assistantMessageIndex, partialText: resumed.partialText }, { requestId: 'reloaded-request', userMessageIndex: 0, assistantMessageIndex: undefined, partialText: 'Before reload. ' });
+		const loaded = f.messages.find(message => message.type === 'loadConversation')!;
+		assert.deepEqual((loaded.messages as Array<{ role: string; persistedIndex: number }>).map(message => ({ role: message.role, index: message.persistedIndex })), [{ role: 'user', index: 0 }]);
+		request.emit({ type: 'token', token: 'After reload.' }); request.release(); await request.done;
+		assert.equal(f.messages.find(message => message.type === 'messagePersisted' && message.role === 'assistant')?.turnId, resumed.turnId);
+		assert.equal(f.conversations.get('first')?.[1].content, 'Before reload. After reload.');
+	});
+
+	test('only actual saved assistant rows receive action identities after rejected or local sends', async () => {
+		for (const rejection of ['slash', 'hook', 'cap', 'context', 'image']) {
+			const f = createSession();
+			if (rejection === 'hook') Object.assign(f.session, { hookRunner: { fire: async () => ({ allowed: false }) } });
+			if (rejection === 'cap') Object.assign(f.session, { spendGuard: { checkSessionCap: () => ({ blocked: true, currentUsd: 1, capUsd: 1 }) } });
+			if (rejection === 'context') f.session.workspaceContext = { collect: async () => { throw new Error('Unavailable'); } };
+			await f.session.handleSendMessage({ text: rejection === 'slash' ? '/help' : 'Rejected', requestId: 'rejected', ...(rejection === 'image' ? { images: [{ mime: 'invalid', base64: 'invalid' }] } : {}) });
+			assert.equal(f.messages.some(message => message.type === 'messagePersisted'), false, rejection);
+			Object.assign(f.session, { hookRunner: undefined, spendGuard: undefined, workspaceContext: undefined });
+			for (const requestId of ['first-success', 'second-success']) {
+				const request = f.send(requestId, { requestId, includeWorkspaceContext: false }); await request.ready;
+				request.emit({ type: 'token', token: `Answer to ${requestId}` });
+				if (requestId === 'first-success') f.session.postSystemMessage('Settings changed during the response');
+				request.release(); await request.done;
+			}
+			const responses = f.messages.filter(message => message.type === 'messagePersisted' && message.role === 'assistant');
+			assert.equal(responses.length, 2);
+			for (const response of responses) {
+				const index = Number(response.messageIndex);
+				assert.equal(f.store.load('first')?.messages[index].content, `Answer to ${response.requestId}`);
+				assert.ok(f.messages.indexOf(response) > f.messages.findIndex(message => message.type === 'messageComplete' && message.turnId === response.turnId));
+				assert.ok(f.messages.filter(message => message.requestId === response.requestId && ['streamToken', 'messageMetrics', 'messageComplete', 'requestSettled'].includes(message.type)).every(message => message.turnId === response.turnId && message.conversationId === 'first'));
+			}
+			await f.receive({ type: 'feedback', conversationId: 'first', messageIndex: Number(responses[1].messageIndex), responseId: String(responses[0].responseId), value: 'down' });
+			await f.receive({ type: 'feedback', conversationId: 'first', messageIndex: Number(responses[1].messageIndex), value: 'down' });
+			await f.receive({ type: 'feedback', conversationId: 'first', messageIndex: Number(responses[0].messageIndex), responseId: String(responses[0].responseId), value: 'up' });
+			assert.deepEqual(f.store.load('first')?.messages.filter(message => message.role === 'assistant').map(message => message.feedback), ['up', undefined]);
+		}
+	});
+
+	test('branch and feedback reject stale, replaced, missing and non-assistant store identities', async () => {
+		const f = createSession(); const request = f.send('saved', { requestId: 'saved' }); await request.ready;
+		request.emit({ type: 'token', token: 'Saved response' }); request.release(); await request.done;
+		const ack = f.messages.find(message => message.type === 'messagePersisted' && message.role === 'assistant')!;
+		const identity = { conversationId: 'first', messageIndex: Number(ack.messageIndex), responseId: String(ack.responseId) };
+		const commands: unknown[][] = []; const execute = vscode.commands.executeCommand;
+		Object.assign(vscode.commands, { executeCommand: async (...args: unknown[]) => { commands.push(args); } });
+		try {
+			for (const invalid of [{ ...identity, responseId: undefined }, { ...identity, conversationId: 'second' }, { ...identity, messageIndex: 0 }, { ...identity, responseId: 'invented' }]) await f.receive({ type: 'branchResponse', ...invalid });
+			assert.deepEqual(commands, []);
+			await f.receive({ type: 'branchResponse', ...identity }); assert.deepEqual(commands, [['sota.branchConversation', 'first', 1]]);
+			const original = f.conversations.get('first')!;
+			f.conversations.set('first', [original[0], { role: 'system', content: original[1].content, timestamp: original[1].timestamp }]);
+			await f.receive({ type: 'branchResponse', ...identity }); await f.receive({ type: 'feedback', ...identity, value: 'down' });
+			assert.equal(commands.length, 1); assert.equal(original[1].feedback, undefined);
+			f.conversations.set('first', original); Object.assign(f.session, { conversation: original.map(message => ({ ...message })) });
+			await f.receive({ type: 'branchResponse', ...identity }); assert.equal(commands.length, 1, 'a replaced transcript needs freshly issued references');
+		} finally { Object.assign(vscode.commands, { executeCommand: execute }); }
+	});
+
+	test('native completion cannot grant an identity before iterator cleanup or for an unpersisted error', async () => {
+		for (const outcome of ['completed', 'empty', 'throw']) {
+			const gate = deferred(); const complete = deferred();
+			await withNativeSession({}, async function* () {
+				if (outcome !== 'empty') yield { type: 'token', token: 'Native response' };
+				if (outcome === 'throw') throw new Error('Stream failed after text');
+				yield { type: 'complete', fullText: outcome === 'empty' ? '' : 'Native response', stopReason: 'end_turn', inputTokens: 1, outputTokens: 1, cachedTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 };
+				complete.resolve(); await gate.promise;
+			}, async f => {
+				const done = f.session.handleSendMessage({ text: 'Native question', requestId: outcome, includeWorkspaceContext: false });
+				if (outcome !== 'throw') {
+					await complete.promise;
+					assert.equal(f.messages.some(message => message.type === 'messageComplete'), true);
+					assert.equal(f.messages.some(message => message.type === 'messagePersisted' && message.role === 'assistant'), false);
+					gate.resolve();
+				}
+				await done;
+				assert.equal(f.messages.filter(message => message.type === 'messagePersisted' && message.role === 'assistant').length, outcome === 'completed' ? 1 : 0);
+			});
+		}
+	});
+
 	test('direct chat sends tools only for confirmed capability, while text and vision still work', async () => {
 		for (const scenario of [
 			{ tools: 'unknown', mode: 'act' },
@@ -255,7 +344,7 @@ suite('Chat turn ownership', () => {
 		}, async fixture => {
 			await fixture.session.handleSendMessage({ text: 'Slow response', includeWorkspaceContext: false });
 			const response = fixture.conversations.get('first')?.at(-1);
-			assert.deepEqual({ aborted: fixture.requests[0]?.aborted, content: response?.content, outcome: response?.execution?.outcome, settled: fixture.messages.filter(message => message.type === 'requestSettled'), currentController: fixture.session.abortController, completed: fixture.messages.some(message => message.type === 'messageComplete') }, { aborted: true, content: 'Useful partial answer', outcome: 'failed', settled: [{ type: 'requestSettled', cancelled: true }], currentController: undefined, completed: false });
+			assert.deepEqual({ aborted: fixture.requests[0]?.aborted, content: response?.content, outcome: response?.execution?.outcome, settled: fixture.messages.filter(message => message.type === 'requestSettled').map(({ type, cancelled }) => ({ type, cancelled })), currentController: fixture.session.abortController, completed: fixture.messages.some(message => message.type === 'messageComplete') }, { aborted: true, content: 'Useful partial answer', outcome: 'failed', settled: [{ type: 'requestSettled', cancelled: true }], currentController: undefined, completed: false });
 			assert.match(String(fixture.messages.find(message => message.type === 'streamError')?.error), /runtime limit/);
 		});
 	});
@@ -265,7 +354,7 @@ suite('Chat turn ownership', () => {
 			await fixture.session.handleSendMessage({ text: 'Wait for approval', includeWorkspaceContext: false });
 			const response = fixture.conversations.get('first')?.at(-1);
 			assert.deepEqual({ content: response?.content, outcome: response?.execution?.outcome }, { content: 'Investigation before the tool', outcome: 'failed' });
-			assert.deepEqual({ requests: fixture.requests.length, aborted: fixture.requests[0]?.aborted, approvalRequested: fixture.messages.some(message => message.type === 'approvalRequest'), pendingApprovals: fixture.pendingApprovals.size, executed: fixture.executed, settled: fixture.messages.filter(message => message.type === 'requestSettled'), currentController: fixture.session.abortController }, { requests: 1, aborted: true, approvalRequested: true, pendingApprovals: 0, executed: [], settled: [{ type: 'requestSettled', cancelled: true }], currentController: undefined });
+			assert.deepEqual({ requests: fixture.requests.length, aborted: fixture.requests[0]?.aborted, approvalRequested: fixture.messages.some(message => message.type === 'approvalRequest'), pendingApprovals: fixture.pendingApprovals.size, executed: fixture.executed, settled: fixture.messages.filter(message => message.type === 'requestSettled').map(({ type, cancelled }) => ({ type, cancelled })), currentController: fixture.session.abortController }, { requests: 1, aborted: true, approvalRequested: true, pendingApprovals: 0, executed: [], settled: [{ type: 'requestSettled', cancelled: true }], currentController: undefined });
 			assert.match(String(fixture.messages.find(message => message.type === 'streamError')?.error), /runtime limit/);
 		});
 	});
@@ -354,7 +443,7 @@ suite('Chat turn ownership', () => {
 		second.emit({ type: 'token', token: 'Current response' });
 		second.release(); await second.done;
 		assert.deepEqual(fixture.conversations.get('second')?.map(message => message.content), ['second request', 'Current response']);
-		assert.equal(fixture.messages.filter(message => message.type === 'requestSettled').length, 1);
+		assert.equal(fixture.messages.filter(message => message.type === 'requestSettled').map(({ type, cancelled }) => ({ type, cancelled })).length, 1);
 	});
 
 	test('switching during context collection prevents the old prompt from being persisted or dispatched', async () => {
@@ -376,7 +465,7 @@ suite('Chat turn ownership', () => {
 		fixture.session.abortInFlight();
 		request.emit({ type: 'token', token: ' ignored after stop' });
 		request.release(); await request.done;
-		assert.deepEqual(fixture.messages.filter(message => message.type === 'requestSettled'), [{ type: 'requestSettled', cancelled: true }]);
+		assert.deepEqual(fixture.messages.filter(message => message.type === 'requestSettled').map(({ type, cancelled }) => ({ type, cancelled })), [{ type: 'requestSettled', cancelled: true }]);
 		assert.deepEqual(fixture.conversations.get('first')?.map(message => message.content), ['cancel me', 'Partial response']);
 	});
 
@@ -421,6 +510,6 @@ suite('Chat turn ownership', () => {
 		const fixture = createSession();
 		fixture.session.workspaceContext = { collect: async () => { throw new Error('workspace unavailable'); } };
 		await fixture.session.handleSendMessage({ text: 'request' });
-		assert.deepEqual(fixture.messages, [{ type: 'streamError', error: 'workspace unavailable' }, { type: 'requestSettled', cancelled: false }]);
+		assert.deepEqual(fixture.messages.filter(message => message.type !== 'turnAccepted').map(({ conversationId: _conversation, requestId: _request, turnId: _turn, ...message }) => message), [{ type: 'streamError', error: 'workspace unavailable' }, { type: 'requestSettled', cancelled: false }]);
 	});
 });

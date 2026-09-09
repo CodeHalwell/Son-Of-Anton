@@ -6,6 +6,8 @@ The impact classifier now uses separate directory and filename predicates, with 
 
 The later completed analysis of review commit `7e43e3af174` (analysis `1747608782`, merge commit `3b7a1f283c09105c54586b90af1a6f516c17b145`) reported zero results without analysis errors or warnings. GitHub marked all five earlier alerts fixed on the PR. The provider-boundary rationale below remains documented; no alert was suppressed or dismissed.
 
+The subsequent analysis of `2e7de85d5bf` (analysis `1747912351`, merge `4e1b074d239888bf4f3351a653e7c5bc6352d08c`) flagged four test-fixture patterns while the five earlier alerts remained fixed. Provider tests now compare parsed URL origins and hostnames exactly. Conversation subprocess tests pass records as data rather than interpolating them into executable code. These changes strengthen the assertions and fixture boundary; the findings were not suppressed or dismissed.
+
 ## Provider catalog network boundary
 
 CodeQL alerts [787](https://github.com/CodeHalwell/Son-Of-Anton/security/code-scanning/787) and [788](https://github.com/CodeHalwell/Son-Of-Anton/security/code-scanning/788) trace the CLI's JSON settings reader into the catalog request URL and authorization header. These are intentional uses of a user's configured provider endpoint and credential. The alerts have not been suppressed or dismissed.

@@ -12,7 +12,7 @@ import type { ConversationStore } from '../src/chat/ConversationStore';
 import type { AgentEvent } from '../src/chat/agentEvents';
 import type { ModelId } from 'son-of-anton-core/llm/LlmClient';
 
-type Draft = { images?: Array<{ mime: string; base64: string }>; type: string; id?: string; text?: string; conversationId?: string; contextSnapshotId?: string; attachments?: string[]; excludedContext?: string[]; queueAction?: 'pause' | 'resume' | 'edit' | 'remove' | 'up' | 'down'; messageIndex?: number; value?: string };
+type Draft = { images?: Array<{ mime: string; base64: string }>; type: string; id?: string; text?: string; conversationId?: string; contextSnapshotId?: string; attachments?: string[]; excludedContext?: string[]; queueAction?: 'pause' | 'resume' | 'edit' | 'remove' | 'up' | 'down'; messageIndex?: number; responseId?: string; value?: string };
 type Output = { type: string; [key: string]: unknown };
 function deferred<T = void>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
 const tick = () => new Promise<void>(resolve => setImmediate(resolve));
@@ -37,6 +37,7 @@ function fixture() {
 	const store = {
 		rememberActive() {},
 		update: (id: string, messages: ChatMessage[]) => conversations.set(id, [...messages]),
+		loadMessage: (id: string, index: number) => conversations.get(id)?.[index],
 		load: (id: string) => conversations.has(id) ? { summary: { id }, messages: conversations.get(id)! } : undefined,
 		create: () => { conversations.set('fresh', []); return { summary: { id: 'fresh' }, messages: [] }; },
 	};
@@ -200,12 +201,13 @@ suite('Chat workflow upgrades', () => {
 	});
 
 	test('response feedback ignores stale conversations and user messages', async () => {
-		const f = fixture(); f.session.conversation.push({ role: 'user', content: 'Question', timestamp: 1 }, { role: 'assistant', content: 'Answer', timestamp: 2 });
-		await f.receive({ type: 'feedback', conversationId: 'second', messageIndex: 1, value: 'down' });
-		await f.receive({ type: 'feedback', conversationId: 'first', messageIndex: 0, value: 'up' });
-		await f.receive({ type: 'feedback', conversationId: 'first', messageIndex: 1, value: 'up' });
+		const f = fixture(); await f.session.handleSendMessage({ type: 'sendMessage', text: 'Question' });
+		const responseId = String(f.outputs.find(message => message.type === 'messagePersisted' && message.role === 'assistant')?.responseId);
+		await f.receive({ type: 'feedback', conversationId: 'second', messageIndex: 1, responseId, value: 'down' });
+		await f.receive({ type: 'feedback', conversationId: 'first', messageIndex: 0, responseId, value: 'up' });
+		await f.receive({ type: 'feedback', conversationId: 'first', messageIndex: 1, responseId, value: 'up' });
 		assert.deepEqual(f.session.conversation.map(message => message.feedback), [undefined, 'up']);
-		await f.receive({ type: 'feedback', conversationId: 'first', messageIndex: 1, value: '' }); assert.equal(f.session.conversation[1].feedbackAt, undefined);
+		await f.receive({ type: 'feedback', conversationId: 'first', messageIndex: 1, responseId, value: '' }); assert.equal(f.session.conversation[1].feedbackAt, undefined);
 	});
 
 	test('feedback export contains rated text and honest limits, excludes image bytes and unrated turns', async () => {

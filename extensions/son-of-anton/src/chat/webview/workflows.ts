@@ -39,12 +39,12 @@ export function renderQueue(root: HTMLElement, entries: Array<{ id: string; labe
 /** A typed, keyboard-accessible action toolbar shared by live and restored responses. */
 export function responseActions(options: {
 	text: Text; copy: () => void; reuse: () => void; branch: () => void;
-	feedback: (value: 'up' | 'down' | '') => void; rating?: 'up' | 'down'; canReuse: boolean; busy: boolean;
+	feedback: (value: 'up' | 'down' | '') => void; rating?: 'up' | 'down'; canReuse: boolean; canPersist: boolean; busy: boolean; branchBusy: boolean;
 }): HTMLElement {
 	const bar = document.createElement('div'); bar.className = 'msg-actions'; bar.setAttribute('role', 'toolbar'); bar.setAttribute('aria-label', options.text('messageActions'));
 	const copy = button(options.text('copyMessage'), options.copy); copy.className = 'msg-action';
 	const reuse = button(options.text('reusePrompt'), options.reuse); reuse.className = 'msg-action msg-action-reuse'; reuse.disabled = options.busy; reuse.hidden = !options.canReuse;
-	const branch = button(options.text('branchHere'), options.branch); branch.className = 'msg-action msg-action-branch'; branch.disabled = options.busy;
+	const branch = button(options.text('branchHere'), options.branch); branch.className = 'msg-action msg-action-branch'; branch.disabled = options.busy || options.branchBusy; branch.hidden = !options.canPersist;
 	bar.append(copy, reuse, branch);
 	let rating = options.rating;
 	const votes = new Map<'up' | 'down', HTMLButtonElement>();
@@ -54,7 +54,7 @@ export function responseActions(options: {
 			for (const [key, vote] of votes) { vote.setAttribute('aria-pressed', String(rating === key)); vote.classList.toggle('is-active', rating === key); }
 			options.feedback(rating ?? '');
 		});
-		control.className = 'msg-action msg-action-fb'; control.setAttribute('aria-pressed', String(rating === value)); control.classList.toggle('is-active', rating === value);
+		control.hidden = !options.canPersist; control.className = 'msg-action msg-action-fb'; control.setAttribute('aria-pressed', String(rating === value)); control.classList.toggle('is-active', rating === value);
 		votes.set(value, control); bar.append(control);
 	}
 	bar.addEventListener('keydown', event => {

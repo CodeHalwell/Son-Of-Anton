@@ -1110,7 +1110,7 @@ test('dependency drafts reset atomically when switching tasks or receiving a new
 
 test('bounded timeline evicts both ends while preserving response drafts, votes and checkpoints', async t => {
 	const page = await openSurface(t, 'chat', 420);
-	const messages = Array.from({ length: 1000 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `Message ${index}`, timestamp: index + 1, ...(index % 2 ? {} : { request: { text: `Prompt ${index}`, attachments: ['terminal-output'], includeWorkspaceContext: false } }) }));
+	const messages = Array.from({ length: 1000 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `Message ${index}`, timestamp: index + 1, ...(index % 2 ? { responseId: `saved-${index}` } : { request: { text: `Prompt ${index}`, attachments: ['terminal-output'], includeWorkspaceContext: false } }) }));
 	await post(page, { type: 'loadConversation', conversationId: 'windowed', messages }); await frames(page);
 	await post(page, { type: 'checkpointsLoaded', checkpoints: [{ checkpointId: 'older-checkpoint', turnIndex: 0, capturedAt: Date.now(), summary: 'Before first turn' }] });
 	const first = page.locator('.msg[data-conversation-index="0"]');
@@ -1383,4 +1383,140 @@ test('an assistant without any preceding user cannot reuse a later incomplete re
 	await page.getByRole('button', { name: /Show Earlier Messages/ }).click(); await frames(page);
 	assert.equal(await orphan.getByRole('button', { name: 'Reuse Prompt', exact: true }).count(), 0);
 	assert.equal(await page.locator('#messageInput').inputValue(), '');
+});
+
+test('response actions wait for persisted identities and ignore visual offsets and stale terminal events', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const conversationId = 'action-identities';
+	await post(page, { type: 'loadConversation', conversationId, messages: [] });
+	async function send(text, turnId) {
+		await page.locator('#messageInput').fill(text); await page.locator('#sendBtn').click();
+		const request = await page.evaluate(() => sentMessages.findLast(message => message.type === 'sendMessage'));
+		const identity = { conversationId, requestId: request.requestId, turnId };
+		await post(page, { type: 'turnAccepted', ...identity });
+		return identity;
+	}
+	const rejected = await send('/help', 'local-command');
+	await post(page, { type: 'systemMessage', conversationId, persistedIndex: 0, content: 'Local command help' });
+	await post(page, { type: 'requestSettled', ...rejected, cancelled: false });
+	const provisional = page.locator('.msg-assistant').first();
+	assert.equal(await provisional.getByRole('button', { name: 'Branch Here', exact: true }).count(), 0);
+	assert.equal(await provisional.getByRole('button', { name: 'Mark Response as Helpful', exact: true }).count(), 0);
+	assert.equal(await provisional.getByRole('button', { name: 'Reuse Prompt', exact: true }).count(), 1);
+	const first = await send('First saved question', 'first-saved');
+	await post(page, { type: 'checkpointCaptured', ...first, checkpointId: 'first-checkpoint', turnIndex: 1, capturedAt: Date.now() });
+	await post(page, { type: 'messagePersisted', ...first, role: 'user', messageIndex: 1 });
+	const user = page.locator('.msg-user[data-persisted-index="1"]');
+	assert.equal(await user.getAttribute('data-conversation-index'), '3');
+	assert.equal(await user.evaluate(node => node.nextElementSibling?.dataset.checkpointId), 'first-checkpoint');
+	await post(page, { type: 'streamToken', ...first, token: '**First saved answer**' });
+	await post(page, { type: 'systemMessage', conversationId, persistedIndex: 2, content: 'Settings changed while streaming' });
+	await post(page, { type: 'messageComplete', ...first });
+	const firstResponse = page.locator('.msg-assistant[data-request-id="' + first.requestId + '"]');
+	assert.equal(await firstResponse.getByRole('button', { name: 'Mark Response as Helpful', exact: true }).count(), 0);
+	await firstResponse.getByRole('button', { name: 'Copy Message', exact: true }).click();
+	assert.equal(await page.evaluate(() => sentMessages.at(-1).text), '**First saved answer**');
+	const second = await send('Second saved question', 'second-saved');
+	await post(page, { type: 'messagePersisted', ...second, role: 'user', messageIndex: 4 });
+	await post(page, { type: 'messagePersisted', ...first, role: 'assistant', messageIndex: 3, responseId: 'first-response-reference' });
+	await post(page, { type: 'messageMetrics', ...first, model: 'haiku', inputTokens: 17, outputTokens: 8 });
+	await post(page, { type: 'streamError', ...first, error: 'Late stale error' });
+	await post(page, { type: 'requestSettled', ...first });
+	assert.equal(await page.locator('#sendBtn').getAttribute('aria-label'), 'Stop generating');
+	assert.equal(await page.locator('.msg').filter({ hasText: 'Late stale error' }).count(), 0);
+	assert.equal(await firstResponse.getAttribute('data-input-tokens'), '17');
+	assert.equal(await firstResponse.getAttribute('data-persisted-index'), '3');
+	await post(page, { type: 'streamToken', ...second, token: 'Second saved answer' });
+	await post(page, { type: 'messageComplete', ...second });
+	await post(page, { type: 'messagePersisted', ...second, role: 'assistant', messageIndex: 5, responseId: 'second-response-reference' });
+	await post(page, { type: 'requestSettled', ...second });
+	await firstResponse.getByRole('button', { name: 'Mark Response as Helpful', exact: true }).click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'feedback', conversationId, messageIndex: 3, responseId: 'first-response-reference', value: 'up' });
+	await firstResponse.getByRole('button', { name: 'Branch Here', exact: true }).click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'branchResponse', conversationId, messageIndex: 3, responseId: 'first-response-reference' });
+	await firstResponse.getByRole('button', { name: 'Reuse Prompt', exact: true }).click();
+	assert.equal(await page.locator('#messageInput').inputValue(), 'First saved question');
+	assert.equal(await provisional.getByRole('button', { name: 'Mark Response as Helpful', exact: true }).count(), 0);
+	await firstResponse.evaluate(node => { window.staleBranch = node.querySelector('.msg-action-branch'); });
+	await post(page, { type: 'loadConversation', conversationId: 'different', messages: [] });
+	const before = await page.evaluate(() => sentMessages.length);
+	await page.evaluate(() => window.staleBranch.click());
+	await post(page, { type: 'messagePersisted', ...first, role: 'assistant', messageIndex: 0, responseId: 'stale' });
+	assert.equal(await page.evaluate(() => sentMessages.length), before);
+	assert.equal(await page.locator('.msg').count(), 0);
+});
+
+test('queued retries retain distinct response identities across bounded timeline eviction', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const conversationId = 'retry-history';
+	await post(page, { type: 'loadConversation', conversationId, messages: Array.from({ length: 600 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `Saved ${index}`, responseId: index % 2 ? `history-${index}` : undefined })) });
+	async function dispatch(requestId, turnId) {
+		const identity = { conversationId, requestId, turnId };
+		await post(page, { type: 'dispatchQueuedDraft', conversationId, draft: { text: 'Retry this question', requestId, includeWorkspaceContext: false } });
+		await post(page, { type: 'turnAccepted', ...identity });
+		return identity;
+	}
+	const failed = await dispatch('queue-failed-attempt', 'failed-turn');
+	await post(page, { type: 'streamError', ...failed, error: 'Context unavailable' });
+	await post(page, { type: 'requestSettled', ...failed });
+	const retry = await dispatch('queue-successful-attempt', 'retry-turn');
+	await post(page, { type: 'messagePersisted', ...retry, role: 'user', messageIndex: 600 });
+	await post(page, { type: 'streamToken', ...retry, token: '## Saved retry answer' });
+	for (let i = 0; i < 4; i++) { await page.getByRole('button', { name: /Show Earlier Messages/ }).click(); await frames(page); }
+	await post(page, { type: 'messageComplete', ...retry }); await frames(page);
+	assert.equal(await page.locator('.msg-assistant[data-request-id="queue-successful-attempt"]').count(), 0);
+	await post(page, { type: 'messagePersisted', ...retry, role: 'assistant', messageIndex: 601, responseId: 'saved-retry-reference' });
+	await post(page, { type: 'requestSettled', ...retry });
+	await page.getByRole('button', { name: 'Jump to Latest Messages', exact: true }).click(); await frames(page);
+	const response = page.locator('.msg-assistant[data-request-id="queue-successful-attempt"]');
+	const rejected = page.locator('.msg-assistant[data-request-id="queue-failed-attempt"]');
+	assert.equal(await response.getAttribute('data-conversation-index'), '603');
+	assert.equal(await response.getAttribute('data-persisted-index'), '601');
+	assert.equal(await rejected.getAttribute('data-conversation-index'), '601');
+	assert.equal(await rejected.getAttribute('data-persisted-index'), null);
+	assert.equal(await rejected.getByRole('button', { name: 'Mark Response as Helpful', exact: true }).count(), 0);
+	assert.equal(await rejected.getByRole('button', { name: 'Reuse Prompt', exact: true }).count(), 1);
+	await response.getByRole('button', { name: 'Mark Response as Helpful', exact: true }).click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'feedback', conversationId, messageIndex: 601, responseId: 'saved-retry-reference', value: 'up' });
+	await response.getByRole('button', { name: 'Copy Message', exact: true }).click();
+	assert.equal(await page.evaluate(() => sentMessages.at(-1).text), '## Saved retry answer');
+	assert.ok(await page.locator('.msg').count() <= 300);
+	await assertNoPageOverflow(page);
+});
+
+test('active turn reload rebinds saved rows and stale host acceptance cannot replace a newer send', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const identity = { conversationId: 'reloaded-turn', requestId: 'original-request', turnId: 'original-turn' };
+	const user = { role: 'user', content: 'Reload question', timestamp: 1 };
+	await post(page, { type: 'loadConversation', conversationId: identity.conversationId, messages: [user] });
+	await post(page, { type: 'turnResumed', ...identity, userMessageIndex: 0, partialText: 'Before reload. ', draft: { text: user.content } });
+	await post(page, { type: 'streamToken', ...identity, token: 'After reload.' });
+	await post(page, { type: 'messageComplete', ...identity });
+	await post(page, { type: 'messagePersisted', ...identity, role: 'assistant', messageIndex: 1, responseId: 'resumed-reference' });
+	await post(page, { type: 'requestSettled', ...identity });
+	assert.equal(await page.locator('.msg-user').count(), 1);
+	assert.equal(await page.locator('.msg-assistant').count(), 1);
+	assert.match(await page.locator('.msg-assistant').innerText(), /Before reload\. After reload\./);
+	await page.getByRole('button', { name: 'Branch Here', exact: true }).click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'branchResponse', conversationId: identity.conversationId, messageIndex: 1, responseId: 'resumed-reference' });
+	const saved = { role: 'assistant', content: 'Already saved at reload', timestamp: 2, responseId: 'loaded-reference' };
+	await post(page, { type: 'loadConversation', conversationId: identity.conversationId, messages: [user, saved] });
+	await post(page, { type: 'turnResumed', ...identity, userMessageIndex: 0, assistantMessageIndex: 1, partialText: saved.content });
+	assert.equal(await page.getByRole('button', { name: 'Branch Here', exact: true }).isDisabled(), true, 'branch must wait for host settlement even when the response was saved');
+	await post(page, { type: 'requestSettled', ...identity });
+	assert.equal(await page.getByRole('button', { name: 'Branch Here', exact: true }).isDisabled(), false);
+	assert.equal(await page.locator('.msg').count(), 2, 'reload after saving must not duplicate the saved response');
+	assert.equal(await page.getByRole('button', { name: 'Branch Here', exact: true }).count(), 1);
+	await page.locator('#messageInput').fill('New local request'); await page.locator('#sendBtn').click();
+	const local = await page.evaluate(() => sentMessages.findLast(message => message.type === 'sendMessage'));
+	await post(page, { type: 'turnAccepted', conversationId: identity.conversationId, requestId: 'old-ui-block-request', turnId: 'old-ui-block-turn', draft: { text: 'Older synthetic question' } });
+	const current = { conversationId: identity.conversationId, requestId: local.requestId, turnId: 'new-local-turn' };
+	await post(page, { type: 'turnAccepted', ...current });
+	await post(page, { type: 'streamToken', ...current, token: 'New local answer' });
+	await post(page, { type: 'messageComplete', ...current });
+	await post(page, { type: 'messagePersisted', ...current, role: 'assistant', messageIndex: 3, responseId: 'local-reference' });
+	assert.equal(await page.locator('.msg').filter({ hasText: 'Older synthetic question' }).count(), 0);
+	assert.match(await page.locator('.msg-assistant').last().innerText(), /New local answer/);
+	await page.locator('.msg-assistant').last().getByRole('button', { name: 'Mark Response as Helpful', exact: true }).click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'feedback', conversationId: identity.conversationId, messageIndex: 3, responseId: 'local-reference', value: 'up' });
 });

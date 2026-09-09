@@ -39,6 +39,7 @@ import {
 } from '../onboarding/mcpServerSaver';
 import { WriteSnapshotStore } from './WriteSnapshotStore';
 import * as path from 'path';
+import { randomUUID } from 'node:crypto';
 
 /**
  * A single structured content part attached to a chat message. Mirrors the
@@ -92,6 +93,12 @@ type KindedMention =
 	| { kind: 'url'; url?: string };
 
 interface ChatTurn {
+	readonly turnId: string;
+	readonly requestId: string;
+	readonly draft: WebviewMessage;
+	userMessageIndex?: number;
+	assistantMessageIndex?: number;
+	getPartialText?: () => string;
 	readonly controller: AbortController;
 	readonly conversationId: string;
 	failed?: boolean;
@@ -106,6 +113,8 @@ interface WebviewMessage {
 	contextSnapshotId?: string;
 	excludedContext?: string[];
 	messageIndex?: number;
+	responseId?: string;
+	requestId?: string;
 	queueAction?: 'remove' | 'edit' | 'up' | 'down' | 'resume' | 'pause';
 	type: string;
 	integrationId?: string;
@@ -352,6 +361,7 @@ export class ChatSession {
 	private conversation: ChatMessage[] = [];
 	private currentConversationId: string;
 	private abortController: AbortController | undefined;
+	private activeTurn?: ChatTurn;
 	private readonly disposables: vscode.Disposable[] = [];
 	private disposed = false;
 	private currentSpecialistId: string = 'anton';
@@ -534,7 +544,7 @@ export class ChatSession {
 			this.webview.postMessage({
 				type: 'loadConversation',
 				conversationId: this.currentConversationId,
-				messages: this.conversation,
+				messages: this.messagesForWebview(),
 				lastSpecialist: this.currentSpecialistId,
 				lastMode: this.currentMode,
 				lastModel: this.currentModel,
@@ -1335,7 +1345,7 @@ export class ChatSession {
 		this.webview.postMessage({
 			type: 'loadConversation',
 			conversationId: this.currentConversationId,
-			messages: this.conversation,
+			messages: this.messagesForWebview(),
 			lastSpecialist: this.currentSpecialistId,
 			lastMode: this.currentMode,
 			lastModel: this.currentModel,
@@ -1399,7 +1409,7 @@ export class ChatSession {
 		this.webview.postMessage({
 			type: 'loadConversation',
 			conversationId: this.currentConversationId,
-			messages: this.conversation,
+			messages: this.messagesForWebview(),
 			lastSpecialist: this.currentSpecialistId,
 			lastMode: this.currentMode,
 			lastModel: this.currentModel,
@@ -1583,7 +1593,7 @@ export class ChatSession {
 		};
 		this.conversation.push(entry);
 		this.saveConversation();
-		this.webview.postMessage({ type: 'systemMessage', content: markdown });
+		this.webview.postMessage({ type: 'systemMessage', conversationId: this.currentConversationId, content: markdown, persistedIndex: this.conversation.length - 1, timestamp: entry.timestamp });
 	}
 
 	/**
@@ -1625,6 +1635,46 @@ export class ChatSession {
 		);
 	}
 
+	/** Rebind a recreated webview to an in-flight request without restarting execution. */
+	private postActiveTurn(): void {
+		const owner = this.activeTurn;
+		if (!owner || !this.ownsTurn(owner)) { return; }
+		void this.webview.postMessage({ type: 'turnResumed', conversationId: owner.conversationId, requestId: owner.requestId, turnId: owner.turnId, draft: owner.draft, userMessageIndex: owner.userMessageIndex, assistantMessageIndex: owner.assistantMessageIndex, partialText: owner.getPartialText?.() ?? '' });
+	}
+
+	/** References belong to exact in-memory messages, and expire on transcript replacement. */
+	private responseReferences?: WeakMap<ChatMessage, string>;
+
+	private responseReference(message: ChatMessage): string {
+		this.responseReferences ??= new WeakMap();
+		let reference = this.responseReferences.get(message);
+		if (!reference) { reference = randomUUID(); this.responseReferences.set(message, reference); }
+		return reference;
+	}
+
+	private messagesForWebview(): Array<ChatMessage & { persistedIndex: number; responseId?: string }> {
+		return this.conversation.map((message, persistedIndex) => ({ ...message, persistedIndex, responseId: message.role === 'assistant' ? this.responseReference(message) : undefined }));
+	}
+
+	/** A DOM position or a stale reference must never select a different saved response. */
+	private resolveResponse(message: WebviewMessage): ChatMessage | undefined {
+		if (message.conversationId !== this.currentConversationId || !Number.isInteger(message.messageIndex) || typeof message.responseId !== 'string') { return undefined; }
+		const response = this.conversation[message.messageIndex!];
+		if (response?.role !== 'assistant' || this.responseReferences?.get(response) !== message.responseId) { return undefined; }
+		try {
+			const stored = this.conversationStore.loadMessage(this.currentConversationId, message.messageIndex!);
+			return stored?.role === 'assistant' && stored.timestamp === response.timestamp && JSON.stringify(stored.content) === JSON.stringify(response.content) ? response : undefined;
+		} catch { return undefined; }
+	}
+
+	/** update() has accepted this actual row; this does not claim the disk write has flushed. */
+	private acknowledgeMessage(owner: ChatTurn, messageIndex: number): void {
+		if (!this.ownsTurn(owner)) { return; }
+		const message = this.conversation[messageIndex];
+		if (message.role === 'assistant') { owner.assistantMessageIndex = messageIndex; }
+		void this.webview.postMessage({ type: 'messagePersisted', conversationId: owner.conversationId, requestId: owner.requestId, turnId: owner.turnId, role: message.role, messageIndex, responseId: message.role === 'assistant' ? this.responseReference(message) : undefined });
+	}
+
 	private setupMessageHandler(): void {
 		this.webview.onDidReceiveMessage(
 			async (message: WebviewMessage) => {
@@ -1647,8 +1697,7 @@ export class ChatSession {
 						this.handleQueueMessage(message);
 						break;
 					case 'feedback': {
-						if (message.conversationId !== this.currentConversationId || !Number.isInteger(message.messageIndex)) { break; }
-						const response = this.conversation[message.messageIndex!];
+						const response = this.resolveResponse(message);
 						if (response?.role !== 'assistant' || !['up', 'down', ''].includes(String(message.value))) { break; }
 						response.feedback = message.value === 'up' || message.value === 'down' ? message.value : undefined;
 						response.feedbackAt = response.feedback ? Date.now() : undefined;
@@ -1656,7 +1705,7 @@ export class ChatSession {
 						break;
 					}
 					case 'branchResponse':
-						if (message.conversationId === this.currentConversationId && Number.isInteger(message.messageIndex) && !this.abortController) {
+						if (this.resolveResponse(message) && !this.abortController) {
 							await vscode.commands.executeCommand('sota.branchConversation', message.conversationId, message.messageIndex);
 						}
 						break;
@@ -1687,7 +1736,8 @@ export class ChatSession {
 						this.postProviderCatalog();
 						this.postFollowupQueue();
 						// Bootstrap only after the document installs its message listener.
-						this.webview.postMessage({ type: 'loadConversation', conversationId: this.currentConversationId, messages: this.conversation, lastSpecialist: this.currentSpecialistId, lastMode: this.currentMode, lastModel: this.currentModel });
+						this.webview.postMessage({ type: 'loadConversation', conversationId: this.currentConversationId, messages: this.messagesForWebview(), lastSpecialist: this.currentSpecialistId, lastMode: this.currentMode, lastModel: this.currentModel });
+						this.postActiveTurn();
 						this.webview.postMessage({ type: 'tabChanged', tab: this.currentTab });
 						this.webview.postMessage({ type: 'workspaceIndexUpdate', entries: this.workspaceIndex });
 						this.postCheckpointsForCurrentConversation();
@@ -1790,6 +1840,7 @@ export class ChatSession {
 						// conversation. The webview already froze the block's
 						// inputs before posting this message; the host only
 						// needs to dispatch the next agent turn.
+						if (message.conversationId && message.conversationId !== this.currentConversationId) { break; }
 						const blockId = typeof message.blockId === 'string' ? message.blockId : '';
 						if (!blockId) {
 							break;
@@ -1799,6 +1850,8 @@ export class ChatSession {
 						const syntheticText = `UI block response (${blockId}): ${valueJson}`;
 						await this.handleSendMessage({
 							type: 'sendMessage',
+							requestId: message.requestId,
+							conversationId: this.currentConversationId,
 							text: syntheticText,
 						});
 						break;
@@ -1808,6 +1861,7 @@ export class ChatSession {
 						// but with a named action — kept distinct from
 						// `uiBlockResponse` so cards can fire arbitrary
 						// actions without visibly freezing the block.
+						if (message.conversationId && message.conversationId !== this.currentConversationId) { break; }
 						const blockId = typeof message.blockId === 'string' ? message.blockId : '';
 						if (!blockId) {
 							break;
@@ -1817,6 +1871,8 @@ export class ChatSession {
 						const syntheticText = `UI block action (${blockId}.${actionName}): ${payloadJson}`;
 						await this.handleSendMessage({
 							type: 'sendMessage',
+							requestId: message.requestId,
+							conversationId: this.currentConversationId,
 							text: syntheticText,
 						});
 						break;
@@ -2861,7 +2917,7 @@ export class ChatSession {
 				this.webview.postMessage({
 					type: 'loadConversation',
 					conversationId: this.currentConversationId,
-					messages: this.conversation,
+					messages: this.messagesForWebview(),
 					lastSpecialist: this.currentSpecialistId,
 					lastMode: this.currentMode,
 					lastModel: this.currentModel,
@@ -2882,8 +2938,9 @@ export class ChatSession {
 
 	private dispatchNextQueued(): void {
 		if (this.disposed || this.abortController) { return; }
-		const draft = this.followupQueue.take(this.currentConversationId);
-		if (draft) {
+		const queued = this.followupQueue.take(this.currentConversationId);
+		if (queued) {
+			const draft = { ...queued, requestId: randomUUID() };
 			void this.webview.postMessage({ type: 'dispatchQueuedDraft', conversationId: this.currentConversationId, draft });
 			void this.handleSendMessage(draft, true);
 		}
@@ -2922,16 +2979,18 @@ export class ChatSession {
 		}
 		this.cancelPendingApprovals('cancel');
 		this.abortController?.abort();
-		const turn: ChatTurn = { controller: new AbortController(), conversationId: this.currentConversationId };
-		this.abortController = turn.controller;
+		const turn: ChatTurn = { controller: new AbortController(), conversationId: this.currentConversationId, turnId: randomUUID(), requestId: message.requestId || randomUUID(), draft: message };
+		this.abortController = turn.controller; this.activeTurn = turn;
+		void this.webview.postMessage({ type: 'turnAccepted', conversationId: turn.conversationId, requestId: turn.requestId, turnId: turn.turnId });
 		try {
 			await this.runChatTurn(message, turn);
 		} catch (error) {
 			turn.failed = true;
 			if (this.ownsTurn(turn) && !turn.controller.signal.aborted) {
-				this.webview.postMessage({ type: 'streamError', error: error instanceof Error ? error.message : String(error) });
+				this.webview.postMessage({ type: 'streamError', conversationId: turn.conversationId, requestId: turn.requestId, turnId: turn.turnId, error: error instanceof Error ? error.message : String(error) });
 			}
 		} finally {
+			if (this.activeTurn === turn) { this.activeTurn = undefined; }
 			const redirected = this.redirectedController === turn.controller;
 			if (redirected) { this.redirectedController = undefined; }
 			const record = fromQueue && !this.disposed ? this.conversationStore.load(turn.conversationId) : undefined;
@@ -2939,9 +2998,9 @@ export class ChatSession {
 				this.followupQueue.requeue(turn.conversationId, message); this.followupQueue.pause(turn.conversationId);
 			}
 			if (this.ownsTurn(turn)) {
-				this.webview.postMessage({ type: 'requestSettled', cancelled: turn.controller.signal.aborted });
+				this.webview.postMessage({ type: 'requestSettled', conversationId: turn.conversationId, requestId: turn.requestId, turnId: turn.turnId, cancelled: turn.controller.signal.aborted });
 				this.postProviderCatalog(false);
-				this.abortController = undefined;
+				this.abortController = undefined; this.activeTurn = undefined;
 				if ((turn.failed || turn.controller.signal.aborted) && !redirected) { this.followupQueue.pause(turn.conversationId); }
 				this.dispatchNextQueued();
 			}
@@ -2951,7 +3010,7 @@ export class ChatSession {
 	private async runChatTurn(message: WebviewMessage, owner: ChatTurn): Promise<void> {
 		const controller = owner.controller;
 		const current = () => this.ownsTurn(owner) && !controller.signal.aborted;
-		const post = (payload: Record<string, unknown>) => { if (payload.type === 'streamError' || payload.type === 'spendCapBlocked') { owner.failed = true; } if (this.ownsTurn(owner)) { void this.webview.postMessage(payload); } };
+		const post = (payload: Record<string, unknown>) => { if (payload.type === 'streamError' || payload.type === 'spendCapBlocked') { owner.failed = true; } if (this.ownsTurn(owner)) { void this.webview.postMessage({ ...payload, conversationId: owner.conversationId, requestId: owner.requestId, turnId: owner.turnId }); } };
 		// Allow attachment-only messages: when the user types nothing but has
 		// attached context (e.g. just the current file), we still want to send.
 		const hasAttachments = Array.isArray(message.attachments) && message.attachments.length > 0;
@@ -3168,8 +3227,9 @@ export class ChatSession {
 
 		if (!current()) return;
 		this.conversation.push(userMessage);
-		owner.userMessagePersisted = true;
+		owner.userMessagePersisted = true; owner.userMessageIndex = this.conversation.length - 1;
 		this.saveConversation();
+		this.acknowledgeMessage(owner, this.conversation.length - 1);
 
 
 
@@ -3190,12 +3250,8 @@ export class ChatSession {
 			userMessage: visibleSummaryText,
 		});
 
-		// Phase 68 — snapshot cumulative usage + start time so we can derive a
-		// per-message delta when the stream completes. The assistant message
-		// will be pushed at the current `this.conversation.length` (one past
-		// the user message just appended above), which is also the conversation
-		// index the webview's wrapper holds for this turn.
-		const assistantConversationIndex = this.conversation.length;
+		// Metrics belong to this request ID. Its persisted assistant index is only
+		// known when output is actually appended (system rows can arrive meanwhile).
 		const usageSnapshot = this.llmClient.getTokenUsage();
 		this.lastInputTokens = usageSnapshot.input;
 		this.lastOutputTokens = usageSnapshot.output;
@@ -3215,7 +3271,7 @@ export class ChatSession {
 			// so the user's typed text stays clean — no prepending.
 			let bridgeAssistantText = '';
 			try {
-				bridgeAssistantText = await this.runViaAgentBridge(owner, specialistId, fullPrompt, model, mode, assistantConversationIndex, workspaceCtx.markdown, approveOverride, rejectOverride, incomingImages);
+				bridgeAssistantText = await this.runViaAgentBridge(owner, specialistId, fullPrompt, model, mode, workspaceCtx.markdown, approveOverride, rejectOverride, incomingImages);
 			} finally {
 				post({ type: 'requestEnded' });
 			}
@@ -3293,6 +3349,7 @@ export class ChatSession {
 		// structured tool-call summaries so reloading shows what happened.
 		let assistantBuffer = '';
 		let fullAssistantText = '';
+		owner.getPartialText = () => fullAssistantText;
 		let aborted = false;
 		let turn = 0;
 		let toolCalls = 0;
@@ -3377,7 +3434,6 @@ export class ChatSession {
 								post({
 									type: 'messageMetrics',
 									usageUnavailable: this.turnUsageUnavailable(model),
-									conversationIndex: assistantConversationIndex,
 									model,
 									latencyMs: Date.now() - this.streamStartedAt,
 									inputTokens: turnInputDelta,
@@ -3729,6 +3785,7 @@ export class ChatSession {
 				timestamp: Date.now(),
 			});
 			this.saveConversation();
+			this.acknowledgeMessage(owner, this.conversation.length - 1);
 		}
 
 		// H17 — `post-response` lifecycle hook. Fires once per completed turn,
@@ -3784,12 +3841,12 @@ export class ChatSession {
 	 * caller uses this to populate the `post-response` lifecycle-hook payload
 	 * so a single helper in `handleSendMessage` covers both dispatch paths.
 	 */
-	private async runViaAgentBridge(owner: ChatTurn, specialistId: string, fullPrompt: string, model: ModelId, mode: ChatMode, assistantConversationIndex: number, workspaceContextSnapshot?: string, approveOverride: boolean = false, rejectOverride: boolean = false, images: ImageAttachmentPayload[] = []): Promise<string> {
+	private async runViaAgentBridge(owner: ChatTurn, specialistId: string, fullPrompt: string, model: ModelId, mode: ChatMode, workspaceContextSnapshot?: string, approveOverride: boolean = false, rejectOverride: boolean = false, images: ImageAttachmentPayload[] = []): Promise<string> {
 		if (!this.agentBridge) {
 			return '';
 		}
 		const controller = owner.controller;
-		const post = (payload: Record<string, unknown>) => { if (payload.type === 'streamError' || payload.type === 'spendCapBlocked') { owner.failed = true; } if (this.ownsTurn(owner)) { void this.webview.postMessage(payload); } };
+		const post = (payload: Record<string, unknown>) => { if (payload.type === 'streamError' || payload.type === 'spendCapBlocked') { owner.failed = true; } if (this.ownsTurn(owner)) { void this.webview.postMessage({ ...payload, conversationId: owner.conversationId, requestId: owner.requestId, turnId: owner.turnId }); } };
 		const cancellationSource = new vscode.CancellationTokenSource();
 		// Bridge AbortController -> CancellationToken so the existing Cancel
 		// button (which aborts the controller) still cancels in-flight LLM work.
@@ -3805,13 +3862,14 @@ export class ChatSession {
 			onRecovery: (recovery: 'resumed' | 'transcript' | 'interrupted') => post({ type: 'adapterRecovery', recovery }),
 		};
 		let assembled = '';
+		owner.getPartialText = () => assembled;
 		let finalText: string | undefined;
 		let errorText: string | undefined;
 		let spendCapAborted = false;
 		const orchestratorRoute = specialistId === 'anton' || approveOverride || rejectOverride;
 		const emit = (event: AgentEvent): void => {
 			if (!this.ownsTurn(owner) || controller.signal.aborted) return;
-			this.handleAgentEvent(event);
+			this.handleAgentEvent(event, post);
 			if (event.type === 'token') {
 				assembled += event.token;
 			} else if (event.type === 'subtask-token') {
@@ -3906,7 +3964,6 @@ export class ChatSession {
 		post({
 			type: 'messageMetrics',
 			usageUnavailable: unmetered,
-			conversationIndex: assistantConversationIndex,
 			model,
 			latencyMs: Date.now() - this.streamStartedAt,
 			inputTokens: turnInputDelta,
@@ -3932,6 +3989,7 @@ export class ChatSession {
 				timestamp: Date.now(),
 			});
 			this.saveConversation();
+			this.acknowledgeMessage(owner, this.conversation.length - 1);
 		}
 		return persisted;
 	}
@@ -3941,16 +3999,16 @@ export class ChatSession {
 	 * already understands (for `token`) plus new structured cards for the
 	 * orchestrator's plan/subtask events.
 	 */
-	private handleAgentEvent(event: AgentEvent): void {
+	private handleAgentEvent(event: AgentEvent, post: (payload: Record<string, unknown>) => void): void {
 		switch (event.type) {
 			case 'token':
-				this.webview.postMessage({ type: 'streamToken', token: event.token });
+				post({ type: 'streamToken', token: event.token });
 				break;
 			case 'plan-proposed':
-				this.webview.postMessage({ type: 'agentPlan', plan: serialisePlan(event.plan) });
+				post({ type: 'agentPlan', plan: serialisePlan(event.plan) });
 				break;
 			case 'subtask-started':
-				this.webview.postMessage({
+				post({
 					type: 'subtaskStart',
 					subtaskId: event.subtaskId,
 					assignee: event.assignee,
@@ -3960,36 +4018,36 @@ export class ChatSession {
 					// Phase 80 — drive the webview-side header pulse so the user
 					// sees that Anton Security is actively working. Stops on the
 					// matching `subtask-completed` / `subtask-failed` below.
-					this.webview.postMessage({ type: 'securityPulseStart' });
+					post({ type: 'securityPulseStart' });
 				}
 				break;
 			case 'subtask-token':
-				this.webview.postMessage({
+				post({
 					type: 'subtaskToken',
 					subtaskId: event.subtaskId,
 					token: event.token,
 				});
 				break;
 			case 'subtask-completed':
-				this.webview.postMessage({
+				post({
 					type: 'subtaskComplete',
 					subtaskId: event.subtaskId,
 					assignee: event.assignee,
 					summary: event.summary,
 				});
 				if (event.assignee === 'anton-security') {
-					this.webview.postMessage({ type: 'securityPulseStop' });
+					post({ type: 'securityPulseStop' });
 				}
 				break;
 			case 'subtask-failed':
-				this.webview.postMessage({
+				post({
 					type: 'subtaskFail',
 					subtaskId: event.subtaskId,
 					assignee: event.assignee,
 					error: event.error,
 				});
 				if (event.assignee === 'anton-security') {
-					this.webview.postMessage({ type: 'securityPulseStop' });
+					post({ type: 'securityPulseStop' });
 				}
 				break;
 			case 'subtask-blocked':
@@ -3998,7 +4056,7 @@ export class ChatSession {
 				// header doesn't keep pulsing while the subtask waits on a
 				// dependency or upstream input.
 				if (event.assignee === 'anton-security') {
-					this.webview.postMessage({ type: 'securityPulseStop' });
+					post({ type: 'securityPulseStop' });
 				}
 				break;
 			case 'ui-block': {
@@ -4012,7 +4070,7 @@ export class ChatSession {
 					break;
 				}
 				this.emittedUiBlockIds.add(event.blockId);
-				this.webview.postMessage({
+				post({
 					type: 'uiBlock',
 					blockId: event.blockId,
 					component: event.component,
@@ -4033,7 +4091,7 @@ export class ChatSession {
 				if (event.name === 'emit_ui_block') {
 					break;
 				}
-				this.webview.postMessage({
+				post({
 					type: 'toolCall',
 					id: event.id,
 					name: event.name,

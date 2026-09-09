@@ -170,6 +170,31 @@ export class AcpRuntime {
 		try { void Promise.resolve(this.onRecoveryStorageIssue({ phase, code, contextLimited: this.sessionStore?.recoveryContextLimited === true })).catch(() => {}); } catch { /* Diagnostics must not fail execution. */ }
 	}
 
+	/** Stop waiting for optional persistence on abort without reordering or abandoning its write. */
+	private async saveRecoveryRecord(job: Job, record: AcpSessionRecord, phase: 'before-prompt' | 'after-prompt'): Promise<void> {
+		if (!this.sessionStore) { return; }
+		const signal = job.controller.signal;
+		let onAbort: (() => void) | undefined;
+		try {
+			const saving = this.sessionStore.save(job.key, record);
+			if (signal.aborted) {
+				// An already-cancelled prompt still records its interruption, but
+				// cancellation alone is not evidence that storage is unavailable.
+				void saving.catch(error => this.reportRecoveryStorageIssue(phase, error));
+				return;
+			}
+			const aborted = new Promise<never>((_resolve, reject) => {
+				onAbort = () => reject(signal.reason);
+				signal.addEventListener('abort', onAbort, { once: true });
+				if (signal.aborted) { onAbort(); }
+			});
+			// The race consumes late write failures. The store keeps its FIFO so a
+			// following turn or permanent deletion cannot overtake this write.
+			await Promise.race([saving, aborted]);
+		} catch (error) { this.reportRecoveryStorageIssue(phase, error); }
+		finally { if (onAbort) { signal.removeEventListener('abort', onAbort); } }
+	}
+
 	private retire(worker: Worker): void {
 		if (this.workers.get(worker.key) === worker) { this.workers.delete(worker.key); }
 		const stop = worker.connection.stop();
@@ -278,9 +303,12 @@ export class AcpRuntime {
 			const context = [job.turn.initialContext, restore].filter(Boolean).join('\n\n');
 			const text = fresh && !resumed && context ? `${context}\n\n${job.turn.text}` : job.turn.text;
 			record = { version: 1, conversationId: job.turn.conversationId, sessionId: worker.connection.remoteSessionId!, state: 'running', transcript: [...(saved?.transcript ?? []), `User: ${job.turn.text}${job.turn.images?.length ? `\n[${job.turn.images.length} image attachment(s); image bytes are not retained in recovery context]` : ''}\nAssistant: [turn interrupted before completion]`], updatedAt: Date.now() };
-			try { await this.sessionStore?.save(job.key, record); } catch (error) { this.reportRecoveryStorageIssue('before-prompt', error); }
+			await this.saveRecoveryRecord(job, record, 'before-prompt');
+			job.controller.signal.throwIfAborted();
 			promptStarted = true;
 			const result = await worker.connection.prompt(text, {
+				// run() enforces the whole-turn execution budget through this signal,
+				// pausing it for human approvals. This is only the transport ceiling.
 				images: job.turn.images, signal: job.controller.signal, timeoutMs: 3_600_000,
 				permission: async (request, signal) => {
 					if (!countTool(request.toolCall.toolCallId) || (job.turn.readOnly && !['read', 'search', 'think'].includes(request.toolCall.kind ?? ''))) { return cancelledPermission(); }
@@ -316,7 +344,9 @@ export class AcpRuntime {
 		} finally {
 			if (record && promptStarted) {
 				record.transcript[record.transcript.length - 1] = `User: ${job.turn.text}${job.turn.images?.length ? `\n[${job.turn.images.length} image attachment(s); reattach if needed]` : ''}\nAssistant: ${response}\nTurn: ${record.state}${toolStates.size ? `\nReported tools (never replay): ${[...toolStates.values()].join('; ')}` : ''}`;
-				try { await this.sessionStore?.save(job.key, record); } catch (error) { this.reportRecoveryStorageIssue('after-prompt', error); }
+				// Once the prompt has finished, a deadline or cancellation while
+				// persisting optional recovery data must not replace its outcome.
+				await this.saveRecoveryRecord(job, record, 'after-prompt');
 			}
 			worker.busy = false; worker.lastUsed = Date.now(); this.active.delete(job);
 			job.finish(failure, completedResult);

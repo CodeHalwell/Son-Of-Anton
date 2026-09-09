@@ -71,6 +71,8 @@ export declare class AcpRuntime {
     shutdown(): Promise<void>;
     private key;
     private reportRecoveryStorageIssue;
+    /** Stop waiting for optional persistence on abort without reordering or abandoning its write. */
+    private saveRecoveryRecord;
     private retire;
     private pump;
     private execute;

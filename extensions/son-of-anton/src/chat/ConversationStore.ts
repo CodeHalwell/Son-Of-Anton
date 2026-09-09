@@ -595,6 +595,20 @@ export class ConversationStore implements vscode.Disposable {
 		const record = this.load(id); if (record?.summary.branch) { this.changeSummary(id, { branch: { ...record.summary.branch, checkpointId: undefined, workspaceState: 'unlinked' } }); }
 	}
 
+	/** Read one saved response from its page, excluding Trash and pending or committed deletion. */
+	loadMessage(id: string, index: number): ChatMessage | undefined {
+		if (!Number.isSafeInteger(index) || index < 0 || this.isHidden(id)) { return undefined; }
+		if (this.pendingRecords.has(id)) {
+			const pending = this.pendingRecords.get(id);
+			return pending && !pending.summary.deletedAt ? pending.messages[index] : undefined;
+		}
+		if (this.disk) {
+			const record = this.disk.load(id, index, 1);
+			return record && !record.summary.deletedAt ? record.messages[0] : undefined;
+		}
+		return this.load(id)?.messages[index];
+	}
+
 	/** Read a bounded message page without loading the complete stored transcript. */
 	loadMessages(id: string, offset: number, limit = 100): ChatMessage[] {
 		if (this.isHidden(id)) { return []; }

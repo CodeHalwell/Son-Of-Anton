@@ -35,6 +35,83 @@ function capture() {
 	};
 }
 
+function deferred() {
+	let resolve!: () => void;
+	let reject!: (error: Error) => void;
+	const promise = new Promise<void>((done, fail) => { resolve = done; reject = fail; });
+	return { promise, resolve, reject };
+}
+
+async function promptly<T>(work: Promise<T>): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([work, new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('ACP remained blocked on optional recovery storage')), 2_000); })]);
+	} finally { clearTimeout(timer); }
+}
+
+for (const phase of ['before-prompt', 'after-prompt'] as const) {
+	for (const interruption of ['deadline', 'cancellation', 'shutdown'] as const) {
+		test(`${phase} recovery persistence cannot block ${interruption}, including late write rejection`, { timeout: 10_000 }, async t => {
+			const storage = new FaultyMemento(); const sessionStore = new AcpSessionStore(storage);
+			const issues: AcpRecoveryStorageIssue[] = [];
+			const runtime = new AcpRuntime({ sessionStore, onRecoveryStorageIssue: issue => { issues.push(issue); } });
+			const entered = deferred(), writing = deferred();
+			t.after(async () => { writing.resolve(); await runtime.shutdown(); });
+			await runtime.run(turn('warm session'));
+			storage.beforeWrite = async (key, value) => {
+				if (phase === 'before-prompt' ? key === 'sota.acp.session.index.v1' : object(value) && value.state === 'settled') {
+					entered.resolve(); await writing.promise;
+				}
+			};
+			const controller = new AbortController(); let approvals = 0; let updates = 0;
+			const running = runtime.run({ ...turn('permission'), timeoutMs: interruption === 'deadline' ? 150 : 5_000, signal: controller.signal,
+				onPermission: async () => { approvals++; return { outcome: { outcome: 'selected', optionId: 'yes' } }; },
+				onUpdate: () => { updates++; },
+			}).then(result => ({ result, error: undefined }), (error: Error) => ({ result: undefined, error: error.message }));
+			await promptly(entered.promise);
+			if (interruption === 'cancellation') { controller.abort(); }
+			if (interruption === 'shutdown') { await promptly(runtime.shutdown()); }
+			const outcome = await promptly(running);
+			if (phase === 'before-prompt') {
+				assert.match(outcome.error ?? '', interruption === 'deadline' ? /deadline/ : /cancelled/);
+				assert.deepEqual([outcome.result, approvals, updates], [undefined, 0, 0]);
+			} else {
+				// Prompt completion wins over later interruption during optional persistence.
+				assert.deepEqual([outcome, approvals, updates > 0], [{ result: { stopReason: 'end_turn' }, error: undefined }, 1, true]);
+			}
+			await promptly(runtime.shutdown());
+			assert.deepEqual([runtime.snapshot().active, runtime.snapshot().processes, issues], [0, 0, [{ phase, code: 'unavailable', contextLimited: false }]]);
+			storage.beforeWrite = undefined;
+			writing.reject(storageError('ENOSPC'));
+			await sessionStore.forgetConversation('storage-recovery');
+			await new Promise<void>(resolve => setImmediate(resolve));
+			assert.deepEqual(issues, [{ phase, code: 'unavailable', contextLimited: false }], 'late failures are consumed without leaking the raw storage error');
+		});
+	}
+}
+
+test('a timed-out recovery save remains ordered before permanent deletion when it eventually succeeds', { timeout: 10_000 }, async t => {
+	const storage = new FaultyMemento(); const sessionStore = new AcpSessionStore(storage);
+	const runtime = new AcpRuntime({ sessionStore, onRecoveryStorageIssue: () => {} });
+	const entered = deferred(), writing = deferred();
+	t.after(async () => { writing.resolve(); await runtime.shutdown(); });
+	await runtime.run(turn('warm session'));
+	storage.beforeWrite = async (_key, value) => {
+		if (object(value) && value.state === 'settled') { entered.resolve(); await writing.promise; }
+	};
+	const running = runtime.run({ ...turn('finished answer'), timeoutMs: 150 });
+	await promptly(entered.promise);
+	assert.deepEqual(await promptly(running), { stopReason: 'end_turn' });
+	let deleted = false;
+	const deleting = runtime.forgetConversation('storage-recovery').then(() => { deleted = true; });
+	await new Promise<void>(resolve => setImmediate(resolve));
+	assert.equal(deleted, false, 'permanent deletion must await an earlier write even after the turn stops waiting');
+	storage.beforeWrite = undefined;
+	writing.resolve();
+	await promptly(deleting);
+	assert.deepEqual([...storage.values.keys()].filter(key => key.startsWith('sota.acp.session.v1.')), []);
+});
+
 for (const code of ['ENOSPC', 'EROFS', 'EACCES']) {
 	test(`${code} before-prompt and final recovery writes do not change successful ACP execution or permissions`, async t => {
 		const storage = new FaultyMemento(); storage.beforeWrite = () => { throw storageError(code); };

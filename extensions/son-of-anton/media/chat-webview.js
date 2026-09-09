@@ -380,12 +380,13 @@
 		// of any tool-call cards inside the message body so finalising the
 		// markdown render doesn't replace the cards' DOM nodes.
 		let currentAssistantTextSpan = null;
-		// Running index that lines up 1:1 with positions in the host's
-		// persisted conversation array. Incremented on every wrapper appended
-		// to the message list (user, assistant, system) so checkpoint stripes
-		// can find the user bubble by `data-conversation-index === turnIndex`.
-		// Reset on `loadConversation` / `conversationCleared`.
+		// Visual slots include provisional/local messages. Only host acknowledgments
+		// provide persisted indexes for transcript actions and checkpoints.
 		let nextConversationIndex = 0;
+		let activeRequestId = null;
+		let activeTurnId = null;
+		let activeHostTurnPending = false;
+		const requestSlots = new Map();
 		let renderingHistory = false;
 		let conversationHasUnmeteredUsage = false;
 		let earlierHistory = [];
@@ -2079,21 +2080,23 @@
 		 * reference; passed in rather than scraped from the DOM so the
 		 * exact authored content survives the markdown round-trip.
 		 */
-		function buildAssistantActions(source, messageIndex, rating) {
-			const prompt = lastPromptDraft;
+		function buildAssistantActions(source, record = {}) {
+			const prompt = record.promptDraft || lastPromptDraft;
 			const conversationId = activeConversationId;
-			const index = Number.isInteger(messageIndex) ? messageIndex : Number(currentAssistantDiv?.closest('.msg')?.dataset.conversationIndex);
-			return SotaWorkflows.responseActions({ text: uiText, canReuse: !!prompt, busy: isStreaming, rating,
+			const canPersist = Number.isSafeInteger(record.persistedIndex) && record.persistedIndex >= 0 && typeof record.responseId === 'string' && record.responseId.length > 0;
+			const identity = { conversationId, messageIndex: record.persistedIndex, responseId: record.responseId };
+			return SotaWorkflows.responseActions({ text: uiText, canReuse: !!prompt, canPersist, busy: isStreaming, branchBusy: activeHostTurnPending, rating: record.feedback,
 				copy: () => vscode.postMessage({ type: 'copyCode', text: source || '' }),
 				reuse: () => reusePrompt(prompt, conversationId),
-				branch: () => { if (conversationId === activeConversationId && !isStreaming) vscode.postMessage({ type: 'branchResponse', conversationId, messageIndex: index }); },
-				feedback: value => { if (conversationId === activeConversationId) vscode.postMessage({ type: 'feedback', conversationId, messageIndex: index, value }); },
+				branch: () => { if (canPersist && conversationId === activeConversationId && !isStreaming && !activeHostTurnPending) vscode.postMessage({ type: 'branchResponse', ...identity }); },
+				feedback: value => { if (canPersist && conversationId === activeConversationId) vscode.postMessage({ type: 'feedback', ...identity, value }); },
 			});
 		}
 
 		/** Keep request actions unavailable while their agent is still running. */
 		function refreshPromptReuseAffordance() {
-			messageList.querySelectorAll('.msg-action-reuse, .msg-action-branch').forEach(button => { button.disabled = isStreaming; });
+			messageList.querySelectorAll('.msg-action-reuse').forEach(button => { button.disabled = isStreaming; });
+			messageList.querySelectorAll('.msg-action-branch').forEach(button => { button.disabled = isStreaming || activeHostTurnPending; });
 		}
 
 		/**
@@ -2175,7 +2178,7 @@
 			stripe.className = 'checkpoint-stripe';
 			stripe.dataset.checkpointId = entry.checkpointId;
 			if (typeof entry.turnIndex === 'number') {
-				stripe.dataset.conversationIndex = String(entry.turnIndex);
+				stripe.dataset.conversationIndex = userWrapper.dataset.conversationIndex;
 			}
 
 			const line = document.createElement('div');
@@ -2345,17 +2348,75 @@
 		let timelineFrame = null;
 		let updatingTimeline = false;
 		function resetEarlierHistory() {
-			historyWindow.reset(); earlierHistory = [];
+			historyWindow.reset(); earlierHistory = []; requestSlots.clear(); activeRequestId = null; activeTurnId = null; activeHostTurnPending = false;
 			historyButton?.remove(); historyButton = null;
 			historyNewerControls?.remove(); historyNewerControls = null;
 			historyRangeLabel?.remove(); historyRangeLabel = null;
 			if (timelineFrame !== null) { cancelAnimationFrame(timelineFrame); timelineFrame = null; }
 		}
-		function historyOptions(msg) { return { timestamp: msg.timestamp, feedback: msg.feedback, specialistId: msg.specialistId || historySpecialist, usageUnavailable: msg.usageUnavailable === true, promptDraft: msg.promptDraft || (msg.role === 'user' ? promptDraftFromHistory(msg) : undefined) }; }
+		function historyOptions(msg) { return { persistedIndex: msg.persistedIndex, responseId: msg.responseId, requestId: msg.requestId, turnId: msg.turnId, timestamp: msg.timestamp, feedback: msg.feedback, specialistId: msg.specialistId || historySpecialist, usageUnavailable: msg.usageUnavailable === true, promptDraft: msg.promptDraft || (msg.role === 'user' ? promptDraftFromHistory(msg) : undefined) }; }
 		function recordTimelineMessage(index, role, content, opts) {
 			if (renderingHistory) return;
-			historyWindow.set(index, { role, content, ...(opts || {}) });
+			historyWindow.set(index, { ...historyWindow.get(index), role, content, ...(opts || {}) });
+			if (opts?.requestId) {
+				const slots = requestSlots.get(opts.requestId) || {}; slots[role] = index; requestSlots.set(opts.requestId, slots);
+			}
 			scheduleTimelineWindow();
+		}
+		function stampPersistedIdentity(wrapper, record) {
+			if (!wrapper) return;
+			if (Number.isSafeInteger(record.persistedIndex) && record.persistedIndex >= 0) wrapper.dataset.persistedIndex = String(record.persistedIndex);
+			if (record.responseId) wrapper.dataset.responseId = record.responseId;
+			if (record.requestId) wrapper.dataset.requestId = record.requestId;
+			if (record.turnId) wrapper.dataset.turnId = record.turnId;
+		}
+		function acceptTurn(message) {
+			if (message.conversationId !== activeConversationId || typeof message.requestId !== 'string' || typeof message.turnId !== 'string') return;
+			const slots = requestSlots.get(message.requestId);
+			if (!slots || slots.turnId || message.requestId !== activeRequestId) return;
+			slots.turnId = message.turnId; activeTurnId = message.turnId; activeHostTurnPending = true;
+			refreshPromptReuseAffordance();
+			for (const role of ['user', 'assistant']) {
+				const record = historyWindow.get(slots[role]);
+				if (record) { record.turnId = message.turnId; stampPersistedIdentity(messageList.querySelector('.msg[data-conversation-index="' + slots[role] + '"]'), record); }
+			}
+		}
+		function renderSubmittedTurn(draft, requestId) {
+			if (currentAssistantDiv) { finalizeStreamingText(); clearStreamingIndicator(); attachAssistantActions(); currentAssistantDiv = null; currentAssistantTextSpan = null; }
+			setStreamingState(false);
+			const existingDraft = captureComposerDraft(); applyPromptDraft(draftFromWire(draft)); sendMessage(true, requestId); applyPromptDraft(existingDraft);
+		}
+		function resumeTurn(message) {
+			if (message.conversationId !== activeConversationId || activeRequestId || typeof message.requestId !== 'string' || typeof message.turnId !== 'string') return;
+			const user = historyWindow.get(message.userMessageIndex);
+			if (Number.isSafeInteger(message.userMessageIndex) && user?.role === 'user' && user.persistedIndex === message.userMessageIndex) {
+				activeRequestId = message.requestId;
+				user.requestId = message.requestId;
+				const slots = { user: message.userMessageIndex }; requestSlots.set(message.requestId, slots);
+				lastPromptDraft = historyOptions(user).promptDraft;
+				const assistant = historyWindow.get(message.assistantMessageIndex);
+				if (Number.isSafeInteger(message.assistantMessageIndex) && assistant?.role === 'assistant' && assistant.persistedIndex === message.assistantMessageIndex) {
+					slots.assistant = message.assistantMessageIndex; assistant.requestId = message.requestId;
+					acceptTurn(message); return;
+				}
+				setStreamingState(true); startStreamingMessage(getCurrentAgentDisplayName(), currentAgent);
+			} else renderSubmittedTurn(message.draft || {}, message.requestId);
+			acceptTurn(message);
+			if (message.partialText) appendStreamingText(message.partialText);
+		}
+		function acknowledgeTimelineMessage(message) {
+			if (message.conversationId !== activeConversationId || !Number.isSafeInteger(message.messageIndex) || message.messageIndex < 0 || !['user', 'assistant'].includes(message.role)) return;
+			const slots = requestSlots.get(message.requestId);
+			if (!slots || slots.turnId !== message.turnId) return;
+			const index = slots[message.role]; const record = historyWindow.get(index);
+			if (!record || record.role !== message.role || (message.role === 'assistant' && (typeof message.responseId !== 'string' || !message.responseId))) return;
+			record.persistedIndex = message.messageIndex; record.responseId = message.responseId;
+			const wrapper = messageList.querySelector('.msg[data-conversation-index="' + index + '"]');
+			stampPersistedIdentity(wrapper, record);
+			if (record.role === 'assistant') {
+				const actions = wrapper?.querySelector('.msg-actions');
+				if (actions) actions.replaceWith(buildAssistantActions(record.content, record));
+			} else for (const checkpoint of checkpointsByTurnIndex.get(record.persistedIndex) || []) insertCheckpointStripe(wrapper, checkpoint);
 		}
 		function scheduleTimelineWindow() {
 			if (updatingTimeline || timelineFrame !== null) return;
@@ -2384,7 +2445,9 @@
 				const existing = new Map([...messageList.querySelectorAll(':scope > .msg')].map(node => [Number(node.dataset.conversationIndex), node]));
 				const activeWrapper = currentAssistantDiv?.closest('.msg');
 				const activeIndex = activeWrapper ? Number(activeWrapper.dataset.conversationIndex) : -1;
-				const pins = activeIndex >= 0 ? [activeIndex - 1, activeIndex] : [];
+				const boundUserIndex = requestSlots.get(activeWrapper?.dataset.requestId)?.user;
+				const activeUserIndex = Number.isSafeInteger(boundUserIndex) && boundUserIndex >= 0 && historyWindow.get(boundUserIndex)?.role === 'user' ? boundUserIndex : activeIndex - 1;
+				const pins = activeIndex >= 0 ? [activeUserIndex, activeIndex] : [];
 				const view = historyWindow.view(pins);
 				const wanted = new Set(view.indices);
 				const top = messageList.getBoundingClientRect().top;
@@ -2441,7 +2504,7 @@
 					for (const [label, action] of [[uiText('historyNewer', view.newer), loadNewerHistory], [uiText('historyLatest'), showLatestHistory]]) {
 						const control = document.createElement('button'); control.type = 'button'; control.className = 'secondary-button'; control.textContent = label; control.addEventListener('click', action); historyNewerControls.appendChild(control);
 					}
-					const live = activeIndex >= view.end ? existing.get(activeIndex - 1) || activeWrapper : null;
+					const live = activeIndex >= view.end ? existing.get(activeUserIndex) || activeWrapper : null;
 					messageList.insertBefore(historyNewerControls, live?.isConnected ? live : null);
 				}
 				if (anchor?.isConnected && anchorTop !== undefined && direction !== 'latest' && direction !== 'initial') messageList.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
@@ -2470,6 +2533,7 @@
 			}
 			const conversationIndex = nextConversationIndex++;
 			wrapper.dataset.conversationIndex = String(conversationIndex);
+			stampPersistedIdentity(wrapper, opts);
 			// Phase 68 — stamp the persisted timestamp on every wrapper so the
 			// hover popover can render "Time" / "Sent" without a second lookup.
 			// Falls back to "now" only when a freshly-rendered bubble has no
@@ -2491,10 +2555,10 @@
 				body.className = 'msg-body';
 				if (isStructured) {
 					const text = renderStructuredContent(body, content);
-					body.appendChild(buildAssistantActions(text, conversationIndex, opts.feedback));
+					body.appendChild(buildAssistantActions(text, opts));
 				} else {
 					body.innerHTML = renderMarkdown(content);
-					body.appendChild(buildAssistantActions(content, conversationIndex, opts.feedback));
+					body.appendChild(buildAssistantActions(content, opts));
 				}
 				// Hydrate any persisted ui-block placeholders to live blocks.
 				if (typeof window.__sotaHydrateUiBlocks === 'function') {
@@ -2542,7 +2606,7 @@
 			// back-to-back (Phase 59 edge case).
 			if (role === 'user') {
 				if (!renderingHistory) scrollToBottom(true);
-				const pending = checkpointsByTurnIndex.get(conversationIndex);
+				const pending = checkpointsByTurnIndex.get(opts.persistedIndex);
 				if (Array.isArray(pending)) {
 					for (const cp of pending) {
 						insertCheckpointStripe(wrapper, cp);
@@ -2588,6 +2652,8 @@
 				wrapper.classList.add('msg-follow-on');
 			}
 			wrapper.dataset.conversationIndex = String(nextConversationIndex++);
+			if (activeRequestId) wrapper.dataset.requestId = activeRequestId;
+			if (activeTurnId) wrapper.dataset.turnId = activeTurnId;
 			// Phase 68 — record the wall-clock start so the hover popover can
 			// resolve a relative time even before metrics arrive.
 			wrapper.dataset.timestamp = String(Date.now());
@@ -2623,6 +2689,7 @@
 			refreshPromptReuseAffordance();
 			scrollToBottom();
 			currentAssistantDiv = body;
+			recordTimelineMessage(Number(wrapper.dataset.conversationIndex), 'assistant', '', { requestId: activeRequestId, turnId: activeTurnId, timestamp: Number(wrapper.dataset.timestamp), specialistId: resolvedId, promptDraft: lastPromptDraft });
 			updateEmptyState();
 			return wrapper;
 		}
@@ -2706,7 +2773,7 @@
 			return cleaned.replace(/\s{2,}/g, ' ').trim();
 		}
 
-		function sendMessage(renderOnly = false) {
+		function sendMessage(renderOnly = false, requestId) {
 			if (isStreaming) {
 				vscode.postMessage({ type: 'cancelRequest' });
 				return;
@@ -2725,6 +2792,7 @@
 
 			clearPromptRestore();
 			const submittedDraft = { ...captureComposerDraft(), text };
+			activeRequestId = requestId || crypto.randomUUID(); activeTurnId = null; activeHostTurnPending = true;
 
 			// Build the user bubble. When images are attached we render them
 			// as a structured array (image parts followed by the text part)
@@ -2746,9 +2814,9 @@
 					name: img.name,
 				}));
 				structured.push({ type: 'text', text: bubbleText || '(image attachment)' });
-				addMessage('user', structured, { timestamp: Date.now(), promptDraft: submittedDraft });
+				addMessage('user', structured, { timestamp: Date.now(), promptDraft: submittedDraft, requestId: activeRequestId });
 			} else {
-				addMessage('user', bubbleText || '(no text)', { timestamp: Date.now(), promptDraft: submittedDraft });
+				addMessage('user', bubbleText || '(no text)', { timestamp: Date.now(), promptDraft: submittedDraft, requestId: activeRequestId });
 			}
 			// Up-Arrow recall keeps the user's typed text
 			// without the mention-chip annotation tail, so they round-trip
@@ -2786,6 +2854,7 @@
 				.filter(p => typeof p === 'string' && p.length > 0);
 			if (renderOnly !== true) vscode.postMessage({
 				type: 'sendMessage',
+				requestId: activeRequestId,
 				conversationId: activeConversationId,
 				text: text,
 				model: currentModel,
@@ -4214,6 +4283,12 @@
 
 		window.addEventListener('message', (event) => {
 			const message = event.data;
+			if (message.type === 'turnAccepted') { acceptTurn(message); return; }
+			if (message.type === 'turnResumed') { resumeTurn(message); return; }
+			if (message.type === 'messagePersisted') { acknowledgeTimelineMessage(message); return; }
+			// Completion and error may precede persistence. Old turns can still be
+			// acknowledged, but cannot finish or append tokens to a newer bubble.
+			if (message.requestId && message.turnId && message.type !== 'messageMetrics' && (message.conversationId !== activeConversationId || message.requestId !== activeRequestId || message.turnId !== activeTurnId)) return;
 			switch (message.type) {
 				case 'streamToken':
 					// Inline tool-result review: the arrival of an assistant
@@ -4312,6 +4387,7 @@
 					mountUiBlock(message);
 					break;
 				case 'requestSettled':
+					activeHostTurnPending = false; refreshPromptReuseAffordance();
 					if (isStreaming) {
 						finalizeStreamingText();
 						clearStreamingIndicator();
@@ -4353,10 +4429,10 @@
 					// agent run (agent-bridge path). Live-only by design —
 					// reloaded messages keep no metrics so the popover renders
 					// "—" placeholders for those fields.
-					const idx = message.conversationIndex;
-					const wrapper = messageList.querySelector(
-						'.msg-assistant[data-conversation-index="' + idx + '"]'
-					);
+					const slots = requestSlots.get(message.requestId);
+					const wrapper = message.requestId
+						? message.conversationId === activeConversationId && slots?.turnId === message.turnId ? messageList.querySelector('.msg-assistant[data-conversation-index="' + slots.assistant + '"]') : null
+						: messageList.querySelector('.msg-assistant[data-persisted-index="' + message.conversationIndex + '"]');
 					if (wrapper) {
 						wrapper.dataset.model = String(message.model || '');
 						wrapper.dataset.latencyMs = String(message.latencyMs || 0);
@@ -4423,7 +4499,7 @@
 				case 'dispatchQueuedDraft':
 					if (message.conversationId === activeConversationId && !isStreaming) {
 						const existingDraft = captureComposerDraft();
-						applyPromptDraft(draftFromWire(message.draft)); sendMessage(true); applyPromptDraft(existingDraft);
+						applyPromptDraft(draftFromWire(message.draft)); sendMessage(true, message.draft.requestId); applyPromptDraft(existingDraft);
 					}
 					break;
 				case 'workspaceContextPreview':
@@ -4486,7 +4562,7 @@
 					if (Array.isArray(message.messages)) {
 						conversationHasUnmeteredUsage = message.messages.some(msg => msg.role === 'assistant' && msg.usageUnavailable);
 						historySpecialist = message.lastSpecialist || 'anton';
-						historyWindow.reset(message.messages);
+						historyWindow.reset(message.messages.map((record, persistedIndex) => ({ ...record, persistedIndex })));
 						nextConversationIndex = message.messages.length;
 						const lastRecord = message.messages.at(-1);
 						lastSenderRole = lastRecord?.role || null;
@@ -4558,7 +4634,7 @@
 							checkpointsByTurnIndex.set(entry.turnIndex, [entry]);
 						}
 						const wrapper = messageList.querySelector(
-							'.msg-user[data-conversation-index="' + entry.turnIndex + '"]'
+							'.msg-user[data-persisted-index="' + entry.turnIndex + '"]'
 						);
 						if (wrapper) {
 							insertCheckpointStripe(wrapper, entry);
@@ -4585,7 +4661,7 @@
 								checkpointsByTurnIndex.set(entry.turnIndex, [entry]);
 							}
 							const wrapper = messageList.querySelector(
-								'.msg-user[data-conversation-index="' + entry.turnIndex + '"]'
+								'.msg-user[data-persisted-index="' + entry.turnIndex + '"]'
 							);
 							if (wrapper) {
 								insertCheckpointStripe(wrapper, entry);
@@ -4636,7 +4712,7 @@
 					applyMcpServerSaveResult(message);
 					break;
 				case 'systemMessage':
-					addMessage('system', message.content || '');
+					if (!message.conversationId || message.conversationId === activeConversationId) addMessage('system', message.content || '', { persistedIndex: message.persistedIndex, timestamp: message.timestamp });
 					break;
 				case 'specialistChange':
 					if (message.specialistId) {
@@ -4866,7 +4942,7 @@
 			const source = rawParts.join('\n\n') || currentAssistantDiv.textContent || '';
 			const wrapper = currentAssistantDiv.closest('.msg');
 			if (wrapper) recordTimelineMessage(Number(wrapper.dataset.conversationIndex), 'assistant', source, { timestamp: Number(wrapper.dataset.timestamp), specialistId: currentAssistantDiv.dataset.specialistId || currentAgent, promptDraft: lastPromptDraft });
-			currentAssistantDiv.appendChild(buildAssistantActions(source));
+			currentAssistantDiv.appendChild(buildAssistantActions(source, historyWindow.get(Number(wrapper?.dataset.conversationIndex))));
 			refreshPromptReuseAffordance();
 		}
 
@@ -6613,22 +6689,19 @@
 		 * so renderers don't need to know about the host wire format.
 		 */
 		function buildUiBlockHelpers(blockId) {
+			const conversationId = activeConversationId;
+			const submit = (payload, text) => {
+				if (conversationId !== activeConversationId) return;
+				const requestId = crypto.randomUUID();
+				renderSubmittedTurn({ text, includeWorkspaceContext: false }, requestId);
+				vscode.postMessage({ ...payload, blockId, conversationId, requestId });
+			};
 			return {
-				blockId: blockId,
-				respond: function (value) {
-					vscode.postMessage({
-						type: 'uiBlockResponse',
-						blockId: blockId,
-						responseValue: value,
-					});
-				},
-				onAction: function (name, payload) {
-					vscode.postMessage({
-						type: 'uiBlockAction',
-						blockId: blockId,
-						actionName: typeof name === 'string' ? name : 'unnamed',
-						actionPayload: payload,
-					});
+				blockId,
+				respond: value => submit({ type: 'uiBlockResponse', responseValue: value }, `UI block response (${blockId}): ${JSON.stringify(value)}`),
+				onAction: (name, payload) => {
+					const actionName = typeof name === 'string' ? name : 'unnamed';
+					submit({ type: 'uiBlockAction', actionName, actionPayload: payload }, `UI block action (${blockId}.${actionName}): ${JSON.stringify(payload)}`);
 				},
 			};
 		}

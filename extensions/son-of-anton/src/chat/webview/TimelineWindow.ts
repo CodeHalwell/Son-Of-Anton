@@ -22,7 +22,7 @@ export class TimelineWindow<T> {
 		this.records = [...records]; this.end = records.length; this.start = Math.max(0, this.end - this.initialSize);
 	}
 
-	/** Reserving an index keeps an in-flight assistant aligned with the persisted conversation. */
+	/** Reserve a visual timeline slot for an in-flight assistant; this is not a persisted message index. */
 	observe(index: number): void {
 		if (!Number.isSafeInteger(index) || index < 0 || index > this.records.length + 1) { return; }
 		if (index >= this.records.length) { this.records.length = index + 1; }

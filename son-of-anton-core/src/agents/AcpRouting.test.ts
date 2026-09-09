@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createAgentStack } from './AgentStackFactory';
 import { AgentManager } from './AgentManager';
 import { discoveredModelId, registerDiscoveredModels } from '../llm/DiscoveredModels';
@@ -64,6 +64,29 @@ async function routingStack(t: import('node:test').TestContext, settings: Record
 const claudeFixture = { id: 'claude-acp', command: process.execPath, args: [path.resolve(__dirname, '../../test/fixtures/acp-agent.cjs')] };
 const taskContext = { instruction: 'Explain the current file without editing it', scopeFiles: [], graphContext: '', parentTaskId: 'plan', orchestratorModelHint: 'claude-code-opus' as const, workspaceContextSnapshot: 'Active editor: src/example.ts\nexport const answer = 42;' };
 function fixtureResponse(summary: string): { text: string; model?: string } { return JSON.parse(summary.replace(/ 😀$/, '')); }
+
+for (const mode of ['act', 'plan'] as const) {
+	test(`configured specialist runtime budget cancels a direct ${mode} turn through the canonical ACP route`, { timeout: 10_000 }, async t => {
+		const warnings: unknown[][] = [];
+		t.mock.method(console, 'warn', (...args: unknown[]) => { warnings.push(args); });
+		const directory = await mkdtemp(path.join(os.tmpdir(), 'acp-configured-deadline-'));
+		t.after(() => rm(directory, { recursive: true, force: true }));
+		const cancelFile = path.join(directory, 'cancelled');
+		const { stack } = await routingStack(t, {
+			'sota.agents.anton-code.acpAgent': 'claude-acp',
+			'sota.agents.maxRuntimeMs': 150,
+			'sota.acp.agents': [{ ...claudeFixture, env: { FIXTURE_MODES: '1', FIXTURE_CANCEL_FILE: cancelFile } }],
+		});
+		const code = stack.specialists.get('anton-code')!;
+		// Separate process startup from the measured prompt, including Board's
+		// read-only Plan route. The next turn relies only on the saved setting.
+		await code.runAgenticTurn('warm session', () => {}, cancellation, { conversationId: mode, mode, maxRuntimeMs: 5_000 });
+		const started = Date.now();
+		await assert.rejects(code.runAgenticTurn('slow', () => {}, cancellation, { conversationId: mode, mode }), /deadline/);
+		assert.ok(Date.now() - started < 2_000, 'configured execution budget must not use the one-hour transport ceiling');
+		assert.deepEqual([await readFile(cancelFile, 'utf8'), stack.acpRuntime?.snapshot().active, warnings], ['cancelled', 0, []]);
+	});
+}
 
 test('Claude specialist routing recovers after adapter configuration without rebuilding the stack', async t => {
 	const settings: Record<string, unknown> = {};
