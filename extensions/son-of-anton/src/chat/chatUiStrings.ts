@@ -88,6 +88,7 @@ export function getChatUiStrings(): Record<string, string> {
 		chooseModel: vscode.l10n.t('Choose a Model'),
 		searchModels: vscode.l10n.t('Search Models…'),
 		noModels: vscode.l10n.t('No models match your search.'),
+		modelUnavailable: vscode.l10n.t('This model is no longer in the provider catalog. Choose another model to send your message.'),
 		draftSaved: vscode.l10n.t('Draft Saved'),
 		draftImages: vscode.l10n.t('Text Draft Saved · Images Kept Until Reload'),
 		newConversation: vscode.l10n.t('New Conversation'),

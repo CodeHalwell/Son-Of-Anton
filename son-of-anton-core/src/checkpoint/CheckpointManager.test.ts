@@ -8,8 +8,43 @@ import fs from 'node:fs/promises';
 import syncFs from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { CheckpointManager } from './CheckpointManager';
 import type { ConfigStore, MementoStore } from '../host';
+
+for (const kind of ['fs', 'git'] as const) {
+	test(`${kind} checkpoint releases its retained snapshot after the deleted parent's final branch is removed`, async t => {
+		const directory = await fs.mkdtemp(join(tmpdir(), 'sota-checkpoint-last-branch-')); t.after(() => fs.rm(directory, { recursive: true, force: true }));
+		const root = join(directory, 'workspace'); await fs.mkdir(root); await fs.writeFile(join(root, 'file'), 'one');
+		const git = (...args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+		if (kind === 'git') { git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.invalid'); git('add', '.'); git('commit', '-qm', 'initial'); }
+		const values = new Map<string, unknown>(); const state: MementoStore = { get: <T>(key: string, fallback?: T) => (values.get(key) ?? fallback) as T, update: async (key, value) => { values.set(key, value); } };
+		const config: ConfigStore = { get: <T>(_key: string, fallback?: T) => fallback as T };
+		const ids = new Set(['parent', 'first-branch', 'last-branch']);
+		const conversations = { load: (id: string) => ids.has(id) ? { messages: ['turn'], summary: {} } : undefined, update() {} };
+		const host = { storageRoot: join(directory, 'storage'), getWorkspaceRoot: () => root, config, confirmRestore: async () => true, notifier: { info() {}, warn(message: string) { assert.fail(message); }, error(message: string) { assert.fail(message); } } };
+		const manager = new CheckpointManager(conversations, state, host); t.after(() => manager.dispose());
+		const checkpoint = await manager.capture('parent', 1, 'first'); assert.ok(checkpoint);
+		await manager.attachToBranch(checkpoint.id, 'first-branch'); await manager.attachToBranch(checkpoint.id, 'last-branch');
+		ids.delete('parent'); await manager.deleteFor('parent');
+		assert.deepEqual({ ownerDeleted: manager.get(checkpoint.id)?.ownerDeleted, parent: manager.list('parent').length, branches: manager.get(checkpoint.id)?.branchConversationIds }, { ownerDeleted: true, parent: 0, branches: ['first-branch', 'last-branch'] });
+		const reopened = new CheckpointManager(conversations, state, host); t.after(() => reopened.dispose());
+		await assert.rejects(reopened.restore(checkpoint.id, { conversationToo: true, conversationId: 'parent' }), /not associated/);
+		// A palette restore without an explicit conversation must retain its recovery
+		// point under a surviving branch, never under the deleted parent.
+		await reopened.restore(checkpoint.id, { conversationToo: false });
+		assert.equal(reopened.list('first-branch').length, 2);
+		ids.delete('first-branch'); await reopened.deleteFor('first-branch');
+		assert.equal(reopened.list('last-branch')[0]?.id, checkpoint.id);
+		ids.delete('last-branch'); await reopened.deleteFor('last-branch');
+		assert.deepEqual(reopened.listAll(), []);
+		if (checkpoint.fileSnapshot) {
+			const snapshot = checkpoint.fileSnapshot;
+			await assert.rejects(fs.access(join(snapshot.storageRoot, createHash('sha256').update(snapshot.workspaceRoot).digest('hex'), snapshot.id)), { code: 'ENOENT' });
+		} else { assert.equal(git('for-each-ref', '--format=%(refname)', 'refs/son-of-anton/checkpoints/'), ''); }
+	});
+}
 
 test('non-Git manager retains branch-linked checkpoints through parent deletion and count pruning', async t => {
 	const directory = await fs.mkdtemp(join(tmpdir(), 'sota-checkpoint-manager-')); t.after(() => fs.rm(directory, { recursive: true, force: true }));

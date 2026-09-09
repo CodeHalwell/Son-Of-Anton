@@ -23,4 +23,22 @@ suite('Impact evidence paths', () => {
 			assert.match(data?.evidence ?? '', /unsaved editor version 3/);
 		} finally { Object.assign(vscode.commands, { executeCommand: old }); }
 	});
+	test('test grouping accepts full directory segments or filename suffixes, not partial path matches', async () => {
+		const cases: Array<[string, boolean]> = [
+			['/project/test/caller.ts', true], ['/project/tests/caller.ts', true], ['/project/__tests__/caller.ts', true],
+			['/project/caller.test.ts', true], ['/project/caller.spec.tsx', true], ['/project/caller_test.go', true],
+			['C:\\project\\tests\\caller.ts', true], ['C:\\project\\caller.spec.ts', true],
+			['/project/contest/caller.ts', false], ['/project/tests-helper/caller.ts', false], ['/project/__tests__backup/caller.ts', false],
+			['/project/caller.test.ts/source.ts', false], ['/project/caller_test', false], ['/project/caller.ts', false],
+		];
+		const old = vscode.commands.executeCommand;
+		const item = (name: string, filePath: string) => ({ name, uri: { scheme: 'file', fsPath: filePath, toString: () => filePath }, selectionRange: { start: { line: 0, character: 0 } } }) as vscode.CallHierarchyItem;
+		const root = item('target', '/project/root.ts');
+		Object.assign(vscode.commands, { executeCommand: async (command: string, value: vscode.CallHierarchyItem) => command === 'vscode.prepareCallHierarchy' ? [root] : value === root ? cases.map(([file], index) => ({ from: item(`caller${index}`, file), fromRanges: [] })) : [] });
+		try {
+			const result = await languageImpact({ version: 1, uri: root.uri, isDirty: false, isClosed: false } as vscode.TextDocument, { line: 0, character: 0 } as vscode.Position);
+			assert.deepEqual(result?.nodes.map(node => [node.filePath, node.type === 'test']), cases);
+			assert.equal(result?.edges.length, cases.length, 'Classification must not invent or remove provider call edges');
+		} finally { Object.assign(vscode.commands, { executeCommand: old }); }
+	});
 });

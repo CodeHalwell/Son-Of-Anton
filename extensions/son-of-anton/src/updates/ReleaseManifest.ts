@@ -10,6 +10,11 @@ export interface IdeRelease { tag_name: string; name: string; draft: boolean; pr
 export interface Installer { name: string; bytes: number; sha256: string; signing: string; url: string; commit: string }
 interface BuildManifest { version: number; channel?: ReleaseChannel; ideVersion: string; commit: string; builds: { target: string; signing: string; files: { name: string; bytes: number; sha256: string }[] }[] }
 
+/** A tag suffix is a preview even when its upstream release metadata is mislabeled. */
+export function isPreviewRelease(release: Pick<IdeRelease, 'tag_name' | 'prerelease'>): boolean {
+	return release.prerelease || !/^ide-v\d+\.\d+\.\d+$/.test(release.tag_name);
+}
+
 /** Reject external origins and tag/path substitution before contacting an asset endpoint. */
 export function releaseAssetUrl(value: string, tag: string, name: string): string {
 	const url = new URL(value);
@@ -22,7 +27,7 @@ export function releaseAssetUrl(value: string, tag: string, name: string): strin
 export function installerForRelease(release: IdeRelease, raw: string, target: string, channel: ReleaseChannel): Installer {
 	const manifest = JSON.parse(raw) as BuildManifest;
 	if (!/^ide-v\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(release.tag_name) || manifest.version !== 1 || !/^[a-f\d]{40}$/i.test(manifest.commit) || !Array.isArray(manifest.builds) || release.tag_name !== `ide-v${manifest.ideVersion}` || release.draft) { throw new Error('Invalid IDE build manifest.'); }
-	if (channel === 'stable' && (release.prerelease || manifest.channel !== 'stable')) { throw new Error('This release is not eligible for the stable channel.'); }
+	if (channel === 'stable' && (isPreviewRelease(release) || manifest.channel !== 'stable')) { throw new Error('This release is not eligible for the stable channel.'); }
 	const build = manifest.builds.find(entry => entry.target === target);
 	if (!build) { throw new Error('This release has no installer for this operating system and architecture.'); }
 	if (channel === 'stable' && ((target.startsWith('darwin') && build.signing !== 'developer-id-notarized') || (target.startsWith('win32') && build.signing !== 'authenticode'))) { throw new Error('Stable installer signing requirements were not met.'); }
@@ -36,6 +41,6 @@ export function installerForRelease(release: IdeRelease, raw: string, target: st
 
 /** Preview includes published stable builds; drafts and unrelated CLI releases are excluded. */
 export function eligibleReleases(releases: IdeRelease[], channel: ReleaseChannel): IdeRelease[] {
-	return releases.filter(release => !release.draft && /^ide-v\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(release.tag_name) && (channel === 'preview' || !release.prerelease) && Number.isFinite(Date.parse(release.published_at)))
+	return releases.filter(release => !release.draft && /^ide-v\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(release.tag_name) && (channel === 'preview' || !isPreviewRelease(release)) && Number.isFinite(Date.parse(release.published_at)))
 		.sort((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at));
 }

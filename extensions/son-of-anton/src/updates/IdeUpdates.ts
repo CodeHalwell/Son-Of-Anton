@@ -7,7 +7,8 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { arch } from 'node:os';
 import { createHash } from 'node:crypto';
-import { IDE_REPOSITORY, eligibleReleases, installerForRelease, releaseAssetUrl, type IdeRelease, type ReleaseChannel } from './ReleaseManifest';
+import { IDE_REPOSITORY, isPreviewRelease, releaseAssetUrl, type IdeRelease, type ReleaseChannel } from './ReleaseManifest';
+import { MAX_RELEASE_CANDIDATES, verifiedReleaseCandidates } from './ReleaseCandidates';
 import { readResponseBody } from './ResponseStream';
 
 const MAX_METADATA_BYTES = 2 * 1024 * 1024;
@@ -31,37 +32,36 @@ export function registerIdeUpdates(context: vscode.ExtensionContext): void {
 	const abort = new AbortController();
 	context.subscriptions.push({ dispose: () => { disposed = true; abort.abort(); } });
 	const channel = (): ReleaseChannel => vscode.workspace.getConfiguration('sota').get('updates.channel') === 'preview' ? 'preview' : 'stable';
-	const list = async (): Promise<IdeRelease[]> => {
-		const response = await fetch(`https://api.github.com/repos/${IDE_REPOSITORY}/releases?per_page=100`, { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Son-of-Anton-IDE' }, redirect: 'error', signal: AbortSignal.any([abort.signal, AbortSignal.timeout(30_000)]) });
+	const list = async (signal: AbortSignal): Promise<IdeRelease[]> => {
+		const response = await fetch(`https://api.github.com/repos/${IDE_REPOSITORY}/releases?per_page=${MAX_RELEASE_CANDIDATES}`, { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Son-of-Anton-IDE' }, redirect: 'error', signal });
 		const releases = JSON.parse(await boundedText(response)) as IdeRelease[];
 		if (!Array.isArray(releases)) { throw new Error(vscode.l10n.t('Invalid release list.')); }
-		return eligibleReleases(releases, channel());
+		return releases;
 	};
 	const run = async (rollback = false, quiet = false): Promise<void> => {
 		if (busy || disposed) { return; }
 		busy = true;
+		const metadataAbort = new AbortController();
 		try {
-			const installed = await readInstalledBuild(), releases = await list();
-			const currentVersion = `ide-v${vscode.version}`;
-			const installedAt = installed.date ? Date.parse(installed.date) : NaN;
-			const candidates = releases.filter(release => rollback
-				? Number.isFinite(installedAt) && Date.parse(release.published_at) < installedAt
-				: Number.isFinite(installedAt) ? Date.parse(release.published_at) > installedAt : release.tag_name.localeCompare(currentVersion, undefined, { numeric: true }) > 0);
+			const selectedChannel = channel(), metadataSignal = AbortSignal.any([abort.signal, metadataAbort.signal, AbortSignal.timeout(30_000)]);
+			const installed = await readInstalledBuild(), releases = await list(metadataSignal);
+			const candidates = await verifiedReleaseCandidates(releases, { ...installed, version: vscode.version }, `${process.platform}-${arch()}`, selectedChannel, rollback, async release => {
+				const asset = release.assets.find(asset => asset.name === 'build-manifest.json')!;
+				return boundedText(await fetch(releaseAssetUrl(asset.browser_download_url, release.tag_name, asset.name), { signal: metadataSignal }));
+			});
+			metadataAbort.abort();
+			if (disposed) { return; }
 			if (!candidates.length) {
 				if (!quiet) { await vscode.window.showInformationMessage(rollback ? vscode.l10n.t('No earlier published installer is available for this build and channel.') : vscode.l10n.t('No newer published IDE release is available on the {0} channel.', channel())); }
 				return;
 			}
 			if (quiet) {
-				const choice = await vscode.window.showInformationMessage(vscode.l10n.t('Son of Anton {0} is available.', candidates[0].tag_name), vscode.l10n.t('Review Update'));
+				const choice = await vscode.window.showInformationMessage(vscode.l10n.t('Son of Anton {0} is available.', candidates[0].release.tag_name), vscode.l10n.t('Review Update'));
 				if (!choice || disposed) { return; }
 			}
-			const selected = await vscode.window.showQuickPick(candidates.map(release => ({ label: release.name || release.tag_name, description: release.published_at.slice(0, 10), detail: release.prerelease ? vscode.l10n.t('Preview release') : vscode.l10n.t('Stable release'), release })), { title: rollback ? vscode.l10n.t('Choose an Earlier IDE Installer') : vscode.l10n.t('Choose an IDE Update'), placeHolder: vscode.l10n.t('The installer is downloaded and verified before you choose to open it.') });
+			const selected = await vscode.window.showQuickPick(candidates.map(({ release, installer }) => ({ label: release.name || release.tag_name, description: release.published_at.slice(0, 10), detail: isPreviewRelease(release) ? vscode.l10n.t('Preview release') : vscode.l10n.t('Stable release'), release, installer })), { title: rollback ? vscode.l10n.t('Choose an Earlier IDE Installer') : vscode.l10n.t('Choose an IDE Update'), placeHolder: vscode.l10n.t('The installer is downloaded and verified before you choose to open it.') });
 			if (!selected || disposed) { return; }
-			const release = selected.release, manifestAsset = release.assets.find(asset => asset.name === 'build-manifest.json');
-			if (!manifestAsset) { throw new Error(vscode.l10n.t('This release predates verified IDE updates. Download it from GitHub manually.')); }
-			const manifest = await boundedText(await fetch(releaseAssetUrl(manifestAsset.browser_download_url, release.tag_name, manifestAsset.name), { signal: AbortSignal.any([abort.signal, AbortSignal.timeout(30_000)]) }));
-			const installer = installerForRelease(release, manifest, `${process.platform}-${arch()}`, channel());
-			if (installer.commit === installed.commit) { await vscode.window.showInformationMessage(vscode.l10n.t('This build is already installed.')); return; }
+			const { release, installer } = selected;
 			const folder = path.join(context.globalStorageUri.fsPath, 'updates', release.tag_name), destination = path.join(folder, installer.name);
 			await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: vscode.l10n.t('Downloading {0}', installer.name), cancellable: true }, async (progress, token) => {
 				const cancel = new AbortController(), subscription = token.onCancellationRequested(() => cancel.abort());
@@ -90,7 +90,7 @@ export function registerIdeUpdates(context: vscode.ExtensionContext): void {
 			else if (choice === reveal) { await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(destination)); }
 		} catch (error) {
 			if (!disposed && !quiet) { await vscode.window.showErrorMessage(vscode.l10n.t('IDE update failed: {0}', error instanceof Error ? error.message : String(error))); }
-		} finally { busy = false; }
+		} finally { metadataAbort.abort(); busy = false; }
 	};
 	context.subscriptions.push(vscode.commands.registerCommand('sota.checkForIdeUpdates', () => run()), vscode.commands.registerCommand('sota.rollbackIdeUpdate', () => run(true)));
 	if (vscode.workspace.getConfiguration('sota').get('updates.checkOnStartup', false)) { void run(false, true); }

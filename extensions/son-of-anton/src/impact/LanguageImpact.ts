@@ -34,7 +34,9 @@ export async function languageImpact(document: vscode.TextDocument, position: vs
 			seen.set(key(item), id);
 			const chain = [item.name, ...next.chain], filePath = item.uri.fsPath;
 			// The call edge is exact provider evidence; the filename only groups likely test source files.
-			const testFile = /(?:^|[/\\])(?:tests?|__tests__)(?:[/\\])|(?:\.test|\.spec|_test)\.[^/\\]+$/.test(filePath);
+			const inTestDirectory = filePath.split(/[/\\]/).slice(0, -1).some(segment => ['test', 'tests', '__tests__'].includes(segment));
+			const testFilename = /(?:\.test|\.spec|_test)\.[^/\\]+$/.test(filePath);
+			const testFile = inTestDirectory || testFilename;
 			nodes.push({ id, label: item.name, filePath, symbolName: item.name, line: item.selectionRange.start.line + 1, type: testFile ? 'test' : next.depth === 0 ? 'direct' : 'transitive', depth: next.depth + 1, signature: chain.join(' → ') });
 			if (nodes.length >= 80) { truncated = true; break; }
 			if (next.depth < 2) {

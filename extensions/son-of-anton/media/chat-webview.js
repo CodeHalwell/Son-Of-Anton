@@ -109,7 +109,7 @@
 		const historyNewBtn = document.getElementById('historyNewBtn');
 		const rosterPaneGrid = document.getElementById('rosterPaneGrid');
 
-		const MODEL_LABELS = {
+		const MODEL_LABELS = new Map(Object.entries({
 			// Anthropic — short aliases (kept for legacy sessions/CLI defaults).
 			opus: 'Opus',
 			sonnet: 'Sonnet',
@@ -248,7 +248,7 @@
 			'codex-gpt-5': 'GPT-5 via Codex CLI',
 			'codex-gpt-5-mini': 'GPT-5 mini via Codex CLI',
 			'codex-gpt-5-codex': 'GPT-5 Codex via Codex CLI',
-		};
+		}));
 		const ATTACH_LABELS = { 'current-file': 'Current file', 'current-selection': 'Selection', 'terminal-output': 'Terminal output' };
 
 		// Generative-UI renderer registry. Keyed by component name; each value
@@ -516,6 +516,7 @@
 		}
 		for (const [id, type] of [['queueMessageBtn', 'queueMessage'], ['redirectMessageBtn', 'redirectMessage']]) {
 			document.getElementById(id).addEventListener('click', () => {
+				if (isCurrentModelUnavailable()) { modelChip.focus(); return; }
 				const queuedText = extractInlineUrlMentions(messageInput.value);
 				const id = crypto.randomUUID();
 				pendingQueueDraft = { id, draft: captureComposerDraft() };
@@ -531,7 +532,7 @@
 			includeContext.checked = draft.includeContext !== false;
 			excludedContext = [...(draft.excludedContext || [])];
 			contextSnapshotId = undefined;
-			if (Object.hasOwn(MODEL_METADATA_RAW, draft.model)) currentModel = draft.model;
+			if (isSavedModel(draft.model)) currentModel = draft.model;
 			if (SPECIALISTS.some(specialist => specialist.id === draft.agent)) currentAgent = draft.agent;
 			if (draft.mode === 'plan' || draft.mode === 'act') currentMode = draft.mode;
 			updateModelLabel(); updateModelMenuChecks(); updateAgentLabel(); updateAgentMenuChecks(); updateHeaderSubtitle(); updateModeUi();
@@ -583,7 +584,7 @@
 		function activateDraft(id, savedModel) {
 			if (typeof id !== 'string' || !id) return;
 			if (id === activeConversationId) {
-				if (typeof savedModel === 'string' && Object.hasOwn(MODEL_METADATA_RAW, savedModel)) currentModel = savedModel;
+				if (isSavedModel(savedModel)) currentModel = savedModel;
 				updateModelLabel();
 				updateModelMenuChecks();
 				return;
@@ -599,7 +600,7 @@
 			mentions = Array.isArray(draft?.mentions) ? [...draft.mentions] : [];
 			imageAttachments = Array.isArray(draft?.images) ? [...draft.images] : [];
 			includeContext.checked = draft?.includeContext !== false;
-			currentModel = [savedModel, draft?.model, document.body.dataset.defaultModel, 'sonnet'].find(model => typeof model === 'string' && Object.hasOwn(MODEL_METADATA_RAW, model));
+			currentModel = [savedModel, draft?.model, document.body.dataset.defaultModel, 'sonnet'].find(isSavedModel);
 			historyIndex = -1;
 			historyDraft = '';
 			messageInput.style.height = 'auto';
@@ -2700,6 +2701,7 @@
 				vscode.postMessage({ type: 'cancelRequest' });
 				return;
 			}
+			if (!renderOnly && isCurrentModelUnavailable()) { modelChip.focus(); return; }
 			let text = messageInput.value.trim();
 
 			// `@url <link>` is a deferred chip — when the user types '@url '
@@ -2802,6 +2804,11 @@
 		function updateSendAffordance() {
 			document.getElementById('queueMessageBtn').hidden = !isStreaming;
 			document.getElementById('redirectMessageBtn').hidden = !isStreaming;
+			const unavailable = isCurrentModelUnavailable();
+			document.getElementById('unavailableModelNotice').hidden = !unavailable;
+			document.getElementById('queueMessageBtn').disabled = unavailable;
+			document.getElementById('redirectMessageBtn').disabled = unavailable;
+			sendBtn.disabled = !isStreaming && unavailable;
 			if (isStreaming) {
 				sendBtn.classList.remove('is-empty');
 				return;
@@ -3070,13 +3077,22 @@
 			});
 		}
 
+		function isSavedModel(model) {
+			return typeof model === 'string' && (model.startsWith('catalog:') || MODEL_METADATA_RAW.has(model));
+		}
+		function isCurrentModelUnavailable() {
+			if (!currentModel.startsWith('catalog:') || !providerCatalogSnapshot) return false;
+			const provider = providerCatalogSnapshot.providers.find(entry => entry.id === currentModel.split(':')[1]);
+			return Boolean(provider && !provider.truncated && provider.catalogStatus === 'ready' && !provider.models.some(model => model.id === currentModel && model.chat !== false));
+		}
 		function updateModelLabel() {
 			const acpAgent = getCurrentAcpAgent();
-			modelLabel.textContent = acpAgent && !currentModel.startsWith('catalog:acp:') ? uiText('managedByAcp') : MODEL_LABELS[currentModel] || currentModel;
+			modelLabel.textContent = acpAgent && !currentModel.startsWith('catalog:acp:') ? uiText('managedByAcp') : MODEL_LABELS.get(currentModel) || currentModel;
 			modelChip.disabled = Boolean(acpAgent) && !currentModel.startsWith('catalog:acp:');
 			modelChip.title = acpAgent ? uiText('acpModelHelp', acpAgent) : '';
 			if (modelChip.disabled) { modelMenu.hidden = true; }
 			updateReasoningChipVisibility();
+			updateSendAffordance();
 		}
 
 		function getCurrentAcpAgent() {
@@ -3882,8 +3898,8 @@
 		// user actually hovers something.
 		const MODEL_METADATA_RAW = (function () {
 			const node = document.getElementById('modelMetadataData');
-			if (!node || !node.textContent) return {};
-			try { return JSON.parse(node.textContent); } catch (e) { return {}; }
+			if (!node || !node.textContent) return new Map();
+			try { return new Map(Object.entries(JSON.parse(node.textContent))); } catch (e) { return new Map(); }
 		})();
 		let modelTooltipEl = null;
 		function ensureModelTooltip() {
@@ -3907,7 +3923,7 @@
 			return '$' + info.inputCostPer1M + ' / $' + info.outputCostPer1M + ' per Mtok';
 		}
 		function showModelTooltip(modelId, anchor) {
-			const info = MODEL_METADATA_RAW[modelId];
+			const info = MODEL_METADATA_RAW.get(modelId);
 			if (!info) return;
 			const tip = ensureModelTooltip();
 			const caps = Array.isArray(info.capabilities) ? info.capabilities.join(' / ') : '';
@@ -3937,7 +3953,7 @@
 		modelMenu.querySelectorAll('.popover-item').forEach((item) => {
 			if (item.querySelector('.popover-item-info')) return;
 			const modelId = item.getAttribute('data-model');
-			if (!modelId || !MODEL_METADATA_RAW[modelId]) return;
+			if (!modelId || !MODEL_METADATA_RAW.has(modelId)) return;
 			const icon = document.createElement('span');
 			icon.className = 'popover-item-info';
 			icon.setAttribute('aria-label', 'Model details');
@@ -4347,9 +4363,14 @@
 				}
 				case 'providerCatalog': {
 					providerCatalogSnapshot = message.snapshot;
-					Object.assign(MODEL_METADATA_RAW, message.metadata || {});
-					discoveredModels = (message.snapshot?.providers || []).flatMap(provider => provider.models.filter(model => model.chat !== false).map(model => ({ ...model, providerName: provider.name })));
-					for (const model of discoveredModels) MODEL_LABELS[model.id] = model.label;
+					discoveredModels = (message.snapshot?.providers || []).flatMap(provider => provider.models.filter(model => model.chat !== false && typeof model.id === 'string' && model.id.startsWith('catalog:') && typeof model.label === 'string').map(model => ({ ...model, providerName: provider.name })));
+					const catalogIds = new Set(discoveredModels.map(model => model.id));
+					// Provider-controlled IDs belong in maps, never object properties. Also
+					// retire metadata for models removed from the current provider snapshot.
+					for (const id of MODEL_LABELS.keys()) { if (id.startsWith('catalog:')) MODEL_LABELS.delete(id); }
+					for (const id of MODEL_METADATA_RAW.keys()) { if (id.startsWith('catalog:') && !catalogIds.has(id)) MODEL_METADATA_RAW.delete(id); }
+					for (const [id, metadata] of Object.entries(message.metadata || {})) { if (catalogIds.has(id)) MODEL_METADATA_RAW.set(id, metadata); }
+					for (const model of discoveredModels) MODEL_LABELS.set(model.id, model.label);
 					filterModels(); updateModelLabel(); updateModelMenuChecks();
 					if (message.snapshot) SotaWorkflows.renderProviderInventory(document.getElementById('providerDiscoveryStatus'), message.snapshot, uiText);
 					updateAuthGate(latestConnectionStatus);
@@ -9117,7 +9138,7 @@
 				rowEl.className = 'hdr-cost-popover-row';
 				const label = document.createElement('span');
 				label.className = 'hdr-cost-popover-label';
-				label.textContent = MODEL_LABELS[row.model] || row.model;
+				label.textContent = MODEL_LABELS.get(row.model) || row.model;
 				const value = document.createElement('span');
 				value.className = 'hdr-cost-popover-value';
 				value.textContent = formatTokenCount(tokens) + ' · ' + formatDollars(dollars);

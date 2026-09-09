@@ -9,6 +9,7 @@ exports.discoveredAcpModels = discoveredAcpModels;
 exports.discoveredModelId = discoveredModelId;
 exports.discoveredAcpModelId = discoveredAcpModelId;
 exports.registerDiscoveredModels = registerDiscoveredModels;
+exports.replaceDiscoveredModels = replaceDiscoveredModels;
 exports.getDiscoveredModel = getDiscoveredModel;
 exports.markDiscoveredToolsVerified = markDiscoveredToolsVerified;
 const protocol_1 = require("../acp/protocol");
@@ -34,28 +35,72 @@ function discoveredAcpModelId(adapterId, model) {
 function registerDiscoveredModels(entries) {
     let changed = false;
     for (const model of entries.slice(0, 10000)) {
-        try {
-            const identifier = model.provider === 'acp' && model.acpAdapterId !== undefined
-                ? discoveredAcpModelId(model.acpAdapterId, model.model)
-                : discoveredModelId(model.provider, model.acpAdapterId ? `${model.acpAdapterId}/${model.model}` : model.model);
-            if (!providers.has(model.provider) || model.id !== identifier
-                || ![true, false, 'unknown'].includes(model.chat) || ![true, false, 'unknown'].includes(model.images) || ![true, false, 'unknown'].includes(model.tools)) {
-                continue;
-            }
-            const previous = models.get(model.id);
-            const value = previous?.capabilitySource === 'verified' && previous.verifiedAt && Date.now() - previous.verifiedAt < 24 * 60 * 60 * 1000 && model.tools === 'unknown' ? { ...model, tools: previous.tools, capabilitySource: previous.capabilitySource, verifiedAt: previous.verifiedAt } : { ...model };
-            models.set(model.id, value);
-            changed ||= JSON.stringify(previous) !== JSON.stringify(value);
+        const value = validatedModel(model);
+        if (!value) {
+            continue;
         }
-        catch { /* Malformed cached/catalog entries must not break activation. */ }
+        changed ||= JSON.stringify(models.get(value.id)) !== JSON.stringify(value);
+        models.set(value.id, value);
     }
     if (changed) {
-        for (const listener of listeners) {
-            try {
-                listener();
-            }
-            catch { /* Observer errors do not break model execution. */ }
+        notifyChanged();
+    }
+}
+/** Replace only a complete, authoritative catalog; failed/partial refreshes must use cached entries. */
+function replaceDiscoveredModels(scope, entries) {
+    if (!providers.has(scope.provider) || entries.length > 10000) {
+        throw new Error('Invalid replacement model catalog');
+    }
+    if (scope.provider === 'acp') {
+        discoveredAcpModelId(scope.acpAdapterId, 'scope-validation');
+    }
+    const owns = (model) => model.provider === scope.provider && (scope.provider !== 'acp' || model.acpAdapterId === scope.acpAdapterId);
+    const next = new Map();
+    for (const model of entries) {
+        const value = validatedModel(model);
+        if (!value || !owns(value)) {
+            throw new Error('Replacement model catalog contains an invalid or unrelated entry');
         }
+        next.set(value.id, value);
+    }
+    let changed = false;
+    for (const [id, model] of models) {
+        if (owns(model) && !next.has(id)) {
+            models.delete(id);
+            changed = true;
+        }
+    }
+    for (const [id, model] of next) {
+        changed ||= JSON.stringify(models.get(id)) !== JSON.stringify(model);
+        models.set(id, model);
+    }
+    if (changed) {
+        notifyChanged();
+    }
+}
+function validatedModel(model) {
+    try {
+        const identifier = model.provider === 'acp' && model.acpAdapterId !== undefined
+            ? discoveredAcpModelId(model.acpAdapterId, model.model)
+            : discoveredModelId(model.provider, model.acpAdapterId ? `${model.acpAdapterId}/${model.model}` : model.model);
+        if (!providers.has(model.provider) || model.id !== identifier
+            || ![true, false, 'unknown'].includes(model.chat) || ![true, false, 'unknown'].includes(model.images) || ![true, false, 'unknown'].includes(model.tools)) {
+            return undefined;
+        }
+        const previous = models.get(model.id);
+        return previous?.capabilitySource === 'verified' && previous.verifiedAt && Date.now() - previous.verifiedAt < 24 * 60 * 60 * 1000 && model.tools === 'unknown'
+            ? { ...model, tools: previous.tools, capabilitySource: previous.capabilitySource, verifiedAt: previous.verifiedAt } : { ...model };
+    }
+    catch {
+        return undefined; /* Malformed cached/catalog entries must not break activation. */
+    }
+}
+function notifyChanged() {
+    for (const listener of listeners) {
+        try {
+            listener();
+        }
+        catch { /* Observer errors do not break model execution. */ }
     }
 }
 function getDiscoveredModel(id) { return models.get(id); }

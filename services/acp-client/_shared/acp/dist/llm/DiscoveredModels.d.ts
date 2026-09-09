@@ -1,6 +1,12 @@
 export type CatalogProvider = 'anthropic' | 'openai' | 'google' | 'openrouter' | 'ollama' | 'lmstudio' | 'deepseek' | 'mistral' | 'groq' | 'cerebras' | 'together' | 'fireworks' | 'foundry' | 'bedrock' | 'acp' | 'claude-code' | 'codex' | 'copilot' | 'xai' | 'moonshot' | 'zai' | 'minimax';
 export type DiscoveredModelId = `catalog:${CatalogProvider}:${string}`;
 export type CapabilityAvailability = boolean | 'unknown';
+export type DiscoveredModelScope = {
+    provider: Exclude<CatalogProvider, 'acp'>;
+} | {
+    provider: 'acp';
+    acpAdapterId: string;
+};
 export interface DiscoveredModel {
     id: DiscoveredModelId;
     provider: CatalogProvider;
@@ -29,6 +35,8 @@ export declare function discoveredModelId(provider: CatalogProvider, model: stri
 export declare function discoveredAcpModelId(adapterId: string, model: string): DiscoveredModelId;
 /** Only catalog entries received through discovery can become executable model routes. */
 export declare function registerDiscoveredModels(entries: readonly DiscoveredModel[]): void;
+/** Replace only a complete, authoritative catalog; failed/partial refreshes must use cached entries. */
+export declare function replaceDiscoveredModels(scope: DiscoveredModelScope, entries: readonly DiscoveredModel[]): void;
 export declare function getDiscoveredModel(id: string): DiscoveredModel | undefined;
 export declare function markDiscoveredToolsVerified(id: string): void;
 //# sourceMappingURL=DiscoveredModels.d.ts.map

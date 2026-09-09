@@ -141,6 +141,33 @@ test('a resumed ACP session negotiates and registers a 512-character model ID un
 	assert.equal(getDiscoveredModel(discoveredAcpModelId(configured.id, modelId))?.model, modelId);
 });
 
+test('new ACP sessions replace only their adapter catalog and reused sessions cannot resurrect removed models', async t => {
+	const runtime = new AcpRuntime(); t.after(() => runtime.shutdown());
+	const configured = (models: string[]) => ({ ...agent, id: 'refresh-adapter', env: { FIXTURE_MODEL_IDS: JSON.stringify(models) } });
+	const old = configured(['removed', 'retained']);
+	await runtime.run({ ...turn(), conversationId: 'older-session', agent: old });
+	await runtime.run({ ...turn(), agent: { ...configured(['other-model']), id: 'other-adapter' } });
+	await runtime.run({ ...turn(), conversationId: 'newer-session', agent: configured(['retained']) });
+	const lookup = (model: string) => getDiscoveredModel(discoveredAcpModelId('refresh-adapter', model));
+	assert.equal(lookup('removed'), undefined);
+	assert.ok(lookup('retained'));
+	await runtime.run({ ...turn('follow up'), conversationId: 'older-session', agent: old });
+	assert.equal(lookup('removed'), undefined);
+	// A successful advertisement remains authoritative when the selected model was removed.
+	await assert.rejects(runtime.run({ ...turn(), agent: { ...configured(['replacement']), modelId: 'retained' } }), /does not advertise the selected model/);
+	assert.equal(lookup('retained'), undefined);
+	assert.ok(lookup('replacement'));
+	await assert.rejects(runtime.run({ ...turn(), agent: { ...configured([]), env: { FIXTURE_BAD_VERSION: '1' } } }), /negotiate protocol/);
+	await runtime.run({ ...turn(), agent: { ...agent, id: 'refresh-adapter' } });
+	assert.ok(lookup('replacement'), 'Failed and unavailable advertisements preserve the last catalog');
+	await runtime.run({ ...turn(), agent: configured(Array.from({ length: 501 }, (_, index) => `bounded-${index}`)) });
+	assert.ok(lookup('replacement'), 'A bounded partial catalog cannot revoke an omitted model');
+	await runtime.run({ ...turn(), agent: configured([]) });
+	assert.equal(lookup('replacement'), undefined);
+	assert.equal(lookup('bounded-0'), undefined);
+	assert.ok(getDiscoveredModel(discoveredAcpModelId('other-adapter', 'other-model')));
+});
+
 
 test('permanent deletion removes scoped recovery while ordinary release retains it', async t => {
 	const sessionStore = store(); const runtime = new AcpRuntime({ sessionStore });

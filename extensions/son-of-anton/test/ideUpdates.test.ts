@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import { strict as assert } from 'node:assert';
-import { eligibleReleases, installerForRelease, releaseAssetUrl, type IdeRelease } from '../src/updates/ReleaseManifest';
+import { eligibleReleases, installerForRelease, isPreviewRelease, releaseAssetUrl, type IdeRelease } from '../src/updates/ReleaseManifest';
 import { readProfiles, integrationConflicts, captureIntegrationRoutes } from '../src/integrations/IntegrationProfiles';
 import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
@@ -24,6 +24,16 @@ suite('IDE releases and integration profiles', () => {
 	test('preview permits explicitly selected unsigned builds without silently entering stable', () => {
 		assert.equal(installerForRelease({ ...release, prerelease: true }, manifest('ad-hoc', 'preview'), 'darwin-arm64', 'preview').signing, 'ad-hoc');
 		assert.equal(eligibleReleases([{ ...release, draft: true }, { ...release, prerelease: true }, release], 'stable').length, 1);
+	});
+	test('stable clients reject every suffixed version despite incorrectly stable upstream metadata', () => {
+		for (const suffix of ['dev', 'nightly', 'custom-build.7', 'preview', 'rc.1', 'beta', 'alpha']) {
+			const version = `1.2.3-${suffix}`, preview = { ...release, tag_name: `ide-v${version}` };
+			const mislabeled = JSON.stringify({ ...JSON.parse(manifest()), ideVersion: version });
+			assert.equal(isPreviewRelease(preview), true);
+			assert.deepEqual(eligibleReleases([preview], 'stable'), []);
+			assert.deepEqual(eligibleReleases([preview], 'preview'), [preview]);
+			assert.throws(() => installerForRelease(preview, mislabeled, 'darwin-arm64', 'stable'), /stable channel/);
+		}
 	});
 	test('asset origins, tags and filenames cannot redirect download selection', () => {
 		for (const candidate of [url.replace('github.com', 'example.com'), url.replace('CodeHalwell', 'attacker'), `${url}?redirect=x`, url.replace('ide-v1.2.3', 'ide-v0.0.1'), url.replace(name, '../installer.exe')]) { assert.throws(() => releaseAssetUrl(candidate, release.tag_name, name)); }

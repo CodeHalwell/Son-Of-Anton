@@ -29,6 +29,8 @@ class AcpConnection {
     initialization;
     availableModes = [];
     availableModels = [];
+    modelsAdvertised = false;
+    modelsTruncated = false;
     constructor(definition, cwd) {
         this.definition = definition;
         this.cwd = cwd;
@@ -136,6 +138,8 @@ class AcpConnection {
         }
     }
     async selectModel(models, signal) {
+        this.modelsAdvertised = Array.isArray(models);
+        this.modelsTruncated = Array.isArray(models) && models.length > 500;
         this.availableModels = Array.isArray(models) ? models.filter(model => (0, protocol_1.object)(model) && (0, protocol_1.isValidAcpModelId)(model.modelId) && typeof model.name === 'string').slice(0, 500).map(model => ({ id: model.modelId, name: model.name.slice(0, 200) })) : [];
         if (this.definition.modelId) {
             if (!this.availableModels.some(model => model.id === this.definition.modelId)) {

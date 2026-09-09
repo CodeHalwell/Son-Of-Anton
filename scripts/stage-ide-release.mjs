@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import assert from 'node:assert/strict';
+import { ideReleasePolicy } from './ide-release-policy.mjs';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const version = JSON.parse(await readFile(path.join(root, 'package.json'))).version;
 const directory = path.join(root, '.build/downloaded-ide'), output = path.join(root, '.build/publish-ide');
@@ -15,8 +16,7 @@ const expected = ['darwin-arm64', 'darwin-x64', 'linux-x64', 'win32-x64'];
 const entries = (await readdir(directory)).sort();
 assert.deepEqual(entries, expected.map(target => `ide-${target}`).sort());
 const checksums = [], builds = [];
-const channel = process.env.SOTA_RELEASE_CHANNEL || 'preview';
-assert.ok(['stable', 'preview'].includes(channel), 'Invalid release channel');
+const { channel } = ideReleasePolicy(version, { ref: process.env.GITHUB_REF, channel: process.env.SOTA_RELEASE_CHANNEL });
 for (const target of expected) {
 	const source = path.join(directory, `ide-${target}`), manifest = JSON.parse(await readFile(path.join(source, 'manifest.json')));
 	assert.equal(manifest.target, target); assert.equal(manifest.ideVersion, version); assert.equal(manifest.commit, process.env.GITHUB_SHA);

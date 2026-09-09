@@ -1100,7 +1100,7 @@ test('bounded timeline pins a streaming turn and restores its original Markdown 
 
 test('provider discovery searches the complete catalog and distinguishes catalog access from inference verification', async t => {
 	const page = await openSurface(t, 'chat', 400);
-	const models = Array.from({ length: 180 }, (_, index) => ({ id: `fixture/model-${index}`, model: `model-${index}`, label: `Fixture Model ${index}`, chat: true }));
+	const models = Array.from({ length: 180 }, (_, index) => ({ id: `catalog:fixture:model-${index}`, model: `model-${index}`, label: `Fixture Model ${index}`, chat: true }));
 	await post(page, { type: 'providerCatalog', snapshot: { updatedAt: Date.now(), software: [{ name: 'Fixture CLI', installed: true, auth: 'file-present', configFiles: ['/fixture/config.json'] }], providers: [
 		{ id: 'fixture', name: 'Fixture Cloud', credentialSource: 'environment', catalogStatus: 'available', inferenceStatus: 'not-verified', models },
 		{ id: 'offline', name: 'Local Offline', credentialSource: 'none', catalogStatus: 'unreachable', inferenceStatus: 'not-verified', models: [], error: 'Local service is not running.' },
@@ -1120,6 +1120,44 @@ test('provider discovery searches the complete catalog and distinguishes catalog
 	assert.match(await page.locator('#providerDiscoveryStatus').innerText(), /Fixture CLI[\s\S]*Installed/);
 	assert.doesNotMatch(await page.locator('#providerDiscoveryStatus').innerText(), /\/fixture\/config.json/);
 	await assertNoPageOverflow(page); await screenshot(page, 'provider-discovery-sidebar');
+});
+
+test('provider catalogs isolate special object keys and retire removed picker metadata', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const model = { id: 'catalog:openai:fixture-safe', model: 'fixture-safe', label: 'Safe Catalog Model', chat: true };
+	const snapshot = models => ({ updatedAt: Date.now(), software: [], providers: [{ id: 'openai', name: 'OpenAI', credentialSource: 'environment', catalogStatus: 'ready', inferenceStatus: 'not-verified', models }] });
+	const metadata = JSON.parse('{"__proto__":{"blurb":"Injected prototype"},"constructor":{"blurb":"Injected constructor"},"sonnet":{"blurb":"Injected static metadata"}}');
+	metadata[model.id] = { blurb: 'Catalog metadata', capabilities: [], pricingStatus: 'unknown' };
+	await post(page, { type: 'providerCatalog', snapshot: snapshot([model, ...['__proto__', 'constructor', 'toString'].map(id => ({ ...model, id, label: `Injected ${id}` }))]), metadata });
+	await page.locator('#modelChip').click();
+	assert.equal(await page.locator('[data-model][data-discovered]').count(), 1);
+	await page.locator('#modelSearch').fill('Safe Catalog Model'); await page.locator('#modelSearch').press('Enter');
+	assert.match(await page.locator('#modelChip').innerText(), /Safe Catalog Model/);
+	await post(page, { type: 'loadConversation', conversationId: 'catalog-selected', lastModel: model.id, messages: [] });
+	assert.match(await page.locator('#modelChip').innerText(), /Safe Catalog Model/);
+	for (const state of [{ catalogStatus: 'error' }, { catalogStatus: 'disabled' }, { catalogStatus: 'not-configured' }, { catalogStatus: 'ready', truncated: true }]) {
+		const partial = snapshot([]); Object.assign(partial.providers[0], state);
+		await post(page, { type: 'providerCatalog', snapshot: partial });
+		assert.equal(await page.locator('#unavailableModelNotice').isVisible(), false);
+		assert.equal(await page.locator('#sendBtn').isDisabled(), false);
+	}
+	await post(page, { type: 'providerCatalog', snapshot: snapshot([]), metadata: { [model.id]: metadata[model.id] } });
+	await post(page, { type: 'loadConversation', conversationId: 'catalog-removed', lastModel: model.id, messages: [] });
+	assert.match(await page.locator('#modelChip').innerText(), /catalog:openai:fixture-safe/);
+	assert.equal(await page.locator('#unavailableModelNotice').isVisible(), true);
+	await page.locator('#messageInput').fill('Preserve the chosen provider'); await page.locator('#messageInput').press('Enter');
+	assert.equal(await page.locator('#sendBtn').isDisabled(), true);
+	assert.equal(await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').length), 0);
+	await assertNoPageOverflow(page); await screenshot(page, 'unavailable-provider-model-sidebar');
+	await page.locator('#modelChip').click();
+	assert.equal(await page.locator('[data-model][data-discovered]').count(), 0);
+	await page.locator('#modelSearch').fill('');
+	await page.locator('[data-model="sonnet"]').focus();
+	assert.doesNotMatch(await page.locator('.sota-model-tooltip').innerText(), /Injected/);
+	assert.equal(await page.evaluate(() => Object.prototype.blurb), undefined);
+	await page.locator('[data-model="sonnet"]').click();
+	assert.equal(await page.locator('#unavailableModelNotice').isVisible(), false);
+	assert.equal(await page.locator('#sendBtn').isDisabled(), false);
 });
 
 test('queued draft acknowledgements correlate request ids without erasing a newer composer draft', async t => {

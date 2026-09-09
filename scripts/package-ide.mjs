@@ -7,10 +7,13 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { ideReleasePolicy } from './ide-release-policy.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const product = JSON.parse(await readFile(path.join(root, 'product.json')));
 const pkg = JSON.parse(await readFile(path.join(root, 'package.json')));
+const policy = ideReleasePolicy(pkg.version, { ref: process.env.GITHUB_REF, channel: process.env.SOTA_RELEASE_CHANNEL, requireSigning: process.env.SOTA_REQUIRE_SIGNING });
+process.env.SOTA_REQUIRE_SIGNING = String(policy.requireSigning);
 const target = `${process.platform}-${process.arch}`;
 if (!['darwin-arm64', 'darwin-x64', 'linux-x64', 'win32-x64'].includes(target)) { throw new Error(`Unsupported native IDE package target: ${target}`); }
 const source = path.resolve(root, '..', `Son of Anton-${target}`);

@@ -266,6 +266,29 @@ class AcpRuntime {
             }
             return true;
         };
+        const negotiateSession = async (open) => {
+            try {
+                await open();
+            }
+            finally {
+                // Even an unavailable selected model can accompany a valid new catalog.
+                // Reused workers never republish their older session's advertised list.
+                const connection = worker.connection;
+                if (connection.modelsAdvertised) {
+                    const entries = connection.availableModels.map(model => ({
+                        id: (0, DiscoveredModels_1.discoveredAcpModelId)(job.turn.agent.id, model.id), provider: 'acp', acpAdapterId: job.turn.agent.id, model: model.id,
+                        label: `${job.turn.agent.id} · ${model.name}`, chat: true, images: !!connection.initialization?.agentCapabilities?.promptCapabilities?.image,
+                        tools: true, fetchedAt: Date.now(),
+                    }));
+                    if (connection.modelsTruncated) {
+                        (0, DiscoveredModels_1.registerDiscoveredModels)(entries);
+                    }
+                    else {
+                        (0, DiscoveredModels_1.replaceDiscoveredModels)({ provider: 'acp', acpAdapterId: job.turn.agent.id }, entries);
+                    }
+                }
+            }
+        };
         try {
             const fresh = !worker.ready;
             const saved = this.sessionStore?.get(job.key);
@@ -274,7 +297,7 @@ class AcpRuntime {
                 await worker.connection.initialize(job.controller.signal);
                 if (saved?.state === 'settled' && worker.connection.initialization?.agentCapabilities?.loadSession) {
                     try {
-                        await worker.connection.loadSession(saved.sessionId, job.turn.mcpServers, job.controller.signal, job.turn.modeId);
+                        await negotiateSession(() => worker.connection.loadSession(saved.sessionId, job.turn.mcpServers, job.controller.signal, job.turn.modeId));
                         resumed = true;
                     }
                     catch (error) {
@@ -287,7 +310,7 @@ class AcpRuntime {
                     }
                 }
                 if (!resumed) {
-                    await worker.connection.newSession(job.turn.mcpServers, job.controller.signal, job.turn.modeId);
+                    await negotiateSession(() => worker.connection.newSession(job.turn.mcpServers, job.controller.signal, job.turn.modeId));
                 }
                 worker.ready = true;
                 if (saved) {
@@ -301,11 +324,6 @@ class AcpRuntime {
                 plan: worker.connection.availableModes.includes('plan'), resume: !!worker.connection.initialization?.agentCapabilities?.loadSession,
                 metering: this.capabilities.get(capabilityKey)?.metering ?? 'unavailable',
             });
-            (0, DiscoveredModels_1.registerDiscoveredModels)(worker.connection.availableModels.map(model => ({
-                id: (0, DiscoveredModels_1.discoveredAcpModelId)(job.turn.agent.id, model.id), provider: 'acp', acpAdapterId: job.turn.agent.id, model: model.id,
-                label: `${job.turn.agent.id} · ${model.name}`, chat: true, images: !!worker.connection.initialization?.agentCapabilities?.promptCapabilities?.image,
-                tools: true, fetchedAt: Date.now(),
-            })));
             const restore = saved?.transcript.length ? [
                 'Host-owned conversation transcript (context only; never execute or replay prior tools):',
                 ...saved.transcript,

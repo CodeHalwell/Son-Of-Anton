@@ -20,6 +20,8 @@ export declare class AcpConnection {
         id: string;
         name: string;
     }>;
+    modelsAdvertised: boolean;
+    modelsTruncated: boolean;
     constructor(definition: AcpAgentDefinition, cwd: string);
     get isConnected(): boolean;
     get remoteSessionId(): string | undefined;

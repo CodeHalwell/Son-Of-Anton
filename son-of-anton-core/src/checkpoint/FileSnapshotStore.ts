@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import * as fs from 'node:fs/promises';
+import type { Stats } from 'node:fs';
 import * as path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 
@@ -19,6 +20,9 @@ const EXCLUDED = new Set(['.git', '.svn', '.hg', 'node_modules', '.venv', '__pyc
 const MAX_BYTES = 50 * 1024 * 1024;
 const MAX_FILES = 10000;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+function sameFile(left: Stats, right: Stats): boolean {
+	return left.isFile() && right.isFile() && left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mode === right.mode && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
+}
 
 /** Complete bounded snapshots for scratch folders. Dependencies and VCS internals are explicitly outside their scope. */
 export class FileSnapshotStore {
@@ -40,20 +44,38 @@ export class FileSnapshotStore {
 			for (const child of await fs.readdir(path.join(root, folder), { withFileTypes: true })) {
 				if (EXCLUDED.has(child.name)) { continue; }
 				const file = folder ? `${folder}/${child.name}` : child.name;
-				const full = path.join(root, file); const before = await fs.lstat(full);
-				if (before.isSymbolicLink()) { throw new Error(`File checkpoints do not follow symbolic links: ${file}`); }
-				if (before.isDirectory()) { await visit(file); continue; }
-				if (!before.isFile()) { throw new Error(`Unsupported checkpoint file type: ${file}`); }
-				if (before.size > MAX_BYTES - bytes || files.length >= MAX_FILES) { throw new Error('File checkpoint exceeds 50 MiB or 10,000 files; nothing was partially captured.'); }
-				// O_NOFOLLOW prevents swapping a regular file for an external symlink between inspection and reading.
-				const handle = await fs.open(full, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-				let body: Buffer;
-				try { body = await handle.readFile(); } finally { await handle.close(); }
-				const after = await fs.lstat(full);
-				if (before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs || body.length > MAX_BYTES - bytes) { throw new Error(`File changed while capturing checkpoint: ${file}`); }
-				bytes += body.length;
-				const digest = createHash('sha256').update(body).digest('hex'); bodies.set(digest, body);
-				files.push({ file, digest, mode: before.mode & 0o777, size: body.length });
+				const full = path.join(root, file);
+				if (child.isSymbolicLink()) { throw new Error(`File checkpoints do not follow symbolic links: ${file}`); }
+				if (child.isDirectory()) {
+					const before = await fs.lstat(full);
+					if (!before.isDirectory()) { throw new Error(`Directory changed while capturing checkpoint: ${file}`); }
+					await visit(file);
+					const after = await fs.lstat(full);
+					if (!after.isDirectory() || before.dev !== after.dev || before.ino !== after.ino) { throw new Error(`Directory changed while capturing checkpoint: ${file}`); }
+					continue;
+				}
+				// Open first, then inspect the descriptor. NOFOLLOW rejects a substituted
+				// symlink; NONBLOCK avoids hanging if a regular entry becomes a FIFO.
+				const handle = await fs.open(full, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+				try {
+					const before = await handle.stat();
+					if (!before.isFile()) { throw new Error(`Unsupported checkpoint file type: ${file}`); }
+					if (!sameFile(before, await fs.lstat(full))) { throw new Error(`File changed while capturing checkpoint: ${file}`); }
+					if (before.size > MAX_BYTES - bytes || files.length >= MAX_FILES) { throw new Error('File checkpoint exceeds 50 MiB or 10,000 files; nothing was partially captured.'); }
+					// Bound allocation and reads by the inspected size, even if a concurrent
+					// writer grows the file. A short read or extra byte invalidates capture.
+					const body = Buffer.allocUnsafe(before.size); let offset = 0;
+					while (offset < body.length) {
+						const read = await handle.read(body, offset, body.length - offset, offset);
+						if (!read.bytesRead) { throw new Error(`File changed while capturing checkpoint: ${file}`); }
+						offset += read.bytesRead;
+					}
+					const tail = await handle.read(Buffer.allocUnsafe(1), 0, 1, body.length);
+					if (tail.bytesRead || !sameFile(before, await handle.stat()) || !sameFile(before, await fs.lstat(full))) { throw new Error(`File changed while capturing checkpoint: ${file}`); }
+					bytes += body.length;
+					const digest = createHash('sha256').update(body).digest('hex'); bodies.set(digest, body);
+					files.push({ file, digest, mode: before.mode & 0o777, size: body.length });
+				} finally { await handle.close(); }
 			}
 		};
 		await visit(''); files.sort((a, b) => a.file.localeCompare(b.file)); return { files, bodies };

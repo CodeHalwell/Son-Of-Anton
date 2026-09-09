@@ -8,6 +8,7 @@ import { isValidAcpModelId } from '../acp/protocol';
 export type CatalogProvider = 'anthropic' | 'openai' | 'google' | 'openrouter' | 'ollama' | 'lmstudio' | 'deepseek' | 'mistral' | 'groq' | 'cerebras' | 'together' | 'fireworks' | 'foundry' | 'bedrock' | 'acp' | 'claude-code' | 'codex' | 'copilot' | 'xai' | 'moonshot' | 'zai' | 'minimax';
 export type DiscoveredModelId = `catalog:${CatalogProvider}:${string}`;
 export type CapabilityAvailability = boolean | 'unknown';
+export type DiscoveredModelScope = { provider: Exclude<CatalogProvider, 'acp'> } | { provider: 'acp'; acpAdapterId: string };
 export interface DiscoveredModel {
 	id: DiscoveredModelId;
 	provider: CatalogProvider;
@@ -46,19 +47,51 @@ export function discoveredAcpModelId(adapterId: string, model: string): Discover
 export function registerDiscoveredModels(entries: readonly DiscoveredModel[]): void {
 	let changed = false;
 	for (const model of entries.slice(0, 10000)) {
-		try {
-			const identifier = model.provider === 'acp' && model.acpAdapterId !== undefined
-				? discoveredAcpModelId(model.acpAdapterId, model.model)
-				: discoveredModelId(model.provider, model.acpAdapterId ? `${model.acpAdapterId}/${model.model}` : model.model);
-			if (!providers.has(model.provider) || model.id !== identifier
-				|| ![true, false, 'unknown'].includes(model.chat) || ![true, false, 'unknown'].includes(model.images) || ![true, false, 'unknown'].includes(model.tools)) { continue; }
-			const previous = models.get(model.id);
-			const value = previous?.capabilitySource === 'verified' && previous.verifiedAt && Date.now() - previous.verifiedAt < 24 * 60 * 60 * 1000 && model.tools === 'unknown' ? { ...model, tools: previous.tools, capabilitySource: previous.capabilitySource, verifiedAt: previous.verifiedAt } : { ...model };
-			models.set(model.id, value);
-			changed ||= JSON.stringify(previous) !== JSON.stringify(value);
-		} catch { /* Malformed cached/catalog entries must not break activation. */ }
+		const value = validatedModel(model);
+		if (!value) { continue; }
+		changed ||= JSON.stringify(models.get(value.id)) !== JSON.stringify(value);
+		models.set(value.id, value);
 	}
-	if (changed) { for (const listener of listeners) { try { listener(); } catch { /* Observer errors do not break model execution. */ } } }
+	if (changed) { notifyChanged(); }
+}
+
+/** Replace only a complete, authoritative catalog; failed/partial refreshes must use cached entries. */
+export function replaceDiscoveredModels(scope: DiscoveredModelScope, entries: readonly DiscoveredModel[]): void {
+	if (!providers.has(scope.provider) || entries.length > 10000) { throw new Error('Invalid replacement model catalog'); }
+	if (scope.provider === 'acp') { discoveredAcpModelId(scope.acpAdapterId, 'scope-validation'); }
+	const owns = (model: DiscoveredModel) => model.provider === scope.provider && (scope.provider !== 'acp' || model.acpAdapterId === scope.acpAdapterId);
+	const next = new Map<string, DiscoveredModel>();
+	for (const model of entries) {
+		const value = validatedModel(model);
+		if (!value || !owns(value)) { throw new Error('Replacement model catalog contains an invalid or unrelated entry'); }
+		next.set(value.id, value);
+	}
+	let changed = false;
+	for (const [id, model] of models) {
+		if (owns(model) && !next.has(id)) { models.delete(id); changed = true; }
+	}
+	for (const [id, model] of next) {
+		changed ||= JSON.stringify(models.get(id)) !== JSON.stringify(model);
+		models.set(id, model);
+	}
+	if (changed) { notifyChanged(); }
+}
+
+function validatedModel(model: DiscoveredModel): DiscoveredModel | undefined {
+	try {
+		const identifier = model.provider === 'acp' && model.acpAdapterId !== undefined
+			? discoveredAcpModelId(model.acpAdapterId, model.model)
+			: discoveredModelId(model.provider, model.acpAdapterId ? `${model.acpAdapterId}/${model.model}` : model.model);
+		if (!providers.has(model.provider) || model.id !== identifier
+			|| ![true, false, 'unknown'].includes(model.chat) || ![true, false, 'unknown'].includes(model.images) || ![true, false, 'unknown'].includes(model.tools)) { return undefined; }
+		const previous = models.get(model.id);
+		return previous?.capabilitySource === 'verified' && previous.verifiedAt && Date.now() - previous.verifiedAt < 24 * 60 * 60 * 1000 && model.tools === 'unknown'
+			? { ...model, tools: previous.tools, capabilitySource: previous.capabilitySource, verifiedAt: previous.verifiedAt } : { ...model };
+	} catch { return undefined; /* Malformed cached/catalog entries must not break activation. */ }
+}
+
+function notifyChanged(): void {
+	for (const listener of listeners) { try { listener(); } catch { /* Observer errors do not break model execution. */ } }
 }
 
 export function getDiscoveredModel(id: string): DiscoveredModel | undefined { return models.get(id); }

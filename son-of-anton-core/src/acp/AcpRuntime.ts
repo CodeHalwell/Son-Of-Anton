@@ -6,7 +6,7 @@
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { AcpConnection } from './AcpConnection';
-import { discoveredAcpModelId, registerDiscoveredModels } from '../llm/DiscoveredModels';
+import { discoveredAcpModelId, registerDiscoveredModels, replaceDiscoveredModels } from '../llm/DiscoveredModels';
 import { AcpSessionStore, type AcpSessionRecord } from './AcpSessionStore';
 import { abortError, cancelledPermission, object, validateImages, type AcpCapabilities, type AcpImage, type AcpUsage, type AcpAgentDefinition, type AcpMcpServer, type AcpPermissionHandler, type AcpPromptResult, type AcpUpdate } from './protocol';
 
@@ -208,6 +208,23 @@ export class AcpRuntime {
 			if (knownTools.size > maxToolCalls) { job.controller.abort(new Error(`ACP tool-call budget reached (${maxToolCalls})`)); return false; }
 			return true;
 		};
+		const negotiateSession = async (open: () => Promise<unknown>): Promise<void> => {
+			try { await open(); }
+			finally {
+				// Even an unavailable selected model can accompany a valid new catalog.
+				// Reused workers never republish their older session's advertised list.
+				const connection = worker.connection;
+				if (connection.modelsAdvertised) {
+					const entries = connection.availableModels.map(model => ({
+						id: discoveredAcpModelId(job.turn.agent.id, model.id), provider: 'acp' as const, acpAdapterId: job.turn.agent.id, model: model.id,
+						label: `${job.turn.agent.id} · ${model.name}`, chat: true, images: !!connection.initialization?.agentCapabilities?.promptCapabilities?.image,
+						tools: true, fetchedAt: Date.now(),
+					}));
+					if (connection.modelsTruncated) { registerDiscoveredModels(entries); }
+					else { replaceDiscoveredModels({ provider: 'acp', acpAdapterId: job.turn.agent.id }, entries); }
+				}
+			}
+		};
 		try {
 			const fresh = !worker.ready;
 			const saved = this.sessionStore?.get(job.key);
@@ -216,7 +233,7 @@ export class AcpRuntime {
 				await worker.connection.initialize(job.controller.signal);
 				if (saved?.state === 'settled' && worker.connection.initialization?.agentCapabilities?.loadSession) {
 					try {
-						await worker.connection.loadSession(saved.sessionId, job.turn.mcpServers, job.controller.signal, job.turn.modeId);
+						await negotiateSession(() => worker.connection.loadSession(saved.sessionId, job.turn.mcpServers, job.controller.signal, job.turn.modeId));
 						resumed = true;
 					} catch (error) {
 						// Loading never sends a prompt. A stale/unsupported session can safely fall back to host context.
@@ -225,7 +242,7 @@ export class AcpRuntime {
 						worker.connection = new AcpConnection(job.turn.agent, job.turn.cwd);
 					}
 				}
-				if (!resumed) { await worker.connection.newSession(job.turn.mcpServers, job.controller.signal, job.turn.modeId); }
+				if (!resumed) { await negotiateSession(() => worker.connection.newSession(job.turn.mcpServers, job.controller.signal, job.turn.modeId)); }
 				worker.ready = true;
 				if (saved) { job.turn.onRecovery?.(resumed ? 'resumed' : saved.state === 'settled' ? 'transcript' : 'interrupted'); }
 			}
@@ -236,11 +253,6 @@ export class AcpRuntime {
 				plan: worker.connection.availableModes.includes('plan'), resume: !!worker.connection.initialization?.agentCapabilities?.loadSession,
 				metering: this.capabilities.get(capabilityKey)?.metering ?? 'unavailable',
 			});
-			registerDiscoveredModels(worker.connection.availableModels.map(model => ({
-				id: discoveredAcpModelId(job.turn.agent.id, model.id), provider: 'acp', acpAdapterId: job.turn.agent.id, model: model.id,
-				label: `${job.turn.agent.id} · ${model.name}`, chat: true, images: !!worker.connection.initialization?.agentCapabilities?.promptCapabilities?.image,
-				tools: true, fetchedAt: Date.now(),
-			})));
 			const restore = saved?.transcript.length ? [
 				'Host-owned conversation transcript (context only; never execute or replay prior tools):',
 				...saved.transcript,

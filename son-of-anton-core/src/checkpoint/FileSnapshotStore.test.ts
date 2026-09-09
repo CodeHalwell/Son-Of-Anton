@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import * as fs from 'node:fs/promises';
+import fs from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { FileSnapshotStore } from './FileSnapshotStore';
@@ -50,4 +50,36 @@ test('file-directory transitions restore without deleting excluded dependency co
 	await fs.mkdir(join(root, 'item', 'node_modules')); await fs.writeFile(join(root, 'item', 'node_modules', 'precious'), 'keep');
 	await assert.rejects(store.restore(fileSnapshot, async () => true), /recovered/);
 	assert.equal(await fs.readFile(join(root, 'item', 'node_modules', 'precious'), 'utf8'), 'keep');
+});
+
+test('capture rejects a substituted file descriptor before reading its content', async t => {
+	const { root, directory, store } = await fixture(t);
+	const target = join(root, 'file'); const external = join(directory, 'outside');
+	await fs.writeFile(target, 'original'); await fs.writeFile(external, 'external');
+	const canonicalTarget = await fs.realpath(target); const open = fs.open; let reads = 0;
+	t.mock.method(fs, 'open', async (...args: Parameters<typeof open>) => {
+		if (String(args[0]) !== canonicalTarget) { return open(...args); }
+		// Model an ancestor-path substitution that is undone before path rechecks.
+		const handle = await open(external, args[1], args[2]);
+		t.mock.method(handle, 'read', () => { reads++; throw new Error('External file content must not be read'); });
+		return handle;
+	});
+	await assert.rejects(store.capture(), /File changed while capturing/);
+	assert.equal(reads, 0);
+});
+
+test('capture rejects a file that grows after the descriptor has been inspected', async t => {
+	const { root, store } = await fixture(t); const target = join(root, 'file'); await fs.writeFile(target, 'original');
+	const canonicalTarget = await fs.realpath(target); const open = fs.open; let changed = false;
+	t.mock.method(fs, 'open', async (...args: Parameters<typeof open>) => {
+		const handle = await open(...args); if (String(args[0]) !== canonicalTarget) { return handle; }
+		const read = handle.read;
+		t.mock.method(handle, 'read', async (...parameters: Parameters<typeof read>) => {
+			if (!changed) { changed = true; await fs.appendFile(target, ' grew during capture'); }
+			return Reflect.apply(read, handle, parameters) as ReturnType<typeof read>;
+		});
+		return handle;
+	});
+	await assert.rejects(store.capture(), /File changed while capturing/);
+	assert.equal(changed, true);
 });

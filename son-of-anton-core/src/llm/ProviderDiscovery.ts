@@ -12,7 +12,7 @@ import { parse as parseYaml } from 'yaml';
 import type { ConfigStore, MementoStore, SecretStore } from '../host';
 import { readBoundedFile } from '../util/readBoundedFile';
 import { object } from '../acp/protocol';
-import { discoveredAcpModels, discoveredModelId, getDiscoveredModel, registerDiscoveredModels, type CatalogProvider, type DiscoveredModel, type CapabilityAvailability } from './DiscoveredModels';
+import { discoveredAcpModels, discoveredModelId, getDiscoveredModel, registerDiscoveredModels, replaceDiscoveredModels, type CatalogProvider, type DiscoveredModel, type CapabilityAvailability } from './DiscoveredModels';
 
 export interface DiscoveredSoftware {
 	id: string;
@@ -108,7 +108,7 @@ export class ProviderDiscovery {
 		}
 		const advertised = discoveredAcpModels();
 		const adapter = result.providers.find(provider => provider.id === 'acp');
-		if (adapter && advertised.length) { adapter.models = advertised; adapter.catalogStatus = 'ready'; }
+		if (adapter) { adapter.models = advertised; adapter.catalogStatus = advertised.length ? 'ready' : 'adapter-required'; }
 		return result;
 	}
 
@@ -140,7 +140,13 @@ export class ProviderDiscovery {
 		discovered.push(...this.configuredProviders());
 		this.controller.signal.throwIfAborted();
 		this.value = { version: 1, updatedAt: Date.now(), software, providers: discovered.sort((a, b) => a.name.localeCompare(b.name)) };
-		for (const provider of discovered) { registerDiscoveredModels(provider.models); }
+		for (const provider of discovered) {
+			// ACP catalogs are owned by session negotiation, never replayed from a
+			// provider snapshot. Failed or bounded HTTP listings are not authoritative.
+			if (provider.id === 'acp' || provider.catalogStatus === 'error') { continue; }
+			if (provider.catalogStatus === 'ready' && !provider.truncated) { replaceDiscoveredModels({ provider: provider.id }, provider.models); }
+			else { registerDiscoveredModels(provider.models); }
+		}
 		await this.deps.state?.update(storageKey, this.value);
 		return this.snapshot();
 	}

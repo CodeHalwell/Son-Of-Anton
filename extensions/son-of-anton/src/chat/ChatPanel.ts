@@ -5210,6 +5210,7 @@ export class ChatSession {
 				<div class="popup mention-popup" id="mentionPopup" hidden role="listbox" aria-label="Workspace mentions"></div>
 				<div class="context-chips" id="contextChips"></div>
 				<span class="draft-status" id="draftStatus" hidden></span>
+				<div class="prompt-restore-notice" id="unavailableModelNotice" role="status" hidden><span data-ui-text="modelUnavailable"></span></div>
 				<div class="prompt-restore-notice" id="promptRestoreNotice" role="status" hidden><span data-ui-text="promptRestored"></span><button type="button" id="undoPromptRestore" data-ui-text="undoPromptRestore"></button></div>
 				<div class="composer-shell">
 					<div id="agentCapabilitySummary" class="agent-capability-summary" role="status"></div>

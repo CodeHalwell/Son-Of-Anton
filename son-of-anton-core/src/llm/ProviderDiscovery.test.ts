@@ -9,7 +9,8 @@ import { mkdtemp, mkdir, writeFile, chmod, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { ProviderDiscovery } from './ProviderDiscovery';
-import { discoveredModelId, getDiscoveredModel, registerDiscoveredModels } from './DiscoveredModels';
+import { discoveredAcpModelId, discoveredModelId, getDiscoveredModel, registerDiscoveredModels, replaceDiscoveredModels, type DiscoveredModel } from './DiscoveredModels';
+import type { MementoStore } from '../host';
 import { LlmClient, isOpenAIReasoningModel, providerForModel, supportsAgenticToolLoop, modelSupportsImages } from './LlmClient';
 
 const emptySecrets = { get: async () => undefined, store: async () => {}, delete: async () => {} };
@@ -57,7 +58,71 @@ test('catalog failures retain cached models and expose only a redacted status', 
 	await finder.refresh(); fail = true;
 	const snapshot = await finder.refresh({ force: true }); const provider = snapshot.providers.find(provider => provider.id === 'openai')!;
 	assert.deepEqual([provider.catalogStatus, provider.models.map(model => model.model)], ['error', ['gpt-new']]);
+	assert.equal(getDiscoveredModel(discoveredModelId('openai', 'gpt-new'))?.model, 'gpt-new');
 	assert.ok(!JSON.stringify(snapshot).includes('secret-and-error-body'));
+});
+
+test('complete provider refreshes remove omitted routes, accept an empty catalog, and preserve other providers on failure', async t => {
+	const home = await fixture(t); let advertised: string[] | undefined = ['old-model', 'retained-model'];
+	const finder = new ProviderDiscovery({ home, env: { PATH: '', OPENAI_API_KEY: 'fixture-key', MISTRAL_API_KEY: 'fixture-key' }, secrets: emptySecrets, config: config(), request: async input => {
+		if (String(input).includes('mistral.ai')) { return Response.json({ data: [{ id: 'mistral-independent' }] }); }
+		return advertised ? Response.json({ data: advertised.map(id => ({ id })) }) : new Response('', { status: 503 });
+	} });
+	t.after(() => finder.dispose());
+	await finder.refresh();
+	const old = discoveredModelId('openai', 'old-model'), retained = discoveredModelId('openai', 'retained-model'), added = discoveredModelId('openai', 'added-model');
+	advertised = ['retained-model', 'added-model']; await finder.refresh({ force: true });
+	assert.equal(getDiscoveredModel(old), undefined);
+	assert.throws(() => providerForModel(old), /Refresh/);
+	assert.equal(providerForModel(added), 'openai');
+	advertised = undefined;
+	const failed = (await finder.refresh({ force: true })).providers.find(provider => provider.id === 'openai')!;
+	assert.equal(failed.catalogStatus, 'error');
+	assert.deepEqual(failed.models.map(model => model.id).sort(), [retained, added].sort());
+	assert.equal(getDiscoveredModel(retained)?.id, retained);
+	assert.equal(getDiscoveredModel(added)?.id, added);
+	advertised = [];
+	const empty = (await finder.refresh({ force: true })).providers.find(provider => provider.id === 'openai')!;
+	assert.deepEqual([empty.catalogStatus, empty.models], ['ready', []]);
+	assert.equal(getDiscoveredModel(retained), undefined);
+	assert.equal(getDiscoveredModel(added), undefined);
+	assert.equal(providerForModel(discoveredModelId('mistral', 'mistral-independent')), 'mistral');
+});
+
+test('failed pagination and truncated catalogs cannot revoke models from the last complete listing', async t => {
+	const home = await fixture(t); let mode: 'complete' | 'failed' | 'truncated' = 'complete'; let page = 0;
+	const finder = new ProviderDiscovery({ home, env: { PATH: '', ANTHROPIC_API_KEY: 'fixture-key' }, secrets: emptySecrets, config: config(), request: async () => {
+		if (mode === 'complete') { return Response.json({ data: [{ id: 'previous-complete' }], has_more: false }); }
+		page++;
+		if (mode === 'failed' && page === 2) { return new Response('', { status: 503 }); }
+		return Response.json({ data: [{ id: `partial-${page}` }], has_more: true, last_id: `partial-${page}` });
+	} });
+	t.after(() => finder.dispose());
+	await finder.refresh(); mode = 'failed';
+	await finder.refresh({ force: true });
+	assert.equal(getDiscoveredModel(discoveredModelId('anthropic', 'partial-1')), undefined);
+	assert.ok(getDiscoveredModel(discoveredModelId('anthropic', 'previous-complete')));
+	mode = 'truncated'; page = 0;
+	const partial = (await finder.refresh({ force: true })).providers.find(provider => provider.id === 'anthropic')!;
+	assert.deepEqual([partial.catalogStatus, partial.truncated, page], ['ready', true, 10]);
+	assert.ok(getDiscoveredModel(discoveredModelId('anthropic', 'previous-complete')));
+	assert.ok(getDiscoveredModel(discoveredModelId('anthropic', 'partial-1')));
+});
+
+test('an empty ACP catalog removes stale picker entries from persisted discovery snapshots', async t => {
+	const home = await fixture(t); const values = new Map<string, unknown>();
+	const state: MementoStore = { get: <T>(key: string, fallback?: T) => (values.get(key) ?? fallback) as T, update: async (key, value) => { values.set(key, structuredClone(value)); } };
+	const entry: DiscoveredModel = { id: discoveredAcpModelId('persisted-adapter', 'retired-model'), provider: 'acp', acpAdapterId: 'persisted-adapter', model: 'retired-model', label: 'Retired', chat: true, images: false, tools: true, fetchedAt: 1 };
+	registerDiscoveredModels([entry]);
+	const deps = { home, state, env: { PATH: '' }, secrets: emptySecrets, config: config() };
+	const finder = new ProviderDiscovery(deps); t.after(() => finder.dispose());
+	await finder.refresh();
+	assert.ok(finder.snapshot().providers.find(provider => provider.id === 'acp')?.models.some(model => model.id === entry.id));
+	replaceDiscoveredModels({ provider: 'acp', acpAdapterId: 'persisted-adapter' }, []);
+	await finder.captureAdvertisedModels();
+	const reopened = new ProviderDiscovery(deps); t.after(() => reopened.dispose());
+	assert.deepEqual(reopened.snapshot().providers.find(provider => provider.id === 'acp')?.models, []);
+	assert.equal(getDiscoveredModel(entry.id), undefined);
 });
 
 test('local servers require opt-in and map advertised local capabilities', async t => {

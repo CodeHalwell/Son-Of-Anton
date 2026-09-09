@@ -53,6 +53,8 @@ export interface Checkpoint {
 	readonly id: string;
 	/** Conversation that owns this checkpoint. */
 	readonly conversationId: string;
+	/** The original conversation was permanently deleted; only explicit branches retain this checkpoint. */
+	readonly ownerDeleted?: boolean;
 	readonly branchConversationIds?: readonly string[];
 	/** 0-based ordinal of the turn within the conversation. */
 	readonly turnIndex: number;
@@ -141,7 +143,7 @@ export class CheckpointManager implements Disposable {
 	/** Return the checkpoints belonging to a single conversation, oldest first. */
 	list(conversationId: string): ReadonlyArray<Checkpoint> {
 		return this.readIndex()
-			.filter(cp => cp.conversationId === conversationId || cp.branchConversationIds?.includes(conversationId))
+			.filter(cp => (!cp.ownerDeleted && cp.conversationId === conversationId) || cp.branchConversationIds?.includes(conversationId))
 			.sort((a, b) => a.capturedAt - b.capturedAt);
 	}
 
@@ -168,7 +170,8 @@ export class CheckpointManager implements Disposable {
 			return;
 		}
 
-		if (options.conversationId && options.conversationId !== checkpoint.conversationId && !checkpoint.branchConversationIds?.includes(options.conversationId)) { throw new Error('Checkpoint is not associated with this conversation.'); }
+		options = { ...options, conversationId: options.conversationId ?? (checkpoint.ownerDeleted ? checkpoint.branchConversationIds?.[0] : checkpoint.conversationId) };
+		if (!options.conversationId || !((!checkpoint.ownerDeleted && options.conversationId === checkpoint.conversationId) || checkpoint.branchConversationIds?.includes(options.conversationId))) { throw new Error('Checkpoint is not associated with this conversation.'); }
 		const root = this.getWorkspaceRoot();
 		if (root && checkpoint.kind === 'fs' && checkpoint.fileSnapshot) {
 			await this.restoreFiles(checkpoint, root, options); return;
@@ -208,7 +211,11 @@ export class CheckpointManager implements Disposable {
 	 * conversation is deleted so we don't keep dangling index entries.
 	 */
 	async deleteFor(conversationId: string): Promise<void> {
-		await this.mutateIndex(index => index.map(cp => ({ ...cp, branchConversationIds: cp.branchConversationIds?.filter(id => id !== conversationId) })).filter(cp => cp.conversationId !== conversationId || !!cp.branchConversationIds?.length));
+		await this.mutateIndex(index => index.map(cp => ({
+			...cp,
+			ownerDeleted: cp.ownerDeleted || cp.conversationId === conversationId,
+			branchConversationIds: cp.branchConversationIds?.filter(id => id !== conversationId),
+		})).filter(cp => !cp.ownerDeleted || !!cp.branchConversationIds?.length));
 		this._onDidChange.fire();
 	}
 
