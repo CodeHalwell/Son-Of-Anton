@@ -3094,7 +3094,8 @@
 			if (!currentModel.startsWith('catalog:') || !providerCatalogSnapshot) return false;
 			const provider = providerCatalogSnapshot.providers.find(entry => entry.id === currentModel.split(':')[1]);
 			const configuredInventory = provider && provider.configurationComplete === true && (provider.id === 'zai' ? provider.catalogStatus === 'catalog-unavailable' : ['foundry', 'bedrock'].includes(provider.id) && ['configuration-only', 'not-configured'].includes(provider.catalogStatus));
-			return Boolean(provider && !provider.truncated && (provider.catalogStatus === 'ready' || configuredInventory) && !provider.models.some(model => model.id === currentModel && model.chat !== false));
+			const missingCredential = provider && provider.credentialStatus === 'missing' && provider.credentialSource === 'none' && provider.catalogStatus === 'not-configured';
+			return Boolean(provider && !provider.truncated && (provider.catalogStatus === 'ready' || configuredInventory || missingCredential) && !provider.models.some(model => model.id === currentModel && model.chat !== false));
 		}
 		function updateModelLabel() {
 			const acpAgent = getCurrentAcpAgent();

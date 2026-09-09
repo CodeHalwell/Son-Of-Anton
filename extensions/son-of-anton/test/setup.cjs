@@ -70,6 +70,7 @@ const vscodeMock = {
 	StatusBarAlignment: { Left: 1, Right: 2 },
 	ViewColumn: { Active: -1, Beside: -2, One: 1 },
 	ProgressLocation: { Notification: 15, Window: 10, Explorer: 1 },
+	QuickPickItemKind: { Separator: -1, Default: 0 },
 	CancellationTokenSource: class CancellationTokenSource {
 		constructor() {
 			this.token = {

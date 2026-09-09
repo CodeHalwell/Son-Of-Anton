@@ -3,6 +3,14 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+/** A completed storage lookup found no token; failures and malformed records use other errors. */
+export class MissingCredentialError extends Error {
+	constructor(readonly providerId: string) {
+		super(`No credentials stored for provider: ${providerId}`);
+		this.name = 'MissingCredentialError';
+	}
+}
+
 /** A token record persisted per provider. */
 export interface TokenRecord {
 	token: string;

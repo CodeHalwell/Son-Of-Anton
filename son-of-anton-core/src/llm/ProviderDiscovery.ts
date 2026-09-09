@@ -10,6 +10,7 @@ import { homedir } from 'node:os';
 import { parse as parseJson } from 'jsonc-parser';
 import { parse as parseYaml } from 'yaml';
 import type { ConfigStore, MementoStore, SecretStore } from '../host';
+import { MissingCredentialError } from '../auth/types';
 import { readBoundedFile } from '../util/readBoundedFile';
 import { object } from '../acp/protocol';
 import { discoveredAcpModels, discoveredModelId, getDiscoveredModel, registerDiscoveredModels, replaceDiscoveredModels, type CatalogProvider, type DiscoveredModel, type CapabilityAvailability } from './DiscoveredModels';
@@ -29,6 +30,8 @@ export interface DiscoveredProvider {
 	id: CatalogProvider;
 	name: string;
 	credentialSource: 'secret-storage' | 'setting' | 'environment' | 'broker' | 'none';
+	/** Confirmed absence after every applicable credential source was read successfully; omitted on cached legacy/error rows. */
+	credentialStatus?: 'missing';
 	catalogStatus: 'not-configured' | 'disabled' | 'ready' | 'error' | 'configuration-only' | 'adapter-required' | 'extension-required' | 'catalog-unavailable';
 	/** A successful catalog request does not imply an inference call has been tested. */
 	inferenceStatus: 'not-tested' | 'model-tested';
@@ -89,6 +92,10 @@ const storageKey = 'sota.providerDiscovery.v1';
 const ttlMs = 60 * 60 * 1000;
 type ConfiguredInventoryProvider = 'foundry' | 'bedrock' | 'zai';
 function isConfiguredInventoryProvider(id: CatalogProvider): id is ConfiguredInventoryProvider { return id === 'foundry' || id === 'bedrock' || id === 'zai'; }
+function hasConfirmedMissingCredential(provider: DiscoveredProvider): boolean {
+	return provider.credentialStatus === 'missing' && provider.credentialSource === 'none' && provider.catalogStatus === 'not-configured'
+		&& providers.some(spec => spec.id === provider.id && !spec.local && !spec.configuredModelsSetting);
+}
 
 /** Read-only discovery: no CLI execution, tool enabling, model loading, sign-in or inference requests. */
 export class ProviderDiscovery {
@@ -96,6 +103,7 @@ export class ProviderDiscovery {
 	private pending?: DiscoveryRefresh;
 	private queued?: DiscoveryRefresh;
 	private cachedIncludeLocal?: boolean;
+	private refreshedThisInstance = false;
 	private controller = new AbortController();
 	private disposed = false;
 	constructor(private readonly deps: {
@@ -162,7 +170,8 @@ export class ProviderDiscovery {
 			this.queued.includeLocal = includeLocal;
 			return this.queued.promise;
 		}
-		if (!options.force && includeLocal === this.cachedIncludeLocal && this.value.updatedAt && Date.now() - this.value.updatedAt < ttlMs) { return Promise.resolve(this.snapshot()); }
+		// A persisted TTL cannot prove credentials still exist after the IDE was closed.
+		if (this.refreshedThisInstance && !options.force && includeLocal === this.cachedIncludeLocal && this.value.updatedAt && Date.now() - this.value.updatedAt < ttlMs) { return Promise.resolve(this.snapshot()); }
 		const refresh = this.createRefresh(includeLocal); this.startRefresh(refresh); return refresh.promise;
 	}
 
@@ -176,7 +185,7 @@ export class ProviderDiscovery {
 		this.pending = refresh;
 		void this.scan(refresh.includeLocal).then(snapshot => {
 			if (this.disposed) { refresh.reject(new Error('Provider discovery is disposed')); }
-			else { this.cachedIncludeLocal = refresh.includeLocal; refresh.resolve(snapshot); }
+			else { this.refreshedThisInstance = true; this.cachedIncludeLocal = refresh.includeLocal; refresh.resolve(snapshot); }
 		}, error => refresh.reject(error)).then(() => {
 			if (this.pending !== refresh) { return; }
 			this.pending = undefined;
@@ -203,7 +212,7 @@ export class ProviderDiscovery {
 			// ACP catalogs are owned by session negotiation, never replayed from a
 			// provider snapshot. Failed or bounded HTTP listings are not authoritative.
 			if (provider.id === 'acp' || provider.catalogStatus === 'error') { continue; }
-			if (!provider.truncated && (provider.catalogStatus === 'ready' || (isConfiguredInventoryProvider(provider.id) && provider.configurationComplete === true))) { replaceDiscoveredModels({ provider: provider.id }, provider.models); }
+			if (!provider.truncated && (provider.catalogStatus === 'ready' || hasConfirmedMissingCredential(provider) || (isConfiguredInventoryProvider(provider.id) && provider.configurationComplete === true))) { replaceDiscoveredModels({ provider: provider.id }, provider.models); }
 			else { registerDiscoveredModels(provider.models); }
 		}
 		await this.deps.state?.update(storageKey, this.value);
@@ -267,10 +276,15 @@ export class ProviderDiscovery {
 			if (value?.trim()) { return { value: value.trim(), source: 'environment' }; }
 		}
 		if (spec.id === 'anthropic' || spec.id === 'openai') {
+			// A failed broker lookup is not evidence that its credential was removed.
+			const providerId = spec.id === 'anthropic' ? 'anthropic-oauth' : 'chatgpt-oauth';
 			try {
-				const record = await this.deps.credentialResolver?.getToken(spec.id === 'anthropic' ? 'anthropic-oauth' : 'chatgpt-oauth');
-				if (record?.token) { return { value: record.token, source: 'broker' }; }
-			} catch { /* An unavailable broker is not an API credential. */ }
+				const record = await this.deps.credentialResolver?.getToken(providerId);
+				if (record !== undefined) {
+					if (!record || typeof record.token !== 'string' || !record.token.trim()) { throw new Error('Invalid broker credential'); }
+					return { value: record.token.trim(), source: 'broker' };
+				}
+			} catch (error) { if (!(error instanceof MissingCredentialError) || error.providerId !== providerId) { throw error; } }
 		}
 		return { source: 'none' };
 	}
@@ -288,7 +302,7 @@ export class ProviderDiscovery {
 		try {
 			const credential = await this.credential(spec);
 			result.credentialSource = credential.source;
-			if (!credential.value && !spec.local) { return result; }
+			if (!credential.value && !spec.local) { result.credentialStatus = 'missing'; return result; }
 			const configured = spec.baseSetting && this.deps.config.get<string>(spec.baseSetting);
 			const base = (typeof configured === 'string' && configured.trim() ? configured.trim() : spec.base).replace(/\/+$/, '');
 			const url = new URL(`${base}${spec.modelsPath}`);

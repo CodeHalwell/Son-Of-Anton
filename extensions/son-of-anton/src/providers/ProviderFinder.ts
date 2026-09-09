@@ -62,6 +62,11 @@ export class ProviderFinder implements vscode.Disposable {
 	}
 
 	private registerMetadata(snapshot: ProviderDiscoverySnapshot): void {
+		const retained = new Set<string>(snapshot.providers.flatMap(provider => provider.models.filter(model => model.chat !== false).map(model => model.id)));
+		const complete = new Set(snapshot.providers.filter(provider => !provider.truncated && (provider.catalogStatus === 'ready'
+			|| (provider.credentialStatus === 'missing' && provider.credentialSource === 'none' && provider.catalogStatus === 'not-configured')
+			|| (provider.configurationComplete === true && (provider.id === 'zai' ? provider.catalogStatus === 'catalog-unavailable' : ['foundry', 'bedrock'].includes(provider.id) && ['configuration-only', 'not-configured'].includes(provider.catalogStatus))))).map(provider => provider.id));
+		for (const id of Object.keys(MODEL_METADATA)) { if (id.startsWith('catalog:') && complete.has(id.split(':')[1] as ProviderDiscoverySnapshot['providers'][number]['id']) && !retained.has(id)) { delete MODEL_METADATA[id as ModelId]; } }
 		for (const provider of snapshot.providers) {
 			for (const model of provider.models) {
 				if (model.chat === false) { continue; }

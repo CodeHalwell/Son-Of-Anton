@@ -1234,6 +1234,36 @@ test('provider catalogs isolate special object keys and retire removed picker me
 	assert.equal(await page.locator('#sendBtn').isDisabled(), false);
 });
 
+test('confirmed HTTP credential removal retires the selected model while missing evidence and lookup errors stay usable', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const model = { id: 'catalog:openai:credential-model', model: 'credential-model', label: 'Credential-backed model', chat: true };
+	const snapshot = (models, state = {}) => ({ updatedAt: Date.now(), software: [], providers: [{ id: 'openai', name: 'OpenAI', credentialSource: 'setting', catalogStatus: 'ready', inferenceStatus: 'not-tested', models, ...state }] });
+	const metadata = { [model.id]: { capabilities: ['text'], blurb: 'Credential-backed metadata', pricingStatus: 'unknown' } };
+	await post(page, { type: 'providerCatalog', snapshot: snapshot([model]), metadata });
+	await post(page, { type: 'loadConversation', conversationId: 'credential-removal', lastModel: model.id, messages: [] });
+	assert.match(await page.locator('#modelChip').innerText(), /Credential-backed model/);
+	for (const state of [
+		{ credentialSource: 'none', catalogStatus: 'not-configured' },
+		{ credentialSource: 'none', catalogStatus: 'error' },
+		{ credentialSource: 'none', catalogStatus: 'error', credentialStatus: 'missing' },
+		{ credentialSource: 'none', catalogStatus: 'disabled', credentialStatus: 'missing' },
+		{ credentialSource: 'none', catalogStatus: 'not-configured', credentialStatus: 'missing', truncated: true },
+	]) {
+		await post(page, { type: 'providerCatalog', snapshot: snapshot([], state) });
+		assert.deepEqual({ notice: await page.locator('#unavailableModelNotice').isVisible(), disabled: await page.locator('#sendBtn').isDisabled() }, { notice: false, disabled: false });
+	}
+	await post(page, { type: 'providerCatalog', snapshot: snapshot([], { credentialSource: 'none', catalogStatus: 'not-configured', credentialStatus: 'missing' }), metadata });
+	await page.locator('#messageInput').fill('Preserve this draft after sign-out'); await page.locator('#messageInput').press('Enter');
+	assert.deepEqual({ notice: await page.locator('#unavailableModelNotice').isVisible(), send: await page.locator('#sendBtn').isDisabled(), queue: await page.locator('#queueMessageBtn').isDisabled(), redirect: await page.locator('#redirectMessageBtn').isDisabled(), requests: await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').length), draft: await page.locator('#messageInput').inputValue() }, { notice: true, send: true, queue: true, redirect: true, requests: 0, draft: 'Preserve this draft after sign-out' });
+	assert.match(await page.locator('#modelChip').innerText(), /catalog:openai:credential-model/);
+	await page.locator('#modelChip').click();
+	assert.equal(await page.locator('[data-discovered][data-model="catalog:openai:credential-model"]').count(), 0);
+	await page.locator('#modelChip').click();
+	await post(page, { type: 'providerCatalog', snapshot: snapshot([model], { credentialSource: 'broker' }), metadata });
+	assert.deepEqual({ notice: await page.locator('#unavailableModelNotice').isVisible(), send: await page.locator('#sendBtn').isDisabled() }, { notice: false, send: false });
+	assert.match(await page.locator('#modelChip').innerText(), /Credential-backed model/);
+});
+
 test('configured inventories retire removed deployments and Z.AI models without treating invalid settings as an empty inventory', async t => {
 	const page = await openSurface(t, 'chat', 400);
 	for (const provider of ['foundry', 'bedrock', 'zai']) {
