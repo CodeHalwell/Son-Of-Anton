@@ -4,11 +4,14 @@
  *--------------------------------------------------------------------------------------------*/
 import { applyImageCapability, serializeOpenAIMessages, serializeGoogleMessages, parseToolArguments } from './messageSerialization';
 import { BedrockRuntimeClient, InvokeModelWithResponseStreamCommand } from '@aws-sdk/client-bedrock-runtime';
+import { bedrockFamilyCapabilities, supportsBedrockClaude } from './BedrockModels';
 import { fromIni, fromNodeProviderChain } from '@aws-sdk/credential-providers';
 import type { AwsCredentialIdentity, AwsCredentialIdentityProvider } from '@smithy/types';
 import type { ConfigStore, SecretStore } from '../host';
 import type { PromptCacheOptimizer } from './PromptCacheOptimizer';
 import type { ClaudeCodeMessage } from './claudeCodeRunner';
+import { getDiscoveredModel, markDiscoveredToolsVerified, type DiscoveredModelId } from './DiscoveredModels';
+import { ProviderDiscovery, type CatalogRequestPolicy } from './ProviderDiscovery';
 import { Semaphore } from '../util/semaphore';
 import { RateLimiter } from '../util/rateLimiter';
 
@@ -40,6 +43,7 @@ export interface CostSink {
 //     (e.g. `anthropic.claude-3-5-sonnet-20241022-v2:0`) is resolved at
 //     request time via `sota.bedrockModelMap` with sensible defaults.
 export type ModelId =
+	| DiscoveredModelId
 	// Anthropic — short aliases (legacy; map to the latest Claude tier).
 	| 'opus'
 	| 'sonnet'
@@ -221,7 +225,13 @@ type Provider =
 	| 'cerebras'
 	| 'together'
 	| 'fireworks'
-	| 'codex';
+	| 'codex'
+	| 'acp'
+	| 'copilot'
+	| 'xai'
+	| 'moonshot'
+	| 'zai'
+	| 'minimax';
 
 /**
  * A single piece of message content. Text parts carry plain UTF-8 strings.
@@ -243,6 +253,8 @@ export type LlmContentPart =
 export type LlmMessageContent = string | ReadonlyArray<LlmContentPart>;
 
 export interface LlmMessage {
+	/** Provider-owned reasoning needed for subsequent tool replies; never interpreted as host instructions. */
+	reasoningContent?: string;
 	role: 'user' | 'assistant';
 	content: LlmMessageContent;
 }
@@ -292,10 +304,8 @@ const MULTIMODAL_MODELS: ReadonlySet<ModelId> = new Set<ModelId>([
 	'foundry-claude-sonnet',
 	'foundry-llama-3-70b',
 	'foundry-custom',
-	// Bedrock Claude family + Nova support images.
-	'bedrock-claude-opus-4', 'bedrock-claude-sonnet-4', 'bedrock-claude-haiku-4',
-	'bedrock-claude-3-7-sonnet',
-	'bedrock-claude-sonnet',
+	// Bedrock Claude aliases share their capability declarations with discovery.
+	// Nova vision metadata remains available even though this adapter requires Claude.
 	'bedrock-nova-pro', 'bedrock-nova-lite',
 	// Google Gemini — every shipping Gemini model accepts inline images.
 	// Gemma is text-only (no vision capability in the open-weights tier).
@@ -332,8 +342,8 @@ const MULTIMODAL_MODELS: ReadonlySet<ModelId> = new Set<ModelId>([
  * True when the model accepts image content parts. Centralised so each
  * `streamXxx` method has a single, identical question to ask.
  */
-function modelSupportsImages(model: ModelId): boolean {
-	return MULTIMODAL_MODELS.has(model);
+export function modelSupportsImages(model: ModelId): boolean {
+	return getDiscoveredModel(model)?.images === true || bedrockFamilyCapabilities(model)?.images === true || MULTIMODAL_MODELS.has(model);
 }
 
 /**
@@ -348,11 +358,12 @@ function modelSupportsImages(model: ModelId): boolean {
  * @internal exported for unit tests.
  */
 export function isOpenAIReasoningModel(model: ModelId): boolean {
-	return /^(?:o1|o3|o4|gpt-5)/.test(model);
+	return /^(?:o1|o3|o4|gpt-5)/.test(getDiscoveredModel(model)?.model ?? model);
 }
 
 /** Native providers round-trip tool messages; subscription CLI adapters own their own harness. */
 export function supportsAgenticToolLoop(model: ModelId): boolean {
+	if (model.startsWith('catalog:')) { return getDiscoveredModel(model)?.tools === true; }
 	const provider = providerForModel(model);
 	return provider !== 'claude-code' && provider !== 'codex' && (provider !== 'bedrock' || model.startsWith('bedrock-claude-'));
 }
@@ -495,6 +506,8 @@ export interface LlmRequestOptions {
 	model: ModelId;
 	messages: LlmMessage[];
 	maxTokens?: number;
+	/** Override transient HTTP retries for bounded explicit capability checks. */
+	maxRetries?: number;
 	systemPrompt?: string;
 	/**
 	 * H5. When set, takes precedence over `systemPrompt`. Each part may
@@ -539,6 +552,7 @@ export interface LlmStreamToolCall {
 }
 
 export interface LlmStreamComplete {
+	reasoningContent?: string;
 	type: 'complete';
 	fullText: string;
 	inputTokens: number;
@@ -610,6 +624,11 @@ export const GOOGLE_OAUTH_PROVIDER_ID = 'google-oauth';
  * plus a corresponding stream method below.
  */
 export function providerForModel(model: ModelId): Provider {
+	if (model.startsWith('catalog:')) {
+		const discovered = getDiscoveredModel(model);
+		if (!discovered) { throw new Error('Discovered model is unavailable. Refresh the provider catalog before retrying.'); }
+		return discovered.provider;
+	}
 	switch (model) {
 		case 'opus':
 		case 'sonnet':
@@ -754,6 +773,7 @@ export function providerForModel(model: ModelId): Provider {
 		case 'codex-gpt-5-codex':
 			return 'codex';
 	}
+	throw new Error('Unknown model provider');
 }
 
 /**
@@ -766,6 +786,9 @@ export class LlmClient {
 	private totalInputTokens = 0;
 	private totalOutputTokens = 0;
 	private totalCachedTokens = 0;
+	private accountingRequests = 0;
+	private unmeteredRequests = 0;
+	private accountedEstimatedCostUsd = 0;
 	private readonly credentialResolver?: ICredentialResolver;
 	private readonly secrets: SecretStore;
 	private readonly config: ConfigStore;
@@ -882,6 +905,41 @@ export class LlmClient {
 		return undefined;
 	}
 
+	/** Explicit, bounded capability probe. The advertised echo tool is synthetic and never executed. */
+	async verifyDiscoveredModel(id: ModelId): Promise<{ verified: boolean; message: string }> {
+		const model = getDiscoveredModel(id);
+		if (!model || model.chat === false || ['acp', 'claude-code', 'codex', 'copilot', 'bedrock'].includes(model.provider)) {
+			return { verified: false, message: 'Choose a discovered HTTP chat model. Agent adapters report their own capabilities.' };
+		}
+		const signal = AbortSignal.timeout(30000);
+		const options: LlmRequestOptions = {
+			model: id, signal, maxTokens: 256, maxRetries: 0, agentHandle: 'provider-capability-check',
+			systemPrompt: 'This is a capability check. Call the supplied synthetic echo tool once with text set to son-of-anton-probe. Do not perform any other task.',
+			messages: [{ role: 'user', content: 'Call sota_discovery_echo with the required text now.' }],
+			tools: [{ name: 'sota_discovery_echo', description: 'A synthetic read-only capability check; no host tool is executed.', inputSchema: { type: 'object', properties: { text: { type: 'string', const: 'son-of-anton-probe' } }, required: ['text'] } }],
+		};
+		let acquired = false, verified = false;
+		try {
+			await this.rateLimiter.acquire(options.agentHandle!, undefined, signal);
+			await this.requestSemaphore.acquire(signal); acquired = true;
+			this.accountRequest(id);
+			// Bypass only the unknown-capability check. Provider serialization/auth, limits and cost accounting stay intact.
+			for await (const event of this.recordOnComplete(this.dispatchProviderStream(options), options)) {
+				signal.throwIfAborted();
+				if (event.type === 'error') { return { verified: false, message: 'The provider rejected the capability check. Check the model availability, credentials, and endpoint.' }; }
+				if (event.type === 'tool-call' && event.name === 'sota_discovery_echo' && event.input.text === 'son-of-anton-probe') { verified = true; }
+			}
+			if (verified) { markDiscoveredToolsVerified(id); }
+			return { verified, message: verified ? 'Tool calling was verified with a synthetic echo request. No host tools ran.' : 'The model responded without the requested tool call. Tool support remains unverified.' };
+		} catch {
+			return { verified: false, message: 'The capability check could not complete within its request budget. No host tools ran.' };
+		} finally { if (acquired) { this.requestSemaphore.release(); } }
+	}
+
+	createProviderDiscovery(state?: import('../host').MementoStore, config: ConfigStore = this.config, catalogRequestAllowed?: CatalogRequestPolicy): ProviderDiscovery {
+		return new ProviderDiscovery({ secrets: this.secrets, config, state, credentialResolver: this.credentialResolver, catalogRequestAllowed });
+	}
+
 	/**
 	 * Get the Anthropic API key from SecretStorage, configuration, or environment.
 	 */
@@ -947,6 +1005,8 @@ export class LlmClient {
 			endpoint,
 			apiVersion,
 			deploymentForModel: (model: ModelId): string | undefined => {
+				const discovered = getDiscoveredModel(model);
+				if (discovered?.provider === 'foundry') { return discovered.model; }
 				const value = deploymentMap[model];
 				return value && value.length > 0 ? value : undefined;
 			},
@@ -1039,6 +1099,8 @@ export class LlmClient {
 			region,
 			credentialProvider,
 			modelInvocationId: (model: ModelId): string | undefined => {
+				const discovered = getDiscoveredModel(model);
+				if (discovered?.provider === 'bedrock') { return discovered.model; }
 				const userValue = userMap[model];
 				if (userValue && userValue.length > 0) {
 					return userValue;
@@ -1065,6 +1127,8 @@ export class LlmClient {
 	 * without losing the fallback for unmapped models.
 	 */
 	private getGoogleModelInvocationId(model: ModelId): string | undefined {
+		const discovered = getDiscoveredModel(model);
+		if (discovered?.provider === 'google') { return discovered.model; }
 		const defaults: Partial<Record<ModelId, string>> = {
 			'gemini-3-1-pro-preview': 'gemini-3.1-pro-preview',
 			'gemini-3-1-flash-lite': 'gemini-3.1-flash-lite',
@@ -1303,6 +1367,11 @@ export class LlmClient {
 	 * Map our model shorthand to the full Anthropic model ID.
 	 */
 	getModelId(model: ModelId): string {
+		if (model.startsWith('catalog:')) {
+			const discovered = getDiscoveredModel(model);
+			if (!discovered) { throw new Error('Discovered model is unavailable. Refresh the provider catalog before retrying.'); }
+			return discovered.model;
+		}
 		switch (model) {
 			// Anthropic short aliases — kept pointing at the originally-shipped
 			// Claude 3 snapshots so existing CLI sessions and saved
@@ -1479,6 +1548,7 @@ export class LlmClient {
 			case 'codex-gpt-5-mini': return 'gpt-5-mini';
 			case 'codex-gpt-5-codex': return 'gpt-5-codex';
 		}
+		throw new Error('Unknown model identifier');
 	}
 
 	/**
@@ -1486,6 +1556,11 @@ export class LlmClient {
 	 * Returns an async iterable of normalized stream events.
 	 */
 	async *streamRequest(options: LlmRequestOptions): AsyncGenerator<LlmStreamEvent> {
+		if (options.model.startsWith('catalog:')) {
+			const model = getDiscoveredModel(options.model);
+			if (!model || model.chat === false) { throw new Error('This discovered model is not available for chat. Refresh the provider catalog or choose a chat model.'); }
+			if (options.tools?.length && model.tools !== true) { throw new Error('This discovered model has not advertised tool support. Use Plan mode or choose a tool-capable model.'); }
+		}
 		// Enforce the runtime rate limits before touching a provider:
 		// (1) per-agent requests-per-minute (waits for a token), then
 		// (2) a global in-flight concurrency permit held for the whole stream.
@@ -1508,6 +1583,7 @@ export class LlmClient {
 		await this.requestSemaphore.acquire(options.signal);
 		try {
 			throwIfAborted(options.signal);
+			this.accountRequest(options.model);
 			// Intercept the provider's stream so we can record per-completion
 			// cache metrics in one place. The optimizer is set lazily via
 			// `setCacheOptimizer`; when undefined the interceptor degrades to
@@ -1569,6 +1645,14 @@ export class LlmClient {
 			case 'codex':
 				yield* this.streamCodex(options);
 				return;
+			case 'xai':
+			case 'moonshot':
+			case 'zai':
+			case 'minimax':
+				yield* this.streamCatalogCompatible(options, provider); return;
+			case 'acp':
+			case 'copilot':
+				throw new Error('This model requires its coding agent adapter. Select a specialist with the matching ACP adapter.');
 		}
 	}
 
@@ -1583,6 +1667,11 @@ export class LlmClient {
 		options: LlmRequestOptions,
 	): AsyncGenerator<LlmStreamEvent> {
 		for await (const event of inner) {
+			if (event.type === 'complete' && !isUnmeteredModel(options.model)) {
+				const rates = estimateRatesForModel(options.model);
+				this.accountedEstimatedCostUsd += ((event.inputTokens + event.cachedTokens) * rates.input + event.outputTokens * rates.output) / 1_000_000;
+			}
+			if (options.agentHandle !== 'provider-capability-check' && event.type === 'tool-call' && getDiscoveredModel(options.model) && options.tools?.some(tool => tool.name === event.name)) { markDiscoveredToolsVerified(options.model); }
 			if (event.type === 'complete' && this.cacheOptimizer) {
 				try {
 					this.cacheOptimizer.recordCacheMetrics(
@@ -1705,9 +1794,10 @@ export class LlmClient {
 	private async *streamAnthropic(options: LlmRequestOptions): AsyncGenerator<LlmStreamEvent> {
 		// Prefer OAuth bearer token from the credential broker when available.
 		// Any failure is treated as "no token" so the API key path remains usable.
+		const catalogApiKey = options.model.startsWith('catalog:') ? await this.getAnthropicApiKey() : undefined;
 		let oauthToken: string | undefined;
 		try {
-			const record = await this.credentialResolver?.getToken(ANTHROPIC_OAUTH_PROVIDER_ID);
+			const record = catalogApiKey ? undefined : await this.credentialResolver?.getToken(ANTHROPIC_OAUTH_PROVIDER_ID);
 			if (record && typeof record.token === 'string' && record.token) {
 				oauthToken = record.token;
 			}
@@ -1715,7 +1805,7 @@ export class LlmClient {
 			console.warn('LlmClient: OAuth token lookup failed, falling back to API key.', err);
 		}
 
-		const apiKey = oauthToken ? undefined : await this.getAnthropicApiKey();
+		const apiKey = catalogApiKey ?? (oauthToken ? undefined : await this.getAnthropicApiKey());
 
 		if (!oauthToken && !apiKey) {
 			yield {
@@ -1796,7 +1886,7 @@ export class LlmClient {
 				headers,
 				body: JSON.stringify(body),
 				signal: options.signal,
-			}, { signal: options.signal });
+			}, { signal: options.signal, maxRetries: options.maxRetries });
 
 			if (!response.ok) {
 				const body = await this.readErrorBody(response);
@@ -1930,9 +2020,10 @@ export class LlmClient {
 	private async *streamOpenAI(options: LlmRequestOptions): AsyncGenerator<LlmStreamEvent> {
 		// Prefer OAuth bearer token from the credential broker when available.
 		// Mirror the silent-fallback semantics of the Anthropic path.
+		const catalogApiKey = options.model.startsWith('catalog:') ? await this.getOpenAIApiKey() : undefined;
 		let oauthToken: string | undefined;
 		try {
-			const record = await this.credentialResolver?.getToken(OPENAI_OAUTH_PROVIDER_ID);
+			const record = catalogApiKey ? undefined : await this.credentialResolver?.getToken(OPENAI_OAUTH_PROVIDER_ID);
 			if (record && typeof record.token === 'string' && record.token) {
 				oauthToken = record.token;
 			}
@@ -1940,7 +2031,7 @@ export class LlmClient {
 			console.warn('LlmClient: OpenAI OAuth token lookup failed, falling back to API key.', err);
 		}
 
-		const apiKey = oauthToken ? undefined : await this.getOpenAIApiKey();
+		const apiKey = catalogApiKey ?? (oauthToken ? undefined : await this.getOpenAIApiKey());
 
 		if (!oauthToken && !apiKey) {
 			yield {
@@ -2013,7 +2104,7 @@ export class LlmClient {
 				headers,
 				body: JSON.stringify(body),
 				signal: options.signal,
-			}, { signal: options.signal });
+			}, { signal: options.signal, maxRetries: options.maxRetries });
 
 			if (!response.ok) {
 				const body = await this.readErrorBody(response);
@@ -2195,18 +2286,15 @@ export class LlmClient {
 
 		const supportsImages = modelSupportsImages(options.model);
 		const tokenLimit = options.maxTokens ?? 4096;
-		// Azure routes Foundry calls to the user's deployment, not the model id
-		// shown in the picker. `max_tokens` works on all gpt-3/4/4o deployments
-		// across all API versions; `max_completion_tokens` is required by the
-		// gpt-5/o1/o3/o4 reasoning families. Sending both is safe — Azure
-		// ignores the field that doesn't apply — and it's the only way to
-		// support older API versions (`2024-02-01`, `2024-06-01`,
-		// `2024-08-01-preview`) which reject `max_completion_tokens` outright.
-		const isReasoningFamily = /foundry-(gpt-5|o1|o3|o4|custom)/i.test(options.model);
+		// Azure's deployment name is opaque. Retain the configured model family
+		// independently of the catalog route/display label when choosing the API
+		// contract: reasoning models reject max_tokens; older classic deployments
+		// reject max_completion_tokens. Unknown custom families retain max_tokens.
+		const modelFamily = getDiscoveredModel(options.model)?.modelFamily ?? options.model;
+		const isReasoningFamily = /^foundry-(?:gpt-5(?:\.\d+)*|o1|o3|o4)(?:-|$)/i.test(modelFamily);
 		const body: Record<string, unknown> = {
 			model: modelId,
-			max_tokens: tokenLimit,
-			...(isReasoningFamily ? { max_completion_tokens: tokenLimit } : {}),
+			...(isReasoningFamily ? { max_completion_tokens: tokenLimit } : { max_tokens: tokenLimit }),
 			messages: [
 				systemMessage,
 				...serializeOpenAIMessages(options.messages, supportsImages),
@@ -2230,10 +2318,12 @@ export class LlmClient {
 		};
 		applyAdvancedHeaders(headers, this.config.get<string>('foundryCustomHeaders'));
 
-		// Phase 4 — reasoning effort for the Foundry-hosted reasoning families.
-		if (/foundry-(o[0-9]|gpt-5)/.test(options.model)) {
+		// The original o1 mini/preview models require completion-token limits
+		// without supporting the separately configurable reasoning effort.
+		if (isReasoningFamily && !/^foundry-o1-(?:mini|preview)(?:-|$)/i.test(modelFamily)) {
 			const effort = (this.config.get<string>('reasoningEffort') ?? 'medium').trim();
-			if (effort && ['low', 'medium', 'high', 'auto'].includes(effort)) {
+			// Auto leaves the provider's default in effect; it is not an API value.
+			if (['low', 'medium', 'high'].includes(effort)) {
 				body['reasoning_effort'] = effort;
 			}
 		}
@@ -2244,7 +2334,7 @@ export class LlmClient {
 				headers,
 				body: JSON.stringify(body),
 				signal: options.signal,
-			}, { signal: options.signal });
+			}, { signal: options.signal, maxRetries: options.maxRetries });
 
 			if (!response.ok) {
 				const body = await this.readErrorBody(response);
@@ -2392,7 +2482,9 @@ export class LlmClient {
 	 * extraction and usage accounting mirror `streamAnthropic` line-for-line.
 	 */
 	private async *streamBedrock(options: LlmRequestOptions): AsyncGenerator<LlmStreamEvent> {
-		if (!options.model.startsWith('bedrock-claude-')) {
+		const discovered = getDiscoveredModel(options.model);
+		const modelFamily = discovered?.modelFamily ?? options.model;
+		if (!supportsBedrockClaude(modelFamily, discovered?.model)) {
 			yield { type: 'error', error: 'The Bedrock adapter currently supports Claude models. Select a bedrock-claude model or use an OpenAI-compatible endpoint for this model family.' };
 			return;
 		}
@@ -2426,7 +2518,7 @@ export class LlmClient {
 		}
 
 		// Phase 4 — extended thinking budget for Bedrock Claude 4.x ids.
-		if (/^bedrock-claude-(opus|sonnet|haiku)-4/.test(options.model)) {
+		if (/^bedrock-claude-(opus|sonnet|haiku)-4/.test(modelFamily)) {
 			const budget = Math.max(0, Math.min(24000, this.config.get<number>('thinkingBudgetTokens') ?? 0));
 			if (budget > 0) {
 				body['thinking'] = { type: 'enabled', budget_tokens: budget };
@@ -2676,7 +2768,7 @@ export class LlmClient {
 				headers,
 				body: JSON.stringify(body),
 				signal: options.signal,
-			}, { signal: options.signal });
+			}, { signal: options.signal, maxRetries: options.maxRetries });
 
 			if (!response.ok) {
 				const errBody = await this.readErrorBody(response);
@@ -2823,6 +2915,9 @@ export class LlmClient {
 			modelId: string;
 			extraHeaders?: Record<string, string>;
 			customHeadersSetting?: string;
+			/** Already captured headers must not be re-read after an endpoint authorization check. */
+			customHeaders?: Record<string, string>;
+			redirect?: RequestInit['redirect'];
 			emptyBodyMessage: string;
 			supportsUsageStream?: boolean; // some local servers omit usage chunks
 		},
@@ -2863,12 +2958,14 @@ export class LlmClient {
 			...(config.apiKey ? { 'Authorization': `Bearer ${config.apiKey}` } : {}),
 			...(config.extraHeaders ?? {}),
 		};
-		applyAdvancedHeaders(headers, this.config.get<string>(config.customHeadersSetting ?? ''));
+		if (config.customHeaders) { Object.assign(headers, config.customHeaders); }
+		else { applyAdvancedHeaders(headers, this.config.get<string>(config.customHeadersSetting ?? '')); }
 
 		try {
 			const response = await fetch(config.endpoint, {
 				method: 'POST',
 				headers,
+				redirect: config.redirect,
 				body: JSON.stringify(body),
 				signal: options.signal,
 			});
@@ -2887,6 +2984,7 @@ export class LlmClient {
 
 			const decoder = new TextDecoder();
 			let fullText = '';
+			let reasoningContent = '';
 			let inputTokens = 0;
 			let outputTokens = 0;
 			let buffer = '';
@@ -2914,6 +3012,7 @@ export class LlmClient {
 						const event = JSON.parse(data);
 						const choice = event.choices?.[0];
 						const delta = choice?.delta;
+						if (typeof delta?.reasoning_content === 'string') { reasoningContent += delta.reasoning_content; if (reasoningContent.length > 1024 * 1024) { throw new Error('Provider reasoning exceeds context limit'); } }
 						if (delta && typeof delta.content === 'string' && delta.content.length > 0) {
 							const token = delta.content;
 							fullText += token;
@@ -2947,7 +3046,8 @@ export class LlmClient {
 							inputTokens = event.usage.prompt_tokens ?? inputTokens;
 							outputTokens = event.usage.completion_tokens ?? outputTokens;
 						}
-					} catch {
+					} catch (error) {
+						if (!(error instanceof SyntaxError)) { throw error; }
 						// Skip malformed JSON lines.
 					}
 				}
@@ -2973,6 +3073,7 @@ export class LlmClient {
 			yield {
 				type: 'complete',
 				fullText,
+				reasoningContent: reasoningContent || undefined,
 				inputTokens,
 				outputTokens,
 				cachedTokens: 0,
@@ -3001,6 +3102,16 @@ export class LlmClient {
 	 * with no slug configured surfaces an error rather than silently
 	 * defaulting.
 	 */
+	/** Additional provider-owned OpenAI-compatible routes selected from discovered catalogs. */
+	private async *streamCatalogCompatible(options: LlmRequestOptions, provider: 'xai' | 'moonshot' | 'zai' | 'minimax'): AsyncGenerator<LlmStreamEvent> {
+		const defaults = { xai: 'https://api.x.ai/v1', moonshot: 'https://api.moonshot.ai/v1', zai: 'https://api.z.ai/api/paas/v4', minimax: 'https://api.minimax.io/v1' };
+		const env = { xai: ['XAI_API_KEY'], moonshot: ['MOONSHOT_API_KEY'], zai: ['ZAI_API_KEY', 'ZHIPUAI_API_KEY'], minimax: ['MINIMAX_API_KEY'] };
+		const apiKey = await this.resolveCredential(`sota.secrets.${provider}ApiKey`, `${provider}ApiKey`, env[provider]);
+		if (!apiKey) { yield { type: 'error', error: `Configure the ${providerDisplayName(provider)} API key before sending a request.` }; return; }
+		const base = this.config.get<string>(`${provider}BaseUrl`)?.trim().replace(/\/+$/, '') || defaults[provider];
+		yield* this.streamOpenAICompatible(options, { provider, endpoint: `${base}/chat/completions`, apiKey, modelId: this.getModelId(options.model), emptyBodyMessage: `${providerDisplayName(provider)} returned an empty response.` });
+	}
+
 	private async *streamOpenRouter(options: LlmRequestOptions): AsyncGenerator<LlmStreamEvent> {
 		const apiKey = await this.resolveCredential('sota.secrets.openRouterApiKey', 'openRouterApiKey', ['OPENROUTER_API_KEY']);
 		if (!apiKey) {
@@ -3087,14 +3198,33 @@ export class LlmClient {
 				return;
 			}
 		}
-		const apiKey = await this.resolveCredential('sota.secrets.lmstudioApiKey', 'lmstudioApiKey', ['LMSTUDIO_API_KEY']);
+		const apiKey = await this.resolveCredential('sota.secrets.lmstudioApiKey', 'lmstudioApiKey', ['LMSTUDIO_API_KEY', 'LM_API_TOKEN']);
 		const baseUrl = (this.config.get<string>('lmstudioBaseUrl') ?? '').trim().replace(/\/+$/, '') || 'http://localhost:1234';
+		const customHeaders: Record<string, string> = {};
+		applyAdvancedHeaders(customHeaders, this.config.get<string>('lmstudioCustomHeaders'));
+		// Custom headers can contain credentials under arbitrary names. Capture
+		// them once and bind all authenticated traffic to the user-owned endpoint.
+		const authenticated = !!apiKey || Object.keys(customHeaders).length > 0;
+		if (authenticated && this.config.inspect) {
+			const setting = this.config.inspect<string>('lmstudioBaseUrl');
+			const userBaseUrl = (setting?.globalValue ?? setting?.defaultValue ?? '').trim() || 'http://localhost:1234';
+			const canonical = (value: string): string => new URL(value.trim().replace(/\/+$/, '')).href.replace(/\/+$/, '');
+			let matches = false;
+			try { matches = canonical(baseUrl) === canonical(userBaseUrl); } catch { /* An invalid endpoint cannot receive credentials. */ }
+			if (!matches) {
+				yield { type: 'error', error: 'LM Studio credentials require an endpoint configured in user settings. Set sota.lmstudioBaseUrl in User Settings to this server, or remove the credentials.' };
+				return;
+			}
+		}
 		yield* this.streamOpenAICompatible(options, {
 			provider: 'lmstudio',
 			endpoint: `${baseUrl}/v1/chat/completions`,
 			apiKey: apiKey || undefined,
 			modelId,
-			customHeadersSetting: 'lmstudioCustomHeaders',
+			customHeaders,
+			// Following even a same-origin path redirect could send credentials
+			// outside the full endpoint authorized above (including custom headers).
+			redirect: authenticated ? 'error' : undefined,
 			emptyBodyMessage: 'LM Studio returned an empty response body. Confirm a model is loaded in the LM Studio app.',
 		});
 	}
@@ -3189,9 +3319,9 @@ export class LlmClient {
 	 * `sota.togetherCustomModel`.
 	 */
 	private async *streamTogether(options: LlmRequestOptions): AsyncGenerator<LlmStreamEvent> {
-		const apiKey = await this.resolveCredential('sota.secrets.togetherApiKey', 'togetherApiKey', ['TOGETHER_API_KEY']);
+		const apiKey = await this.resolveCredential('sota.secrets.togetherApiKey', 'togetherApiKey', ['TOGETHER_API_KEY', 'TOGETHERAI_API_KEY']);
 		if (!apiKey) {
-			yield { type: 'error', error: 'Together credentials not configured. Set sota.togetherApiKey in settings, or TOGETHER_API_KEY env var.' };
+			yield { type: 'error', error: 'Together credentials not configured. Set sota.togetherApiKey in settings, or TOGETHER_API_KEY / TOGETHERAI_API_KEY env var.' };
 			return;
 		}
 		let modelId = this.getModelId(options.model);
@@ -3205,7 +3335,7 @@ export class LlmClient {
 				return;
 			}
 		}
-		const baseUrl = (this.config.get<string>('togetherBaseUrl') ?? '').trim().replace(/\/+$/, '') || 'https://api.together.xyz/v1';
+		const baseUrl = (this.config.get<string>('togetherBaseUrl') ?? '').trim().replace(/\/+$/, '') || 'https://api.together.ai/v1';
 		yield* this.streamOpenAICompatible(options, {
 			provider: 'together',
 			endpoint: `${baseUrl}/chat/completions`,
@@ -3365,6 +3495,16 @@ export class LlmClient {
 		}
 	}
 
+	/** Per-request estimates preserve mixed model prices; unmetered attempts mean the total is incomplete. */
+	getAccountingUsage(): { requests: number; unmeteredRequests: number; estimatedCostUsd: number } {
+		return { requests: this.accountingRequests, unmeteredRequests: this.unmeteredRequests, estimatedCostUsd: this.accountedEstimatedCostUsd };
+	}
+
+	/** ACP/subscription adapters use this host-owned counter without inventing token counts or prices. */
+	recordUnmeteredRequest(): void { this.accountingRequests++; this.unmeteredRequests++; }
+
+	private accountRequest(model: ModelId): void { this.accountingRequests++; if (isUnmeteredModel(model)) { this.unmeteredRequests++; } }
+
 	getTokenUsage(): { input: number; output: number; cached: number } {
 		return {
 			input: this.totalInputTokens,
@@ -3424,6 +3564,12 @@ function providerDisplayName(provider: Provider): string {
 		case 'google': return 'Google Gemini';
 		case 'claude-code': return 'Claude Code';
 		case 'openrouter': return 'OpenRouter';
+		case 'xai': return 'xAI';
+		case 'moonshot': return 'Moonshot';
+		case 'zai': return 'Z.AI';
+		case 'minimax': return 'MiniMax';
+		case 'acp': return 'ACP Agent';
+		case 'copilot': return 'GitHub Copilot';
 		case 'ollama': return 'Ollama';
 		case 'lmstudio': return 'LM Studio';
 		case 'deepseek': return 'DeepSeek';
@@ -3651,6 +3797,10 @@ async function retryableFetch(
  * signature is `Record<ModelId, ...>`.
  */
 function estimateRatesForModel(model: ModelId): { input: number; output: number } {
+	if (model.startsWith('catalog:')) {
+		const pricing = getDiscoveredModel(model)?.pricing;
+		return { input: pricing?.inputPerMillion ?? 0, output: pricing?.outputPerMillion ?? 0 };
+	}
 	const table: Record<ModelId, { input: number; output: number }> = {
 		opus: { input: 15.0, output: 75.0 },
 		sonnet: { input: 3.0, output: 15.0 },
@@ -3795,4 +3945,8 @@ function estimateRatesForModel(model: ModelId): { input: number; output: number 
 		'codex-gpt-5-codex': { input: 0, output: 0 },
 	};
 	return table[model];
+}
+
+function isUnmeteredModel(model: ModelId): boolean {
+	return model.startsWith('claude-code-') || model.startsWith('codex-') || model.startsWith('catalog:') && !getDiscoveredModel(model)?.pricing || model.endsWith('-custom');
 }

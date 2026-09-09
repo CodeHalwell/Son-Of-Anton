@@ -3,9 +3,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createAgentStack } from './AgentStackFactory';
 import { AgentManager } from './AgentManager';
+import { discoveredModelId, registerDiscoveredModels } from '../llm/DiscoveredModels';
 import { LlmClient } from '../llm/LlmClient';
 import { McpClient } from '../mcp/McpClient';
 import type { CancellationLike } from '../chatStream';
@@ -64,6 +65,29 @@ const claudeFixture = { id: 'claude-acp', command: process.execPath, args: [path
 const taskContext = { instruction: 'Explain the current file without editing it', scopeFiles: [], graphContext: '', parentTaskId: 'plan', orchestratorModelHint: 'claude-code-opus' as const, workspaceContextSnapshot: 'Active editor: src/example.ts\nexport const answer = 42;' };
 function fixtureResponse(summary: string): { text: string; model?: string } { return JSON.parse(summary.replace(/ 😀$/, '')); }
 
+for (const mode of ['act', 'plan'] as const) {
+	test(`configured specialist runtime budget cancels a direct ${mode} turn through the canonical ACP route`, { timeout: 10_000 }, async t => {
+		const warnings: unknown[][] = [];
+		t.mock.method(console, 'warn', (...args: unknown[]) => { warnings.push(args); });
+		const directory = await mkdtemp(path.join(os.tmpdir(), 'acp-configured-deadline-'));
+		t.after(() => rm(directory, { recursive: true, force: true }));
+		const cancelFile = path.join(directory, 'cancelled');
+		const { stack } = await routingStack(t, {
+			'sota.agents.anton-code.acpAgent': 'claude-acp',
+			'sota.agents.maxRuntimeMs': 150,
+			'sota.acp.agents': [{ ...claudeFixture, env: { FIXTURE_MODES: '1', FIXTURE_CANCEL_FILE: cancelFile } }],
+		});
+		const code = stack.specialists.get('anton-code')!;
+		// Separate process startup from the measured prompt, including Board's
+		// read-only Plan route. The next turn relies only on the saved setting.
+		await code.runAgenticTurn('warm session', () => {}, cancellation, { conversationId: mode, mode, maxRuntimeMs: 5_000 });
+		const started = Date.now();
+		await assert.rejects(code.runAgenticTurn('slow', () => {}, cancellation, { conversationId: mode, mode }), /deadline/);
+		assert.ok(Date.now() - started < 2_000, 'configured execution budget must not use the one-hour transport ceiling');
+		assert.deepEqual([await readFile(cancelFile, 'utf8'), stack.acpRuntime?.snapshot().active, warnings], ['cancelled', 0, []]);
+	});
+}
+
 test('Claude specialist routing recovers after adapter configuration without rebuilding the stack', async t => {
 	const settings: Record<string, unknown> = {};
 	const { stack } = await routingStack(t, settings);
@@ -104,17 +128,17 @@ test('a pinned direct model remains native despite a Claude orchestrator hint', 
 test('plan approval preserves the original editor and provider for both specialist and review', async t => {
 	const { stack, llm } = await routingStack(t, { 'sota.personality.enabled': false });
 	llm.streamRequest = async function* () { yield { type: 'token', token: '```json\n{"subtasks":[{"instruction":"Explain the current file","assignee":"anton-code","scopeFiles":[],"dependencies":[]}]}\n```' }; };
-	const seen: { role: string; editor?: string; model?: string }[] = [];
+	const seen: { role: string; editor?: string; model?: string; maxToolCalls?: number; maxRuntimeMs?: number }[] = [];
 	for (const role of ['anton-code', 'anton-review'] as const) {
 		stack.specialists.get(role)!.execute = async context => {
-			seen.push({ role, editor: context.workspaceContextSnapshot, model: context.orchestratorModelHint });
+			seen.push({ role, editor: context.workspaceContextSnapshot, model: context.orchestratorModelHint, maxToolCalls: context.maxToolCalls, maxRuntimeMs: context.maxRuntimeMs });
 			return result('Reviewed explanation');
 		};
 	}
 	const stream = { markdown: (_text: string) => {} };
-	await stack.orchestrator.handleChatRequest({ prompt: 'Explain the current file', command: 'plan', modelOverride: 'claude-code-opus', workspaceContextSnapshot: taskContext.workspaceContextSnapshot }, { history: [] }, stream, cancellation);
+	await stack.orchestrator.handleChatRequest({ prompt: 'Explain the current file', command: 'plan', maxToolCalls: 3, maxRuntimeMs: 2000, modelOverride: 'claude-code-opus', workspaceContextSnapshot: taskContext.workspaceContextSnapshot }, { history: [] }, stream, cancellation);
 	await stack.orchestrator.handleChatRequest({ prompt: '', command: 'approve', workspaceContextSnapshot: 'Active editor: different-file.ts' }, { history: [] }, stream, cancellation);
-	assert.deepEqual(seen, ['anton-code', 'anton-review'].map(role => ({ role, editor: taskContext.workspaceContextSnapshot, model: 'claude-code-opus' })));
+	assert.deepEqual(seen, ['anton-code', 'anton-review'].map(role => ({ role, editor: taskContext.workspaceContextSnapshot, model: 'claude-code-opus', maxToolCalls: 3, maxRuntimeMs: 2000 })));
 });
 
 test('partial ACP tool updates retain completion and output', async t => {
@@ -140,4 +164,51 @@ test('ACP server stacks disable both automatic and explicit adapter routing', as
 	const code = await stack.specialists.get('anton-code')!.runAgenticTurn('Explain', () => {}, cancellation);
 	const docs = await stack.specialists.get('anton-docs')!.runAgenticTurn('Explain', () => {}, cancellation, { modelOverride: 'claude-code-haiku' });
 	assert.deepEqual({ code, docs, requests }, { code: 'Native server response', docs: 'Native server response', requests: ['claude-code-sonnet', 'claude-code-haiku'] });
+});
+
+
+test('native catalog selections override specialist ACP pins and preserve exact native routing', async t => {
+	const id = discoveredModelId('openai', 'gpt-4.1-native-route');
+	registerDiscoveredModels([{ id, provider: 'openai', model: 'gpt-4.1-native-route', label: 'Native route', chat: true, images: true, tools: false, fetchedAt: 1 }]);
+	const { stack, llm } = await routingStack(t, { 'sota.agents.anton-code.acpAgent': 'claude-acp', 'sota.acp.agents': [claudeFixture] });
+	const calls: string[] = [];
+	t.mock.method(llm, 'streamRequest', async function* (options: { model: string }) { calls.push(options.model); yield { type: 'token' as const, token: 'Native catalog response' }; });
+	const code = stack.specialists.get('anton-code')!;
+	const text = await code.runChatTurn('Explain', () => {}, cancellation, { modelOverride: id });
+	await stack.specialists.get('anton-docs')!.execute({ ...taskContext, orchestratorModelHint: id });
+	assert.deepEqual([text, calls, code.getExecutionCapabilities(id).transport, stack.acpRuntime?.snapshot().processes], ['Native catalog response', [id, id], 'native', 0]);
+});
+
+test('orchestrator runtime budget cancels its native provider stream', async t => {
+	const { stack, llm } = await routingStack(t);
+	let observed: AbortSignal | undefined;
+	t.mock.method(llm, 'streamRequest', async function* (options: { signal?: AbortSignal }) {
+		observed = options.signal;
+		await new Promise<void>(resolve => { if (options.signal?.aborted) { resolve(); } else { options.signal?.addEventListener('abort', () => resolve(), { once: true }); } });
+		options.signal?.throwIfAborted();
+		yield { type: 'token' as const, token: 'Should never render' };
+	});
+	let output = '';
+	await stack.orchestrator.handleChatRequest({ prompt: 'hello', maxRuntimeMs: 20 }, { history: [] }, { markdown: text => { output += text; } }, cancellation);
+	assert.deepEqual([observed?.aborted, output.includes('Should never render')], [true, false]);
+});
+
+
+test('profile model pins update existing specialists without rebuilding their agent stack', async t => {
+	const id = discoveredModelId('openai', 'gpt-4.1-profile-hint');
+	registerDiscoveredModels([{ id, provider: 'openai', model: 'gpt-4.1-profile-hint', label: 'Profile hint', chat: true, images: true, tools: false, fetchedAt: 1 }]);
+	const settings: Record<string, unknown> = {};
+	const { stack, llm } = await routingStack(t, settings);
+	const calls: string[] = [];
+	t.mock.method(llm, 'streamRequest', async function* (options: { model: string }) { calls.push(options.model); yield { type: 'token' as const, token: 'Documented' }; });
+	const docs = stack.specialists.get('anton-docs')!;
+	await docs.execute({ ...taskContext, orchestratorModelHint: id });
+	settings['sota.agents.anton-docs.model'] = 'gpt-4o';
+	await docs.execute({ ...taskContext, orchestratorModelHint: id });
+	settings['sota.agents.anton-docs.model'] = 'gpt-4o-mini';
+	await docs.runChatTurn('Explain', () => {}, cancellation);
+	await docs.runChatTurn('Explicit picker wins', () => {}, cancellation, { modelOverride: id });
+	delete settings['sota.agents.anton-docs.model'];
+	await docs.execute({ ...taskContext, orchestratorModelHint: id });
+	assert.deepEqual(calls, [id, 'gpt-4o', 'gpt-4o-mini', id, id]);
 });

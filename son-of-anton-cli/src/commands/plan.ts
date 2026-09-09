@@ -56,6 +56,7 @@ export async function runPlan(prompt: string, opts: PlanOptions): Promise<void> 
 	const renderer = makeRenderer(opts.output);
 	const built = buildCliAgentStack(host);
 	const cancellation = new CliCancellation();
+	let failure: Error | undefined;
 	const onSigint = (): void => cancellation.cancel();
 	process.once('SIGINT', onSigint);
 
@@ -76,6 +77,7 @@ export async function runPlan(prompt: string, opts: PlanOptions): Promise<void> 
 						})),
 					});
 				} else if (event.type === 'error') {
+					failure ??= new Error(event.message);
 					renderer.emit({ type: 'error', message: event.message });
 				}
 				// Other event types (subtask-*, token, final) are not expected
@@ -83,13 +85,12 @@ export async function runPlan(prompt: string, opts: PlanOptions): Promise<void> 
 				// so the CLI surface stays focused on the plan.
 			},
 		);
-		renderer.emit({ type: 'done' });
+		if (cancellation.isCancellationRequested) { process.exitCode = SOTA_EXIT_CODES.CANCELLED; }
+		else if (failure) { process.exitCode = classifyError(failure); }
+		else { renderer.emit({ type: 'done' }); }
 	} catch (err) {
-		renderer.emit({
-			type: 'error',
-			message: err instanceof Error ? err.message : String(err),
-		});
-		process.exitCode = classifyError(err);
+		if (!failure && !cancellation.isCancellationRequested) { renderer.emit({ type: 'error', message: err instanceof Error ? err.message : String(err) }); }
+		process.exitCode = cancellation.isCancellationRequested ? SOTA_EXIT_CODES.CANCELLED : classifyError(failure ?? err);
 	} finally {
 		process.off('SIGINT', onSigint);
 		built.dispose();

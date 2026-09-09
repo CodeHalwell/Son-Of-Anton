@@ -14,7 +14,7 @@ interface AcpTurnOptions extends ChatTurnOptions { onReportedChange?: (change: F
 
 /** A specialist backed by a real ACP agent, sharing the host's process budget and approval surface. */
 export class AcpAgent extends BaseAgent {
-	private readonly history = new Map<string, string[]>();
+
 	constructor(
 		private readonly runtime: AcpRuntime,
 		private readonly definition: AcpAgentDefinition,
@@ -24,6 +24,8 @@ export class AcpAgent extends BaseAgent {
 		private readonly interpret: (result: SubtaskResult) => SubtaskResult,
 		...base: ConstructorParameters<typeof BaseAgent>
 	) { super(...base); }
+
+	override getExecutionCapabilities() { return this.runtime.getCapabilities(this.definition); }
 
 	protected getRoleDescription(): string { return this.instructions(); }
 
@@ -36,7 +38,7 @@ export class AcpAgent extends BaseAgent {
 		};
 		try {
 			const changes = new Map<string, FileChange>();
-			const summary = await this.runAgenticTurn(`${context.instruction}\n\nScope files: ${context.scopeFiles.join(', ')}\n${context.graphContext}`, event => { if (event.type === 'token') { context.onToken?.(event.token); } }, cancellation, { conversationId: `${context.parentTaskId}:${this.handle}`, workspaceContextSnapshot: context.workspaceContextSnapshot, onReportedChange: change => changes.set(change.filePath, change) });
+			const summary = await this.runAgenticTurn(`${context.instruction}\n\nScope files: ${context.scopeFiles.join(', ')}\n${context.graphContext}`, event => { if (event.type === 'token') { context.onToken?.(event.token); } }, cancellation, { conversationId: context.conversationId ?? `${context.parentTaskId}:${this.handle}`, maxToolCalls: context.maxToolCalls, maxRuntimeMs: context.maxRuntimeMs, workspaceContextSnapshot: context.workspaceContextSnapshot, images: context.images, onReportedChange: change => changes.set(change.filePath, change) });
 			return this.interpret({ success: true, changes: [...changes.values()], summary, tokenUsage: { inputTokens: 0, outputTokens: 0, cachedTokens: 0, naiveInputTokens: 0, accounting: 'unavailable' } });
 		} catch (error) {
 			return { success: false, changes: [], summary: error instanceof Error ? error.message : 'ACP agent failed', tokenUsage: { inputTokens: 0, outputTokens: 0, cachedTokens: 0, naiveInputTokens: 0, accounting: 'unavailable' } };
@@ -44,7 +46,7 @@ export class AcpAgent extends BaseAgent {
 	}
 
 	override async handleChatRequest(request: ChatRequestLike, _context: ChatContextLike, stream: ChatStreamLike, cancellation: CancellationLike): Promise<void> {
-		await this.runChatTurn(request.command ? `/${request.command} ${request.prompt}` : request.prompt, text => stream.markdown(text), cancellation, { conversationId: request.conversationId, workspaceContextSnapshot: request.workspaceContextSnapshot });
+		await this.runChatTurn(request.command ? `/${request.command} ${request.prompt}` : request.prompt, text => stream.markdown(text), cancellation, { conversationId: request.conversationId, workspaceContextSnapshot: request.workspaceContextSnapshot, images: request.images, mode: request.command === 'plan' ? 'plan' : 'act' });
 	}
 
 	override async runChatTurn(text: string, emit: (token: string) => void, cancellation: CancellationLike, options?: ChatTurnOptions): Promise<string> {
@@ -65,9 +67,18 @@ export class AcpAgent extends BaseAgent {
 			const result = await this.runtime.run({
 				agent: this.definition, cwd: this.cwd,
 				conversationId,
-				initialContext: [this.instructions(), ...(this.history.get(conversationId) ?? [])].join('\n\n'),
+				// The fallback UUID is private to this call and cannot be reused for
+				// recovery. Explicit host conversation/task IDs remain durable.
+				persistRecovery: options?.conversationId !== undefined,
+				initialContext: this.instructions(),
+				images: options?.images,
+				modeId: options?.mode === 'plan' ? 'plan' : undefined,
+				readOnly: options?.mode === 'plan',
+				maxToolCalls: options?.maxToolCalls ?? this.configStore?.get<number>('sota.agents.maxToolCalls'),
+				onUsage: options?.onUsage,
+				onRecovery: options?.onRecovery,
 				text: options?.workspaceContextSnapshot ? `${text}\n\nWorkspace context:\n${options.workspaceContextSnapshot}` : text,
-				signal: controller.signal, timeoutMs: this.config.perTurnTimeoutMs,
+				signal: controller.signal, timeoutMs: options?.maxRuntimeMs ?? this.configStore?.get<number>('sota.agents.maxRuntimeMs') ?? this.config.perTurnTimeoutMs,
 				onPermission: this.permission,
 				onUpdate: update => {
 					if (update.sessionUpdate === 'agent_message_chunk' && object(update.content) && typeof update.content.text === 'string') {
@@ -101,13 +112,9 @@ export class AcpAgent extends BaseAgent {
 		} catch (error) { this.agentManager.failTask(task.id, error instanceof Error ? error.message : 'ACP agent failed'); throw error; }
 		finally {
 			subscription.dispose();
-			if (options?.conversationId) {
-				const turns = this.history.get(conversationId) ?? [];
-				turns.push(`User: ${text}\nAssistant: ${response}`);
-				while (turns.length && Buffer.byteLength(turns.join('\n')) > 256 * 1024) { turns.shift(); }
-				this.history.delete(conversationId); this.history.set(conversationId, turns);
-				while (this.history.size > 20) { this.history.delete(this.history.keys().next().value!); }
-			}
+			// Every attempted ACP request consumes the request cap even when billing is unavailable.
+			this.spendGuard?.recordUsage({ accounting: 'unavailable', route: 'acp' });
+			this.llmClient.recordUnmeteredRequest();
 		}
 	}
 }

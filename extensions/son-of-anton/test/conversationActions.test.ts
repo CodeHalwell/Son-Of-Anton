@@ -58,7 +58,7 @@ suite('Conversation actions', () => {
 		Object.assign(vscode.window, { showWarningMessage: () => { dialogs++; return new Promise<string>(resolve => { finish = resolve; }); } });
 		const pending = f.actions.delete('first');
 		await f.actions.delete('first');
-		f.select('second'); finish('Delete'); await pending;
+		f.select('second'); finish('Move to Trash'); await pending;
 		assert.deepEqual({ dialogs, remaining: [...f.records.keys()] }, { dialogs: 1, remaining: ['second'] });
 	});
 

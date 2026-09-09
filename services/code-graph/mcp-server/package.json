@@ -14,7 +14,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@son-of-anton/codegraph-napi": "file:../../../crates/sota-codegraph-napi"
+    "@son-of-anton/codegraph-napi": "file:../../../crates/sota-codegraph-napi",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^22",

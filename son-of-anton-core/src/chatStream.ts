@@ -34,6 +34,10 @@ export interface ChatStreamLike {
  * boundary. `modelOverride` lives on the structural shim only.
  */
 export interface ChatRequestLike {
+	readonly maxToolCalls?: number;
+	readonly maxRuntimeMs?: number;
+	readonly signal?: AbortSignal;
+	readonly images?: readonly import('./acp/protocol').AcpImage[];
 	readonly prompt: string;
 	readonly command?: string;
 	readonly modelOverride?: ModelId;

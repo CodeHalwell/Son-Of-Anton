@@ -18,7 +18,7 @@ suite('Review execution and evidence boundaries', () => {
 		for (const approve of [false, true]) {
 			test(`${state} rerun requires native confirmation (${approve ? 'approve' : 'cancel'})`, async () => {
 				const reruns: string[] = [];
-				vscode.window.showWarningMessage = (async (...args: object[]) => approve ? args.at(-1) : undefined) as typeof vscode.window.showWarningMessage;
+				vscode.window.showWarningMessage = (async (...args: (string | vscode.MessageOptions | vscode.MessageItem)[]) => approve ? args.at(-1) : undefined) as typeof vscode.window.showWarningMessage;
 				const panel = Object.assign(Object.create(TaskBoardPanel.prototype), { currentConversationId: 'conversation', pendingReruns: new Set(), closed: false, model: { getSnapshot: () => ({ tasks: [{ id: 'task', state, instruction: 'Run fixture' }] }) }, handlers: { rerunSubtask: (id: string) => reruns.push(id) } }) as { confirmRerun(id: string): Promise<void> };
 				await panel.confirmRerun('task');
 				assert.deepEqual(reruns, approve ? ['task'] : []);
@@ -48,7 +48,7 @@ suite('Review execution and evidence boundaries', () => {
 		const patch = 'diff --git a/deleted.ts b/deleted.ts\ndeleted file mode 100644\n--- a/deleted.ts\n+++ /dev/null\n@@ -1 +0,0 @@\n-export const value = 1;\n';
 		const report = { snapshot: { workspace: root, files: ['deleted.ts'], patch }, id: 'report', stages: [{ id: 'stage', answer: { findings: [{ file: 'deleted.ts', line: 1 }] } }] };
 		let opened: vscode.Uri | undefined;
-		vscode.window.showTextDocument = (async (uri: vscode.Uri) => { opened = uri; return {}; }) as typeof vscode.window.showTextDocument;
+		vscode.window.showTextDocument = (async (uri: vscode.Uri) => { opened = uri; return {}; }) as unknown as typeof vscode.window.showTextDocument;
 		const controller = Object.assign(Object.create(CouncilController.prototype), { ready: Promise.resolve(), workspace: root, evidenceScheme: 'sota-test-evidence', service: { store: { load: async () => report } } }) as { handle(message: { type: string; id: string; stageId: string; index: number }): Promise<void>; evidenceContent(uri: vscode.Uri): Promise<string> };
 		await controller.handle({ type: 'evidence', id: 'report', stageId: 'stage', index: 0 });
 		assert.deepEqual({ scheme: opened?.scheme, content: await controller.evidenceContent(opened!) }, { scheme: 'sota-test-evidence', content: patch });

@@ -231,6 +231,7 @@ export class CiRetryAgent extends BaseAgent {
 			systemPrompt,
 			userMessage,
 			context.onToken,
+			{ images: context.images, signal: context.signal },
 		);
 
 		const changes = this.parseFileChanges(text);

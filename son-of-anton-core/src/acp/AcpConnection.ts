@@ -6,7 +6,7 @@
 import { execFile, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import spawn from 'cross-spawn';
 import { AcpPeer } from './AcpPeer';
-import { ACP_VERSION, AcpError, abortError, cancelledPermission, object, validateAgent, type AcpAgentDefinition, type AcpInitializeResult, type AcpMcpServer, type AcpPermissionHandler, type AcpPermissionRequest, type AcpPromptResult, type AcpUpdate } from './protocol';
+import { ACP_VERSION, AcpError, abortError, cancelledPermission, isValidAcpModelId, object, validateAgent, validateImages, type AcpImage, type AcpAgentDefinition, type AcpInitializeResult, type AcpMcpServer, type AcpPermissionHandler, type AcpPermissionRequest, type AcpPromptResult, type AcpUpdate } from './protocol';
 
 /** One agent process and conversation. Never replays a prompt after a transport failure. */
 export class AcpConnection {
@@ -22,6 +22,9 @@ export class AcpConnection {
 	private readonly spawned: Promise<void>;
 	initialization?: AcpInitializeResult;
 	availableModes: string[] = [];
+	availableModels: Array<{ id: string; name: string }> = [];
+	modelsAdvertised = false;
+	modelsTruncated = false;
 
 	constructor(readonly definition: AcpAgentDefinition, readonly cwd: string) {
 		validateAgent(definition);
@@ -37,7 +40,7 @@ export class AcpConnection {
 				}
 			},
 			close: () => { void this.stopAfterProcessExit(); },
-		});
+		}, 4 * 1024 * 1024, 32 * 1024 * 1024);
 		// Drain diagnostics without retaining unlimited logs or leaking provider credentials.
 		this.child.stderr.resume();
 		this.child.stdin.on('error', () => { /* peer handles EPIPE; keep late teardown errors handled */ });
@@ -85,10 +88,11 @@ export class AcpConnection {
 	async newSession(mcpServers: AcpMcpServer[] = [], signal?: AbortSignal, modeId?: string): Promise<string> {
 		if (!this.initialization) { await this.initialize(signal); }
 		if (this.sessionId) { throw new Error('ACP connection already owns a session'); }
-		const result = await this.peer.request<{ sessionId: string; modes?: { availableModes?: Array<{ id: string }> } }>('session/new', { cwd: this.cwd, mcpServers }, { signal });
+		const result = await this.peer.request<{ sessionId: string; modes?: { availableModes?: Array<{ id: string }> }; models?: { availableModels?: Array<{ modelId: string; name: string }> } }>('session/new', { cwd: this.cwd, mcpServers }, { signal });
 		if (!object(result) || typeof result.sessionId !== 'string' || !result.sessionId) { throw new Error('ACP agent returned an invalid session id'); }
 		this.sessionId = result.sessionId;
 		this.availableModes = result.modes?.availableModes?.map(mode => mode.id) ?? [];
+		await this.selectModel(result.models?.availableModels, signal);
 		if (modeId) {
 			if (!Array.isArray(result.modes?.availableModes) || !result.modes.availableModes.some(mode => mode.id === modeId)) { throw new Error(`ACP agent does not advertise the required mode: ${modeId}`); }
 			await this.peer.request('session/set_mode', { sessionId: this.sessionId, modeId }, { signal });
@@ -96,10 +100,51 @@ export class AcpConnection {
 		return result.sessionId;
 	}
 
-	async prompt(text: string, options: { signal: AbortSignal; update?: (update: AcpUpdate) => void; permission?: AcpPermissionHandler; timeoutMs?: number }): Promise<AcpPromptResult> {
+	/** Load only a settled session. Replay notifications are deliberately not forwarded as live work. */
+	async loadSession(sessionId: string, mcpServers: AcpMcpServer[] = [], signal?: AbortSignal, modeId?: string): Promise<void> {
+		if (!this.initialization) { await this.initialize(signal); }
+		if (!this.initialization?.agentCapabilities?.loadSession) { throw new Error('ACP adapter does not support loading sessions'); }
+		if (this.sessionId) { throw new Error('ACP connection already owns a session'); }
+		const result = await this.peer.request<{ modes?: { availableModes?: Array<{ id: string }> }; models?: { availableModels?: Array<{ modelId: string; name: string }> } }>('session/load', { sessionId, cwd: this.cwd, mcpServers }, { signal });
+		this.sessionId = sessionId;
+		this.availableModes = result?.modes?.availableModes?.map(mode => mode.id) ?? [];
+		await this.selectModel(result?.models?.availableModels, signal);
+		if (modeId) {
+			if (!this.availableModes.includes(modeId)) { throw new Error(`ACP agent does not advertise the required mode: ${modeId}`); }
+			await this.peer.request('session/set_mode', { sessionId, modeId }, { signal });
+		}
+	}
+
+	private async selectModel(models: Array<{ modelId: string; name: string }> | undefined, signal?: AbortSignal): Promise<void> {
+		this.modelsAdvertised = Array.isArray(models);
+		this.modelsTruncated = false;
+		this.availableModels = [];
+		const exposed = new Set<string>();
+		let selectedAdvertised = false;
+		if (Array.isArray(models)) {
+			for (const model of models) {
+				if (!object(model) || !isValidAcpModelId(model.modelId) || typeof model.name !== 'string') { continue; }
+				// Selection uses the complete validated advertisement. Only the
+				// discovery/UI inventory and its deduplication set are capped.
+				if (model.modelId === this.definition.modelId) { selectedAdvertised = true; }
+				if (exposed.has(model.modelId)) { continue; }
+				if (this.availableModels.length >= 500) { this.modelsTruncated = true; continue; }
+				exposed.add(model.modelId);
+				this.availableModels.push({ id: model.modelId, name: model.name.slice(0, 200) });
+			}
+		}
+		if (this.definition.modelId) {
+			if (!selectedAdvertised) { throw new Error('The ACP adapter does not advertise the selected model. Refresh its catalog or choose another model.'); }
+			await this.peer.request('session/set_model', { sessionId: this.sessionId, modelId: this.definition.modelId }, { signal });
+		}
+	}
+
+	async prompt(text: string, options: { images?: readonly AcpImage[]; signal: AbortSignal; update?: (update: AcpUpdate) => void; permission?: AcpPermissionHandler; timeoutMs?: number }): Promise<AcpPromptResult> {
 		if (!this.sessionId) { throw new Error('ACP session has not been created'); }
 		if (this.active) { throw new Error('ACP session already has an active prompt'); }
 		options.signal.throwIfAborted();
+		validateImages(options.images);
+		if (options.images?.length && !this.initialization?.agentCapabilities?.promptCapabilities?.image) { throw new Error('This ACP adapter does not advertise image support. Select an image-capable adapter or remove the attachments.'); }
 		this.active = options;
 		let killTimer: ReturnType<typeof setTimeout> | undefined;
 		const cancel = () => {
@@ -110,7 +155,7 @@ export class AcpConnection {
 		options.signal.addEventListener('abort', cancel, { once: true });
 		try {
 			const result = await this.peer.request<AcpPromptResult>('session/prompt', {
-				sessionId: this.sessionId, prompt: [{ type: 'text', text }],
+				sessionId: this.sessionId, prompt: [{ type: 'text', text }, ...(options.images ?? []).map(image => ({ type: 'image', data: image.data, mimeType: image.mimeType }))],
 			}, { timeoutMs: options.timeoutMs ?? 600_000 });
 			if (options.signal.aborted) { throw abortError(); }
 			if (!object(result) || !['end_turn', 'cancelled', 'refusal', 'max_tokens', 'max_turn_requests'].includes(result.stopReason)) { throw new Error('ACP agent returned an invalid stop reason'); }

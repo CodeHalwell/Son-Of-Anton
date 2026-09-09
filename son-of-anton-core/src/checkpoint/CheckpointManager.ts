@@ -4,6 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as os from 'node:os';
+import { CheckpointIndexCommitUncertainError, CheckpointIndexStorage } from './CheckpointIndexStorage';
+import { FileSnapshotStore, type FileSnapshot } from './FileSnapshotStore';
 import { randomUUID, createHash } from 'node:crypto';
 import { GitSnapshotStore, type GitSnapshot } from './GitSnapshotStore';
 import { TypedEventEmitter, type Event } from '../eventEmitter';
@@ -16,15 +19,13 @@ import type { ConfigStore, Disposable, MementoStore, Notifier } from '../host';
  * implement these two methods.
  */
 export interface ConversationStoreLike {
-	load(conversationId: string): { readonly messages: ReadonlyArray<unknown>; readonly summary: { readonly lastSpecialist?: string } } | undefined;
-	update(conversationId: string, messages: ReadonlyArray<unknown>, lastSpecialist?: string): void;
+	load(conversationId: string): { readonly messages: ReadonlyArray<unknown>; readonly summary: { readonly lastSpecialist?: string }; readonly writeToken?: { revision: string | null } } | undefined;
+	update(conversationId: string, messages: ReadonlyArray<unknown>, lastSpecialist?: string, lastMode?: undefined, lastTab?: undefined, lastModel?: undefined, writeToken?: { revision: string | null }): void;
 }
 
 /**
- * Storage key for the checkpoint index. We keep all checkpoints in a single
- * `globalState` array so listing for the History UI is a single read; the
- * payload is small (no file content for git checkpoints, just SHAs and
- * metadata) so a flat index scales fine to {@link DEFAULT_MAX_CHECKPOINTS}.
+ * Legacy migration source. Shared file-backed indexes are authoritative;
+ * per-window Memento snapshots must never replace an existing durable index.
  */
 const CHECKPOINT_INDEX_KEY = 'sota.checkpoints.index';
 
@@ -51,6 +52,9 @@ export interface Checkpoint {
 	readonly id: string;
 	/** Conversation that owns this checkpoint. */
 	readonly conversationId: string;
+	/** The original conversation was permanently deleted; only explicit branches retain this checkpoint. */
+	readonly ownerDeleted?: boolean;
+	readonly branchConversationIds?: readonly string[];
 	/** 0-based ordinal of the turn within the conversation. */
 	readonly turnIndex: number;
 	/** Milliseconds since epoch. Used for the relative-time tooltip. */
@@ -67,6 +71,7 @@ export interface Checkpoint {
 	readonly gitSha?: string;
 	/** Versioned snapshot with worktree identity and staging state. */
 	readonly snapshot?: GitSnapshot;
+	readonly fileSnapshot?: FileSnapshot;
 	/** Reference the SHA was based on at capture time (HEAD or branch). */
 	readonly baseRef?: string;
 	/** Human-readable summary (e.g. "3 files modified"). Optional, best-effort. */
@@ -80,6 +85,7 @@ export interface Checkpoint {
  */
 export interface RestoreOptions {
 	conversationToo: boolean;
+	conversationId?: string;
 }
 
 /**
@@ -87,6 +93,7 @@ export interface RestoreOptions {
  * surface modal prompts and a workspace root without depending on `vscode`.
  */
 export interface CheckpointManagerHost {
+	readonly storageRoot?: string;
 	readonly notifier: Notifier;
 	readonly config: ConfigStore;
 	readonly getWorkspaceRoot: () => string | undefined;
@@ -101,6 +108,8 @@ export class CheckpointManager implements Disposable {
 	private readonly _onDidChange = new TypedEventEmitter<void>();
 	readonly onDidChange: Event<void> = this._onDidChange.event;
 	private pendingWrite: Promise<void> = Promise.resolve();
+	private readonly activeRestores = new Set<ReadonlySet<string>>();
+	private readonly indexes = new Map<string, CheckpointIndexStorage>();
 
 	constructor(
 		private readonly conversationStore: ConversationStoreLike,
@@ -111,8 +120,7 @@ export class CheckpointManager implements Disposable {
 	/**
 	 * Capture a checkpoint of the current workspace state. Returns
 	 * `undefined` if the user has disabled checkpoints, no workspace folder is
-	 * open, or the capture itself failed (e.g. not a git repo and the
-	 * file-backed fallback is still a stub).
+	 * open, or capture failed. Non-Git folders use complete bounded file snapshots.
 	 */
 	async capture(conversationId: string, turnIndex: number, userMessage: string): Promise<Checkpoint | undefined> {
 		if (!this.isEnabled()) {
@@ -128,7 +136,25 @@ export class CheckpointManager implements Disposable {
 			return undefined;
 		}
 
-		await this.mutateIndex(index => this.pruneIndex([...index, checkpoint]), checkpoint.snapshot?.workspaceRoot);
+		let indexed = false;
+		try {
+			await this.mutateIndex((index, pinned) => this.pruneIndex([...index, checkpoint], pinned), checkpoint.snapshot?.workspaceRoot ?? checkpoint.fileSnapshot?.workspaceRoot, () => { indexed = true; });
+		} catch (error) {
+			// Only this newly captured payload is disposable before the index
+			// commits. A later pruning/notification failure must not remove a
+			// snapshot that history or a branch can already reference.
+			if (!indexed && !(error instanceof CheckpointIndexCommitUncertainError) && (checkpoint.fileSnapshot || checkpoint.snapshot)) {
+				try {
+					if (checkpoint.fileSnapshot) { const snapshot = checkpoint.fileSnapshot; await new FileSnapshotStore(snapshot.workspaceRoot, snapshot.storageRoot).release(snapshot); }
+					if (checkpoint.snapshot) { await new GitSnapshotStore(checkpoint.snapshot.workspaceRoot).release(checkpoint.snapshot); }
+				}
+				catch (cleanupError) {
+					try { this.host.notifier.warn(`Could not release an unindexed ${checkpoint.fileSnapshot ? 'file' : 'Git'} checkpoint: ${String(cleanupError)}`); }
+					catch { /* Preserve the index failure even if the host cannot report cleanup. */ }
+				}
+			}
+			throw error;
+		}
 		this._onDidChange.fire();
 		return checkpoint;
 	}
@@ -136,7 +162,7 @@ export class CheckpointManager implements Disposable {
 	/** Return the checkpoints belonging to a single conversation, oldest first. */
 	list(conversationId: string): ReadonlyArray<Checkpoint> {
 		return this.readIndex()
-			.filter(cp => cp.conversationId === conversationId)
+			.filter(cp => (!cp.ownerDeleted && cp.conversationId === conversationId) || cp.branchConversationIds?.includes(conversationId))
 			.sort((a, b) => a.capturedAt - b.capturedAt);
 	}
 
@@ -163,35 +189,24 @@ export class CheckpointManager implements Disposable {
 			return;
 		}
 
+		options = { ...options, conversationId: options.conversationId ?? (checkpoint.ownerDeleted ? checkpoint.branchConversationIds?.[0] : checkpoint.conversationId) };
+		if (!options.conversationId || !((!checkpoint.ownerDeleted && options.conversationId === checkpoint.conversationId) || checkpoint.branchConversationIds?.includes(options.conversationId))) { throw new Error('Checkpoint is not associated with this conversation.'); }
 		const root = this.getWorkspaceRoot();
+		if (root && checkpoint.kind === 'fs' && checkpoint.fileSnapshot) {
+			await this.restoreFiles(checkpoint, root, options); return;
+		}
 		if (!root || !checkpoint.snapshot) {
 			throw new Error('This legacy checkpoint has no verified worktree snapshot. Capture a new checkpoint before making changes.');
 		}
 		const store = new GitSnapshotStore(root);
-		const recovery = await store.restore(checkpoint.snapshot, async files => {
+		await this.restoreWithRecovery(checkpoint, root, options, retainRecovery => store.restore(checkpoint.snapshot!, async files => {
 			const preview = files.slice(0, 20).map(file => `  ${file}`).join('\n');
 			const confirmed = await this.host.confirmRestore(
 				`Restore ${files.length} changed paths to this checkpoint? Tracked and non-ignored untracked files are restored; the staging area is preserved as captured. A recovery checkpoint will be retained.\n${preview}${files.length > 20 ? '\n  …' : ''}${options.conversationToo ? '\nThe conversation will also be rewound.' : ''}`,
 			);
 			if (this.getWorkspaceRoot() !== root) { throw new Error('Workspace changed while confirming restore.'); }
 			return confirmed;
-		});
-		if (!recovery) {
-			return;
-		}
-		await this.mutateIndex(index => this.pruneIndex([...index, {
-			id: randomUUID(), conversationId: checkpoint.conversationId,
-			turnIndex: this.conversationStore.load(checkpoint.conversationId)?.messages.length ?? checkpoint.turnIndex,
-			capturedAt: Date.now(), userMessage: 'Recovery point before checkpoint restore',
-			kind: 'git', gitSha: recovery.commit, baseRef: recovery.head,
-			snapshot: recovery, summary: 'Recovery point before restore',
-		}]), recovery.workspaceRoot);
-		this._onDidChange.fire();
-		this.host.notifier.info('Workspace restored. The previous state is available as a recovery checkpoint.');
-
-		if (options.conversationToo) {
-			this.rewindConversation(checkpoint);
-		}
+		}, retainRecovery));
 	}
 
 	/**
@@ -199,7 +214,71 @@ export class CheckpointManager implements Disposable {
 	 * conversation is deleted so we don't keep dangling index entries.
 	 */
 	async deleteFor(conversationId: string): Promise<void> {
-		await this.mutateIndex(index => index.filter(cp => cp.conversationId !== conversationId));
+		await this.enqueue(async () => {
+			await CheckpointIndexStorage.markDeleted(this.fileStorageRoot(), conversationId, message => this.host.notifier.warn(message));
+			await this.updateAllIndexes((index, pinned) => {
+				if (index.some(cp => pinned.has(cp.id) && (cp.conversationId === conversationId || cp.branchConversationIds?.includes(conversationId)))) { throw new Error('This conversation has a checkpoint restore in progress. Retry deletion after it finishes.'); }
+				return index.map(cp => ({ ...cp,
+					ownerDeleted: cp.ownerDeleted || cp.conversationId === conversationId,
+					branchConversationIds: cp.branchConversationIds?.filter(id => id !== conversationId),
+				})).filter(cp => !cp.ownerDeleted || !!cp.branchConversationIds?.length);
+			}, conversationId);
+		});
+		this._onDidChange.fire();
+	}
+
+	/** Undo a provisional branch link without permanently deleting the recoverable conversation. */
+	async detachBranch(branchId: string): Promise<void> {
+		await this.enqueue(() => this.updateAllIndexes((index, pinned) => {
+			if (index.some(cp => pinned.has(cp.id) && cp.branchConversationIds?.includes(branchId))) { throw new Error('This branch has a checkpoint restore in progress. Retry after it finishes.'); }
+			return index.map(cp => ({ ...cp, branchConversationIds: cp.branchConversationIds?.filter(id => id !== branchId) }));
+		}));
+		this._onDidChange.fire();
+	}
+
+	private async updateAllIndexes(update: (index: Checkpoint[], pinned: ReadonlySet<string>) => Checkpoint[], deletedConversationId?: string): Promise<void> {
+		const discovered = await CheckpointIndexStorage.discover(this.fileStorageRoot());
+		const roots = new Set([...discovered.roots, ...this.indexes.keys()]); const errors = discovered.errors;
+		// The current key is available even to hosts without legacy-key enumeration.
+		const current = this.getWorkspaceRoot();
+		if (current) { try { roots.add(fs.realpathSync.native(current)); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { errors.push(error); } } }
+		else { roots.add('no-workspace'); }
+		let keys: readonly string[] = [];
+		try { keys = this.globalState.keys?.() ?? []; } catch (error) { errors.push(error); }
+		const knownKeys = new Set([...roots].map(root => this.keyForIdentity(root)));
+		for (const key of keys) {
+			if (!key.startsWith(`${CHECKPOINT_INDEX_KEY}.`) || knownKeys.has(key)) { continue; }
+			try {
+				if (key === `${CHECKPOINT_INDEX_KEY}.no-workspace`) { roots.add('no-workspace'); continue; }
+				if (!/^[a-f0-9]{64}$/.test(key.slice(CHECKPOINT_INDEX_KEY.length + 1))) { continue; }
+				const entries = this.globalState.get<Checkpoint[]>(key) ?? [];
+				if (!Array.isArray(entries)) { throw new Error('Invalid legacy checkpoint index.'); }
+				for (const checkpoint of entries) {
+					const root = checkpoint?.fileSnapshot?.workspaceRoot ?? checkpoint?.snapshot?.workspaceRoot;
+					// Old SHA-only metadata has no releasable payload or reversible workspace identity.
+					if (root === undefined) { continue; }
+					if (typeof root !== 'string' || !path.isAbsolute(root) || path.normalize(root) !== root || this.keyForIdentity(root) !== key) { throw new Error('Invalid legacy checkpoint workspace identity.'); }
+					roots.add(root);
+				}
+			} catch (error) { errors.push(error); }
+			await new Promise<void>(resolve => setImmediate(resolve));
+		}
+
+		for (const root of roots) {
+			try { const storage = this.indexForIdentity(root); await storage.mutate(update, undefined, deletedConversationId); await this.cleanupIndex(storage); }
+			catch (error) { errors.push(error); }
+		}
+		if (errors.length === 1) { throw errors[0]; }
+		if (errors.length) { throw new AggregateError(errors, 'Checkpoint cleanup is incomplete in one or more workspaces. Retry after their stored indexes are available.'); }
+	}
+
+	/** Explicit links keep a branch's checkpoint alive even if its parent is deleted. */
+	async attachToBranch(checkpointId: string, branchId: string): Promise<void> {
+		if (!this.conversationStore.load(branchId) || !this.get(checkpointId)) { throw new Error('Branch or checkpoint is unavailable.'); }
+		await this.mutateIndex(index => {
+			if (!index.some(cp => cp.id === checkpointId)) { throw new Error('Checkpoint is no longer available.'); }
+			return index.map(cp => cp.id === checkpointId ? { ...cp, branchConversationIds: [...new Set([...(cp.branchConversationIds ?? []), branchId])] } : cp);
+		});
 		this._onDidChange.fire();
 	}
 
@@ -258,9 +337,12 @@ export class CheckpointManager implements Disposable {
 		userMessage: string,
 	): Promise<Checkpoint | undefined> {
 		if (!this.isGitRepo(workspaceRoot)) {
-			// File-backed fallback would land here. For now we silently skip
-			// — capturing a checkpoint must never block the chat send loop.
-			return undefined;
+			try {
+				const fileSnapshot = await new FileSnapshotStore(workspaceRoot, this.fileStorageRoot()).capture();
+				return { id: randomUUID(), conversationId, turnIndex, capturedAt: Date.now(), userMessage: userMessage.slice(0, 200), kind: 'fs', fileSnapshot, summary: 'Files up to 50 MiB / 10,000 entries; VCS internals, node_modules, .venv and __pycache__ excluded; symlinks unsupported' };
+			} catch (error) {
+				this.host.notifier.warn(`Checkpoint was not captured: ${error instanceof Error ? error.message : String(error)}`); return undefined;
+			}
 		}
 
 		try {
@@ -277,65 +359,129 @@ export class CheckpointManager implements Disposable {
 		}
 	}
 
+	private fileStorageRoot(): string { return this.host.storageRoot ?? path.join(os.homedir(), '.son-of-anton', 'file-checkpoints'); }
+
+	private async restoreFiles(checkpoint: Checkpoint, root: string, options: RestoreOptions): Promise<void> {
+		await this.restoreWithRecovery(checkpoint, root, options, retainRecovery => new FileSnapshotStore(root, this.fileStorageRoot(), message => this.host.notifier.warn(message)).restore(checkpoint.fileSnapshot!, async files => {
+			const preview = files.slice(0, 20).map(file => `  ${file}`).join('\n');
+			const confirmed = await this.host.confirmRestore(`Restore ${files.length} changed paths? A recovery checkpoint will retain the current files. Dependencies and VCS internals are excluded.\n${preview}${files.length > 20 ? '\n  …' : ''}${options.conversationToo ? '\nThe conversation will also be rewound.' : ''}`);
+			if (this.getWorkspaceRoot() !== root) { throw new Error('Workspace changed while confirming restore.'); }
+			return confirmed;
+		}, retainRecovery));
+	}
+
+	private async restoreWithRecovery(
+		checkpoint: Checkpoint, root: string, options: RestoreOptions,
+		restore: (retain: (snapshot: FileSnapshot | GitSnapshot, markRetained: () => void) => Promise<void>) => Promise<FileSnapshot | GitSnapshot | undefined>,
+	): Promise<void> {
+		let recoveryCheckpoint: Checkpoint | undefined; let recoveryIndexed = false;
+		const protectedIds = new Set([checkpoint.id]);
+		const pin = await this.indexStore(root).pin(checkpoint.id, current => {
+			if (!options.conversationId || !((!current.ownerDeleted && current.conversationId === options.conversationId) || current.branchConversationIds?.includes(options.conversationId))) { throw new Error('Checkpoint is no longer associated with this conversation.'); }
+			if (JSON.stringify(current.snapshot ?? current.fileSnapshot) !== JSON.stringify(checkpoint.snapshot ?? checkpoint.fileSnapshot)) { throw new Error('Checkpoint changed before restore. Please open its preview again.'); }
+		});
+		this.activeRestores.add(protectedIds);
+		try {
+			const recovery = await restore(async (snapshot, markRetained) => {
+				const strategy = 'commit' in snapshot ? { kind: 'git' as const, snapshot, gitSha: snapshot.commit, baseRef: snapshot.head } : { kind: 'fs' as const, fileSnapshot: snapshot };
+				recoveryCheckpoint = {
+					id: randomUUID(), conversationId: options.conversationId ?? checkpoint.conversationId, turnIndex: this.conversationStore.load(options.conversationId ?? checkpoint.conversationId)?.messages.length ?? checkpoint.turnIndex,
+					capturedAt: Date.now(), userMessage: 'Recovery point before checkpoint restore', summary: 'Recovery point before restore', ...strategy,
+				};
+				protectedIds.add(recoveryCheckpoint.id); await pin.add(recoveryCheckpoint.id);
+				try {
+					await this.mutateIndex((index, pinned) => this.pruneIndex([...index, recoveryCheckpoint!], pinned), root, () => { recoveryIndexed = true; markRetained(); });
+				} catch (error) {
+					if (!recoveryIndexed) { if (error instanceof CheckpointIndexCommitUncertainError) { markRetained(); } throw new Error('Restore cancelled because its recovery checkpoint could not be saved. The workspace files were not changed; try again after history storage is available.', { cause: error }); }
+					this.warnRestoreCleanup(error);
+				}
+				// A subscriber failure cannot make a snapshot store discard indexed recovery.
+				try { this._onDidChange.fire(); } catch { /* The durable index remains authoritative. */ }
+				if (this.getWorkspaceRoot() !== root) { throw new Error('Workspace changed while saving restore recovery.'); }
+			});
+			if (!recovery) { return; }
+			protectedIds.delete(checkpoint.id);
+			try { await pin.remove(checkpoint.id); } catch (error) { this.warnRestoreCleanup(error); }
+			// Retain recovery through final pruning even if a newer capture arrived
+			// during restore. This may exceed the count by one until a later capture.
+			try { await this.mutateIndex((index, pinned) => this.pruneIndex(index, pinned), root); }
+			catch (error) { this.warnRestoreCleanup(error); }
+			if (options.conversationToo) { this.rewindConversation(checkpoint, options.conversationId); }
+			try { this._onDidChange.fire(); } catch { /* Display listeners cannot undo a completed restore. */ }
+			try { this.host.notifier.info('Workspace restored. The previous state is available as a recovery checkpoint.'); } catch { /* The durable recovery remains available. */ }
+		} finally { this.activeRestores.delete(protectedIds); try { await pin.release(); } catch (error) { this.warnRestoreCleanup(error); } }
+	}
+
+	private warnRestoreCleanup(error: unknown): void {
+		try { this.host.notifier.warn(`The restore recovery checkpoint is saved, but checkpoint cleanup failed: ${String(error)}`); }
+		catch { /* Reporting must not change whether a recovery snapshot is retained. */ }
+	}
+
 	/**
 	 * Truncate the conversation back to the state immediately before the
 	 * captured turn. The checkpoint records `turnIndex` as the message count
 	 * at capture time, so slicing to `turnIndex` drops the user message that
 	 * triggered the turn AND every assistant/tool message that followed.
 	 */
-	private rewindConversation(checkpoint: Checkpoint): void {
-		const record = this.conversationStore.load(checkpoint.conversationId);
+	private rewindConversation(checkpoint: Checkpoint, conversationId = checkpoint.conversationId): void {
+		if (conversationId !== checkpoint.conversationId && !checkpoint.branchConversationIds?.includes(conversationId)) { throw new Error('Checkpoint is not associated with this conversation.'); }
+		const record = this.conversationStore.load(conversationId);
 		if (!record) {
 			return;
 		}
 		const trimmed = record.messages.slice(0, checkpoint.turnIndex);
 		this.conversationStore.update(
-			checkpoint.conversationId,
+			conversationId,
 			trimmed,
 			record.summary.lastSpecialist,
+			undefined, undefined, undefined, record.writeToken,
 		);
 	}
 
-	private storageKey(root = this.getWorkspaceRoot()): string {
-		if (!root) {
-			return `${CHECKPOINT_INDEX_KEY}.no-workspace`;
+	private keyForIdentity(workspaceRoot: string): string {
+		return `${CHECKPOINT_INDEX_KEY}.${workspaceRoot === 'no-workspace' ? 'no-workspace' : createHash('sha256').update(workspaceRoot).digest('hex')}`;
+	}
+
+	private indexStore(root = this.getWorkspaceRoot()): CheckpointIndexStorage {
+		return this.indexForIdentity(root ? fs.realpathSync.native(root) : 'no-workspace');
+	}
+
+	/** Stored identities are canonical already; cleanup never needs to reopen their workspace. */
+	private indexForIdentity(workspaceRoot: string): CheckpointIndexStorage {
+		let storage = this.indexes.get(workspaceRoot);
+		if (!storage) {
+			const key = this.keyForIdentity(workspaceRoot);
+			storage = new CheckpointIndexStorage(this.fileStorageRoot(), workspaceRoot,
+				() => this.globalState.get<Checkpoint[]>(key) ?? [], message => this.host.notifier.warn(message));
+			this.indexes.set(workspaceRoot, storage);
 		}
-		const canonical = fs.realpathSync(root);
-		return `${CHECKPOINT_INDEX_KEY}.${createHash('sha256').update(canonical).digest('hex')}`;
+		return storage;
 	}
 
-	private readIndex(): Checkpoint[] {
-		const raw = this.globalState.get<Checkpoint[]>(this.storageKey());
-		return Array.isArray(raw) ? [...raw] : [];
-	}
+	private readIndex(): Checkpoint[] { return this.indexStore().read(); }
 
-	private mutateIndex(update: (index: Checkpoint[]) => Checkpoint[], root = this.getWorkspaceRoot()): Promise<void> {
-		const key = this.storageKey(root);
-		const operation = this.pendingWrite.then(async () => {
-			const previous = this.globalState.get<Checkpoint[]>(key) ?? [];
-			const next = update([...previous]);
-			await this.globalState.update(key, next);
-			for (const removed of previous.filter(item => !next.some(retained => retained.id === item.id))) {
-				if (removed.snapshot) {
-					await new GitSnapshotStore(removed.snapshot.workspaceRoot).release(removed.snapshot).catch(error => {
-						this.host.notifier.warn(`Could not release an expired checkpoint: ${String(error)}`);
-					});
-				}
-			}
-		});
+	private enqueue(action: () => Promise<void>): Promise<void> {
+		const operation = this.pendingWrite.then(action);
 		this.pendingWrite = operation.catch(() => { /* Allow the next persistence attempt after a failure. */ });
 		return operation;
 	}
 
-	private pruneIndex(index: Checkpoint[]): Checkpoint[] {
-		const max = this.getMaxCount();
-		if (index.length <= max) {
-			return index;
-		}
-		const sorted = [...index].sort((a, b) => a.capturedAt - b.capturedAt);
-		// Drop the oldest entries first so recent checkpoints (the ones the
-		// user is most likely to roll back to) are preserved.
-		return sorted.slice(sorted.length - max);
+	private mutateIndex(update: (index: Checkpoint[], pinned: ReadonlySet<string>) => Checkpoint[], root = this.getWorkspaceRoot(), onPersisted?: () => void): Promise<void> {
+		const storage = this.indexStore(root);
+		return this.enqueue(async () => { await storage.mutate(update, onPersisted); await this.cleanupIndex(storage); });
+	}
+
+	private async cleanupIndex(storage: CheckpointIndexStorage): Promise<void> {
+		await storage.cleanup(async removed => {
+			if (removed.fileSnapshot) { await new FileSnapshotStore(removed.fileSnapshot.workspaceRoot, removed.fileSnapshot.storageRoot).release(removed.fileSnapshot); }
+			if (removed.snapshot) { await new GitSnapshotStore(removed.snapshot.workspaceRoot).release(removed.snapshot); }
+		});
+	}
+
+	private pruneIndex(index: Checkpoint[], pinned: ReadonlySet<string> = new Set()): Checkpoint[] {
+		const restoring = new Set([...pinned, ...[...this.activeRestores].flatMap(ids => [...ids])]);
+		const retained = index.filter(checkpoint => checkpoint.branchConversationIds?.length || restoring.has(checkpoint.id));
+		return [...retained, ...index.filter(checkpoint => !checkpoint.branchConversationIds?.length && !restoring.has(checkpoint.id)).reverse().sort((a, b) => b.capturedAt - a.capturedAt).slice(0, this.getMaxCount())];
 	}
 
 }

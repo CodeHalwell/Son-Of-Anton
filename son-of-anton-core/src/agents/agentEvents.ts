@@ -8,6 +8,8 @@
  * proposes a plan.
  */
 export interface AgentPlanSubtask {
+	/** Actual execution identity; absent only on older stored plan messages. */
+	readonly id?: string;
 	readonly instruction: string;
 	readonly assignee: string;
 	readonly scopeFiles: readonly string[];
@@ -15,6 +17,7 @@ export interface AgentPlanSubtask {
 }
 
 export interface AgentPlan {
+	readonly id?: string;
 	readonly subtasks: readonly AgentPlanSubtask[];
 }
 

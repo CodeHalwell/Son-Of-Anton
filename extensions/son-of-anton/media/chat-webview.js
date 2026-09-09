@@ -109,7 +109,7 @@
 		const historyNewBtn = document.getElementById('historyNewBtn');
 		const rosterPaneGrid = document.getElementById('rosterPaneGrid');
 
-		const MODEL_LABELS = {
+		const MODEL_LABELS = new Map(Object.entries({
 			// Anthropic — short aliases (kept for legacy sessions/CLI defaults).
 			opus: 'Opus',
 			sonnet: 'Sonnet',
@@ -248,7 +248,7 @@
 			'codex-gpt-5': 'GPT-5 via Codex CLI',
 			'codex-gpt-5-mini': 'GPT-5 mini via Codex CLI',
 			'codex-gpt-5-codex': 'GPT-5 Codex via Codex CLI',
-		};
+		}));
 		const ATTACH_LABELS = { 'current-file': 'Current file', 'current-selection': 'Selection', 'terminal-output': 'Terminal output' };
 
 		// Generative-UI renderer registry. Keyed by component name; each value
@@ -380,12 +380,13 @@
 		// of any tool-call cards inside the message body so finalising the
 		// markdown render doesn't replace the cards' DOM nodes.
 		let currentAssistantTextSpan = null;
-		// Running index that lines up 1:1 with positions in the host's
-		// persisted conversation array. Incremented on every wrapper appended
-		// to the message list (user, assistant, system) so checkpoint stripes
-		// can find the user bubble by `data-conversation-index === turnIndex`.
-		// Reset on `loadConversation` / `conversationCleared`.
+		// Visual slots include provisional/local messages. Only host acknowledgments
+		// provide persisted indexes for transcript actions and checkpoints.
 		let nextConversationIndex = 0;
+		let activeRequestId = null;
+		let activeTurnId = null;
+		let activeHostTurnPending = false;
+		const requestSlots = new Map();
 		let renderingHistory = false;
 		let conversationHasUnmeteredUsage = false;
 		let earlierHistory = [];
@@ -497,8 +498,56 @@
 		const refreshContext = document.getElementById('refreshContext');
 		const promptRestoreNotice = document.getElementById('promptRestoreNotice');
 		let previousPromptDraft = null;
+		let excludedContext = [];
+		let contextSnapshotId;
+		let contextPreviewRequestId;
+		let contextPreviewFingerprint;
+		let contextPreviewTimer;
+		const contextMigrationNotice = document.createElement('p');
+		contextMigrationNotice.id = 'contextMigrationNotice';
+		contextMigrationNotice.hidden = true;
+		contextMigrationNotice.textContent = uiText('contextExclusionsMigrated');
+		contextDetails.before(contextMigrationNotice);
+		function currentContextMentions() {
+			return SotaWorkflows.contextMentions({ mentionsKinded: mentions.map(({ kind, path, url }) => ({ kind: kind || 'file', path, url })), text: messageInput.value });
+		}
+		function composerContextFingerprint() {
+			return JSON.stringify([activeConversationId, includeContext.checked, attachments, currentContextMentions().map(SotaWorkflows.mentionSourceId), excludedContext]);
+		}
+		function restoreContextExclusions(draft) {
+			const restored = SotaWorkflows.migrateMentionExclusions(draft?.excludedContext || [], currentContextMentions());
+			excludedContext = restored.excludedContext;
+			contextMigrationNotice.hidden = !restored.migrated;
+		}
+		function contextSourcesChanged() {
+			if (contextPreviewFingerprint === composerContextFingerprint()) return;
+			contextSnapshotId = undefined;
+			contextPreviewRequestId = undefined;
+			clearTimeout(contextPreviewTimer);
+			contextPreviewTimer = setTimeout(updateContextPreview, 0);
+		}
 		function captureComposerDraft() {
-			return { text: messageInput.value, attachments: [...attachments], mentions: mentions.map(mention => ({ ...mention })), images: [...imageAttachments], model: currentModel, agent: currentAgent, mode: currentMode, includeContext: includeContext.checked };
+			return { text: messageInput.value, attachments: [...attachments], mentions: mentions.map(mention => ({ ...mention })), images: [...imageAttachments], model: currentModel, agent: currentAgent, mode: currentMode, includeContext: includeContext.checked, excludedContext: [...excludedContext] };
+		}
+		let pendingQueueDraft;
+		let providerCatalogSnapshot;
+		let latestConnectionStatus;
+		function composerMessage() {
+			return { type: 'sendMessage', conversationId: activeConversationId, text: messageInput.value.trim(), model: currentModel,
+				attachments: [...attachments], mentionsKinded: currentContextMentions(),
+				images: imageAttachments.map(({ mime, base64, name }) => ({ mime, base64, name })), specialistId: currentAgent, chatMode: currentMode, includeWorkspaceContext: includeContext.checked, excludedContext: [...excludedContext], contextSnapshotId };
+		}
+		function draftFromWire(draft) {
+			return { text: draft.text, attachments: draft.attachments || [], mentions: SotaWorkflows.contextMentions(draft).map(mention => ({ ...mention, label: mention.path || mention.url || '@' + mention.kind })), images: (draft.images || []).map((image, index) => ({ ...image, id: 'queued-' + index })), model: draft.model, agent: draft.specialistId, mode: draft.chatMode, includeContext: draft.includeWorkspaceContext, excludedContext: draft.excludedContext || [] };
+		}
+		for (const [id, type] of [['queueMessageBtn', 'queueMessage'], ['redirectMessageBtn', 'redirectMessage']]) {
+			document.getElementById(id).addEventListener('click', () => {
+				if (isCurrentModelUnavailable()) { modelChip.focus(); return; }
+				const queuedText = extractInlineUrlMentions(messageInput.value);
+				const id = crypto.randomUUID();
+				pendingQueueDraft = { id, draft: captureComposerDraft() };
+				vscode.postMessage({ ...composerMessage(), text: queuedText.trim(), type, id });
+			});
 		}
 		function clearPromptRestore() { previousPromptDraft = null; promptRestoreNotice.hidden = true; }
 		function applyPromptDraft(draft) {
@@ -507,7 +556,9 @@
 			mentions = (draft.mentions || []).map(mention => ({ ...mention }));
 			imageAttachments = [...(draft.images || [])];
 			includeContext.checked = draft.includeContext !== false;
-			if (Object.hasOwn(MODEL_METADATA_RAW, draft.model)) currentModel = draft.model;
+			restoreContextExclusions(draft);
+			contextSnapshotId = undefined;
+			if (isSavedModel(draft.model)) currentModel = draft.model;
 			if (SPECIALISTS.some(specialist => specialist.id === draft.agent)) currentAgent = draft.agent;
 			if (draft.mode === 'plan' || draft.mode === 'act') currentMode = draft.mode;
 			updateModelLabel(); updateModelMenuChecks(); updateAgentLabel(); updateAgentMenuChecks(); updateHeaderSubtitle(); updateModeUi();
@@ -516,8 +567,8 @@
 			renderContextChips(); updateContextPreview();
 			messageInput.style.height = 'auto';
 			messageInput.style.height = Math.min(Math.max(messageInput.scrollHeight, 64), 240) + 'px';
-			vscode.postMessage({ type: 'selectModel', conversationId: activeConversationId, model: currentModel });
-			vscode.postMessage({ type: 'selectSpecialist', conversationId: activeConversationId, specialistId: currentAgent });
+			vscode.postMessage({ type: 'selectModel', conversationId: activeConversationId, model: currentModel, specialistId: currentAgent });
+			vscode.postMessage({ type: 'selectSpecialist', conversationId: activeConversationId, specialistId: currentAgent, model: currentModel });
 			vscode.postMessage({ type: 'modeChange', conversationId: activeConversationId, chatMode: currentMode });
 			selectTab('chat'); messageInput.focus();
 		}
@@ -542,7 +593,7 @@
 				attachments: Array.isArray(request?.attachments) ? request.attachments.filter(id => Object.hasOwn(ATTACH_LABELS, id)) : [],
 				mentions: restoredMentions,
 				images: parts.filter(part => part.type === 'image').map((part, index) => ({ id: 'reused-' + index, mime: part.mimeType, base64: part.base64Data, name: part.name })),
-				model: msg.model, agent: msg.specialistId || 'anton', mode: request?.chatMode || 'act', includeContext: request?.includeWorkspaceContext !== false,
+				model: msg.model, agent: msg.specialistId || 'anton', mode: request?.chatMode || 'act', includeContext: request?.includeWorkspaceContext !== false, excludedContext: request?.excludedContext || [],
 			};
 		}
 		function persistDraft() {
@@ -559,7 +610,7 @@
 		function activateDraft(id, savedModel) {
 			if (typeof id !== 'string' || !id) return;
 			if (id === activeConversationId) {
-				if (typeof savedModel === 'string' && Object.hasOwn(MODEL_METADATA_RAW, savedModel)) currentModel = savedModel;
+				if (isSavedModel(savedModel)) currentModel = savedModel;
 				updateModelLabel();
 				updateModelMenuChecks();
 				return;
@@ -567,13 +618,15 @@
 			persistDraft();
 			clearPromptRestore();
 			activeConversationId = id;
+			excludedContext = []; contextSnapshotId = undefined;
 			const draft = drafts.get(id);
 			messageInput.value = draft?.text || '';
 			attachments = Array.isArray(draft?.attachments) ? [...draft.attachments] : [];
 			mentions = Array.isArray(draft?.mentions) ? [...draft.mentions] : [];
+			restoreContextExclusions(draft);
 			imageAttachments = Array.isArray(draft?.images) ? [...draft.images] : [];
 			includeContext.checked = draft?.includeContext !== false;
-			currentModel = [savedModel, draft?.model, document.body.dataset.defaultModel, 'sonnet'].find(model => typeof model === 'string' && Object.hasOwn(MODEL_METADATA_RAW, model));
+			currentModel = [savedModel, draft?.model, document.body.dataset.defaultModel, 'sonnet'].find(isSavedModel);
 			historyIndex = -1;
 			historyDraft = '';
 			messageInput.style.height = 'auto';
@@ -585,15 +638,19 @@
 			updateContextPreview();
 		}
 		function updateContextPreview() {
+			clearTimeout(contextPreviewTimer);
+			contextPreviewFingerprint = composerContextFingerprint();
 			contextSummary.textContent = uiText(includeContext.checked ? 'on' : 'off');
-			refreshContext.disabled = !includeContext.checked;
+			refreshContext.disabled = false;
 			contextPreview.textContent = uiText(includeContext.checked ? 'contextLoading' : 'contextOff');
-			if (contextDetails.open && includeContext.checked) vscode.postMessage({ type: 'previewWorkspaceContext' });
+			contextSnapshotId = undefined;
+			contextPreviewRequestId = crypto.randomUUID();
+			if (contextDetails.open) vscode.postMessage({ ...composerMessage(), type: 'previewWorkspaceContext', id: contextPreviewRequestId });
 		}
 		contextDetails.addEventListener('toggle', updateContextPreview);
 		includeContext.addEventListener('change', () => { persistDraft(); updateContextPreview(); });
 		refreshContext.addEventListener('click', updateContextPreview);
-		window.addEventListener('pagehide', persistDraft);
+		window.addEventListener('pagehide', () => { persistDraft(); clearTimeout(contextPreviewTimer); contextPreviewRequestId = undefined; });
 
 
 		function persistCommandHistory() {
@@ -906,21 +963,36 @@
 		}
 
 		const historySearch = document.getElementById('historySearch');
+		const historyView = document.getElementById('historyView');
+		let historySearchTimer;
+		function requestHistory(offset = 0) {
+			clearTimeout(historySearchTimer);
+			historySearchTimer = undefined;
+			if (offset && (lastHistorySnapshot?.query !== historySearch.value.trim() || lastHistorySnapshot?.historyScope !== historyView.value || lastHistorySnapshot?.workspaceOnly !== (historyScope === 'workspace'))) offset = 0;
+			vscode.postMessage({ type: 'searchHistory', query: historySearch.value.trim(), historyScope: historyView.value, workspaceOnly: historyScope === 'workspace', offset });
+		}
+		window.addEventListener('pagehide', () => clearTimeout(historySearchTimer));
+		historyView.addEventListener('change', () => updateHistoryFilters());
+		document.querySelectorAll('[data-workflow-command]').forEach(button => button.addEventListener('click', () => vscode.postMessage({ type: 'workflowCommand', command: button.dataset.workflowCommand })));
 		const historyShowMore = document.getElementById('historyShowMore');
 		let historyLimit = 50;
 		const historySaved = vscode.getState()?.historyFilters;
 		let historyScope = historySaved?.scope === 'workspace' ? 'workspace' : 'all';
-		historySearch.value = typeof historySaved?.query === 'string' ? historySaved.query : '';
+		historySearch.value = typeof historySaved?.query === 'string' ? historySaved.query.slice(0, 1000) : '';
 		const historyClearFilters = document.getElementById('historyClearFilters');
-		function updateHistoryFilters() {
+		function updateHistoryFilters(debounce = false) {
 			historyLimit = 50;
 			vscode.setState({ ...vscode.getState(), historyFilters: { query: historySearch.value, scope: historyScope } });
+			clearTimeout(historySearchTimer);
+			if (debounce) historySearchTimer = setTimeout(() => requestHistory(), 250);
+			else requestHistory();
 			renderHistoryPane(lastHistorySnapshot);
 		}
-		historySearch.addEventListener('input', updateHistoryFilters);
+		historySearch.addEventListener('input', () => updateHistoryFilters(true));
+		historySearch.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); requestHistory(); } });
 		document.querySelectorAll('[data-history-scope]').forEach(button => button.addEventListener('click', () => { historyScope = button.dataset.historyScope; updateHistoryFilters(); }));
 		historyClearFilters.addEventListener('click', () => { historyScope = 'all'; historySearch.value = ''; updateHistoryFilters(); historySearch.focus(); });
-		historyShowMore.addEventListener('click', () => { historyLimit += 50; renderHistoryPane(lastHistorySnapshot); });
+		historyShowMore.addEventListener('click', () => { historyLimit += 50; if (lastHistorySnapshot?.nextOffset !== undefined) requestHistory(lastHistorySnapshot.nextOffset); else renderHistoryPane(lastHistorySnapshot); });
 		function historyGroup(timestamp) {
 			const date = new Date();
 			date.setHours(0, 0, 0, 0);
@@ -942,10 +1014,10 @@
 			const query = historySearch.value.trim().toLocaleLowerCase();
 			document.querySelectorAll('[data-history-scope]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.historyScope === historyScope)));
 			historyClearFilters.hidden = !query && historyScope === 'all';
-			const matches = conversations.filter(conversation => (historyScope === 'all' || conversation.inCurrentWorkspace || conversation.id === activeId) && [conversation.title, conversation.lastSpecialist, conversation.workspaceName].filter(Boolean).join(' ').toLocaleLowerCase().includes(query)).sort((a, b) => b.updatedAt - a.updatedAt);
+			const matches = conversations.filter(conversation => (historyScope === 'all' || conversation.inCurrentWorkspace || conversation.id === activeId) && [conversation.title, conversation.lastSpecialist, conversation.workspaceName, conversation.searchText].filter(Boolean).join(' ').toLocaleLowerCase().includes(query)).sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || b.updatedAt - a.updatedAt);
 			document.getElementById('historyResults').textContent = uiText(matches.length === 1 ? 'conversationResult' : 'conversationResults', matches.length.toLocaleString());
 			document.getElementById('historyNoResults').hidden = !conversations.length || matches.length > 0;
-			historyShowMore.hidden = matches.length <= historyLimit;
+			historyShowMore.hidden = matches.length <= historyLimit && snapshot?.nextOffset === undefined;
 			const focused = historyPaneList.contains(document.activeElement) ? { id: document.activeElement.dataset.conversationId, action: document.activeElement.dataset.action } : null;
 			historyPaneList.textContent = '';
 			if (conversations.length === 0) {
@@ -981,7 +1053,7 @@
 				body.setAttribute('data-conversation-id', conv.id);
 				const titleEl = document.createElement('div');
 				titleEl.className = 'history-pane-row-title';
-				titleEl.textContent = conv.title || 'Untitled';
+				titleEl.textContent = (conv.pinned ? '★ ' : '') + (conv.title || 'Untitled');
 				titleEl.title = conv.title || 'Untitled';
 				body.appendChild(titleEl);
 				const metaEl = document.createElement('div');
@@ -994,6 +1066,9 @@
 
 				const actions = document.createElement('div');
 				actions.className = 'history-pane-row-actions';
+				for (const [action, label] of (conv.deletedAt ? [['restore', uiText('restoreConversation')]] : [['pin', uiText(conv.pinned ? 'unpinConversation' : 'pinConversation')], ['archive', uiText(conv.archived ? 'unarchiveConversation' : 'archiveConversation')]])) {
+					const control = document.createElement('button'); control.type = 'button'; control.className = 'history-pane-row-action'; control.textContent = action === 'pin' ? '☆' : action === 'archive' ? '▣' : '↶'; control.title = label; control.setAttribute('aria-label', label); control.addEventListener('click', event => { event.stopPropagation(); vscode.postMessage({ type: 'historyAction', command: action, id: conv.id }); }); actions.append(control);
+				}
 				const renameBtn = document.createElement('button');
 				renameBtn.type = 'button';
 				renameBtn.className = 'history-pane-row-action';
@@ -2032,75 +2107,23 @@
 		 * reference; passed in rather than scraped from the DOM so the
 		 * exact authored content survives the markdown round-trip.
 		 */
-		function buildAssistantActions(source) {
-			const prompt = lastPromptDraft;
+		function buildAssistantActions(source, record = {}) {
+			const prompt = record.promptDraft || lastPromptDraft;
 			const conversationId = activeConversationId;
-			const bar = document.createElement('div');
-			bar.className = 'msg-actions';
-			bar.setAttribute('role', 'toolbar');
-			bar.setAttribute('aria-label', 'Message actions');
-
-			// Copy
-			const copy = document.createElement('button');
-			copy.type = 'button';
-			copy.className = 'msg-action';
-			copy.title = 'Copy message';
-			copy.setAttribute('aria-label', 'Copy message');
-			copy.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="8" height="8" rx="1.5"/><path d="M3 11V4a1 1 0 0 1 1-1h7"/></svg>';
-			copy.addEventListener('click', () => {
-				vscode.postMessage({ type: 'copyCode', text: source || '' });
-				const original = copy.title;
-				copy.title = 'Copied';
-				setTimeout(() => { copy.title = original; }, 1500);
+			const canPersist = Number.isSafeInteger(record.persistedIndex) && record.persistedIndex >= 0 && typeof record.responseId === 'string' && record.responseId.length > 0;
+			const identity = { conversationId, messageIndex: record.persistedIndex, responseId: record.responseId };
+			return SotaWorkflows.responseActions({ text: uiText, canReuse: !!prompt, canPersist, busy: isStreaming, branchBusy: activeHostTurnPending, rating: record.feedback,
+				copy: () => vscode.postMessage({ type: 'copyCode', text: source || '' }),
+				reuse: () => reusePrompt(prompt, conversationId),
+				branch: () => { if (canPersist && conversationId === activeConversationId && !isStreaming && !activeHostTurnPending) vscode.postMessage({ type: 'branchResponse', ...identity }); },
+				feedback: value => { if (canPersist && conversationId === activeConversationId) vscode.postMessage({ type: 'feedback', ...identity, value }); },
 			});
-			bar.appendChild(copy);
-
-			const reuse = document.createElement('button');
-			reuse.type = 'button';
-			reuse.className = 'msg-action msg-action-reuse';
-			reuse.title = uiText('reusePrompt');
-			reuse.setAttribute('aria-label', uiText('reusePrompt'));
-			reuse.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13 8a5 5 0 1 1-1.46-3.54"/><path d="M13 3v3h-3"/></svg>';
-			reuse.hidden = !prompt;
-			reuse.disabled = isStreaming;
-			reuse.addEventListener('click', () => reusePrompt(prompt, conversationId));
-			bar.appendChild(reuse);
-
-			// Feedback (visual only). The host-side handler is a future phase;
-			// we still emit `feedback` postMessage events for the eventual
-			// telemetry pipeline to subscribe to.
-			const up = document.createElement('button');
-			up.type = 'button';
-			up.className = 'msg-action msg-action-fb';
-			up.title = 'Helpful';
-			up.setAttribute('aria-label', 'Mark response as helpful');
-			up.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 13V7l3-4 1 1v3h3a1 1 0 0 1 1 1l-1 5H6z"/><path d="M3 7h3v6H3z"/></svg>';
-			up.addEventListener('click', () => {
-				up.classList.toggle('is-active');
-				down.classList.remove('is-active');
-				vscode.postMessage({ type: 'feedback', value: up.classList.contains('is-active') ? 'up' : null });
-			});
-			bar.appendChild(up);
-
-			const down = document.createElement('button');
-			down.type = 'button';
-			down.className = 'msg-action msg-action-fb';
-			down.title = 'Not helpful';
-			down.setAttribute('aria-label', 'Mark response as not helpful');
-			down.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3v6l-3 4-1-1V9H3a1 1 0 0 1-1-1l1-5h7z"/><path d="M13 3h-3v6h3z"/></svg>';
-			down.addEventListener('click', () => {
-				down.classList.toggle('is-active');
-				up.classList.remove('is-active');
-				vscode.postMessage({ type: 'feedback', value: down.classList.contains('is-active') ? 'down' : null });
-			});
-			bar.appendChild(down);
-
-			return bar;
 		}
 
 		/** Keep request actions unavailable while their agent is still running. */
 		function refreshPromptReuseAffordance() {
 			messageList.querySelectorAll('.msg-action-reuse').forEach(button => { button.disabled = isStreaming; });
+			messageList.querySelectorAll('.msg-action-branch').forEach(button => { button.disabled = isStreaming || activeHostTurnPending; });
 		}
 
 		/**
@@ -2182,7 +2205,7 @@
 			stripe.className = 'checkpoint-stripe';
 			stripe.dataset.checkpointId = entry.checkpointId;
 			if (typeof entry.turnIndex === 'number') {
-				stripe.dataset.conversationIndex = String(entry.turnIndex);
+				stripe.dataset.conversationIndex = userWrapper.dataset.conversationIndex;
 			}
 
 			const line = document.createElement('div');
@@ -2346,29 +2369,188 @@
 			}
 		});
 
+		const historyWindow = new SotaWorkflows.TimelineWindow(300, 100, 200);
+		let historyNewerControls = null;
+		let historyRangeLabel = null;
+		let timelineFrame = null;
+		let updatingTimeline = false;
 		function resetEarlierHistory() {
-			earlierHistory = []; historyButton?.remove(); historyButton = null;
+			historyWindow.reset(); earlierHistory = []; requestSlots.clear(); activeRequestId = null; activeTurnId = null; activeHostTurnPending = false;
+			historyButton?.remove(); historyButton = null;
+			historyNewerControls?.remove(); historyNewerControls = null;
+			historyRangeLabel?.remove(); historyRangeLabel = null;
+			if (timelineFrame !== null) { cancelAnimationFrame(timelineFrame); timelineFrame = null; }
 		}
-		function historyOptions(msg) { return { timestamp: msg.timestamp, specialistId: msg.specialistId || historySpecialist, usageUnavailable: msg.usageUnavailable === true, promptDraft: msg.role === 'user' ? promptDraftFromHistory(msg) : undefined }; }
+		function historyOptions(msg) { return { persistedIndex: msg.persistedIndex, responseId: msg.responseId, requestId: msg.requestId, turnId: msg.turnId, timestamp: msg.timestamp, feedback: msg.feedback, specialistId: msg.specialistId || historySpecialist, usageUnavailable: msg.usageUnavailable === true, promptDraft: msg.promptDraft || (msg.role === 'user' ? promptDraftFromHistory(msg) : undefined) }; }
+		function recordTimelineMessage(index, role, content, opts) {
+			if (renderingHistory) return;
+			historyWindow.set(index, { ...historyWindow.get(index), role, content, ...(opts || {}) });
+			if (opts?.requestId) {
+				const slots = requestSlots.get(opts.requestId) || {}; slots[role] = index; requestSlots.set(opts.requestId, slots);
+			}
+			scheduleTimelineWindow();
+		}
+		function stampPersistedIdentity(wrapper, record) {
+			if (!wrapper) return;
+			if (Number.isSafeInteger(record.persistedIndex) && record.persistedIndex >= 0) wrapper.dataset.persistedIndex = String(record.persistedIndex);
+			if (record.responseId) wrapper.dataset.responseId = record.responseId;
+			if (record.requestId) wrapper.dataset.requestId = record.requestId;
+			if (record.turnId) wrapper.dataset.turnId = record.turnId;
+		}
+		function acceptTurn(message) {
+			if (message.conversationId !== activeConversationId || typeof message.requestId !== 'string' || typeof message.turnId !== 'string') return;
+			const slots = requestSlots.get(message.requestId);
+			if (!slots || slots.turnId || message.requestId !== activeRequestId) return;
+			slots.turnId = message.turnId; activeTurnId = message.turnId; activeHostTurnPending = true;
+			refreshPromptReuseAffordance();
+			for (const role of ['user', 'assistant']) {
+				const record = historyWindow.get(slots[role]);
+				if (record) { record.turnId = message.turnId; stampPersistedIdentity(messageList.querySelector('.msg[data-conversation-index="' + slots[role] + '"]'), record); }
+			}
+		}
+		function renderSubmittedTurn(draft, requestId) {
+			if (currentAssistantDiv) { finalizeStreamingText(); clearStreamingIndicator(); attachAssistantActions(); currentAssistantDiv = null; currentAssistantTextSpan = null; }
+			setStreamingState(false);
+			const existingDraft = captureComposerDraft(); applyPromptDraft(draftFromWire(draft)); sendMessage(true, requestId); applyPromptDraft(existingDraft);
+		}
+		function resumeTurn(message) {
+			if (message.conversationId !== activeConversationId || activeRequestId || typeof message.requestId !== 'string' || typeof message.turnId !== 'string') return;
+			const user = historyWindow.get(message.userMessageIndex);
+			if (Number.isSafeInteger(message.userMessageIndex) && user?.role === 'user' && user.persistedIndex === message.userMessageIndex) {
+				activeRequestId = message.requestId;
+				user.requestId = message.requestId;
+				const slots = { user: message.userMessageIndex }; requestSlots.set(message.requestId, slots);
+				lastPromptDraft = historyOptions(user).promptDraft;
+				const assistant = historyWindow.get(message.assistantMessageIndex);
+				if (Number.isSafeInteger(message.assistantMessageIndex) && assistant?.role === 'assistant' && assistant.persistedIndex === message.assistantMessageIndex) {
+					slots.assistant = message.assistantMessageIndex; assistant.requestId = message.requestId;
+					acceptTurn(message); return;
+				}
+				setStreamingState(true); startStreamingMessage(getCurrentAgentDisplayName(), currentAgent);
+			} else renderSubmittedTurn(message.draft || {}, message.requestId);
+			acceptTurn(message);
+			if (message.partialText) appendStreamingText(message.partialText);
+		}
+		function acknowledgeTimelineMessage(message) {
+			if (message.conversationId !== activeConversationId || !Number.isSafeInteger(message.messageIndex) || message.messageIndex < 0 || !['user', 'assistant'].includes(message.role)) return;
+			const slots = requestSlots.get(message.requestId);
+			if (!slots || slots.turnId !== message.turnId) return;
+			const index = slots[message.role]; const record = historyWindow.get(index);
+			if (!record || record.role !== message.role || (message.role === 'assistant' && (typeof message.responseId !== 'string' || !message.responseId))) return;
+			record.persistedIndex = message.messageIndex; record.responseId = message.responseId;
+			const wrapper = messageList.querySelector('.msg[data-conversation-index="' + index + '"]');
+			stampPersistedIdentity(wrapper, record);
+			if (record.role === 'assistant') {
+				const actions = wrapper?.querySelector('.msg-actions');
+				if (actions) actions.replaceWith(buildAssistantActions(record.content, record));
+			} else for (const checkpoint of checkpointsByTurnIndex.get(record.persistedIndex) || []) insertCheckpointStripe(wrapper, checkpoint);
+		}
+		function scheduleTimelineWindow() {
+			if (updatingTimeline || timelineFrame !== null) return;
+			timelineFrame = requestAnimationFrame(() => {
+				timelineFrame = null;
+				historyWindow.observe(nextConversationIndex - 1);
+				if (followingLatest) historyWindow.latest();
+				renderTimelineWindow();
+			});
+		}
 		function loadEarlierHistory() {
-			if (!earlierHistory.length) return;
-			const before = new Set(messageList.children);
-			const anchor = messageList.querySelector('.msg');
-			const anchorTop = anchor?.getBoundingClientRect().top;
+			followingLatest = false; historyWindow.older(); renderTimelineWindow('older');
+		}
+		function loadNewerHistory() {
+			followingLatest = false; historyWindow.newer(); renderTimelineWindow('newer');
+		}
+		function showLatestHistory() {
+			historyWindow.latest(); renderTimelineWindow('latest'); scrollToBottom(true);
+		}
+		function renderTimelineWindow(direction) {
+			if (updatingTimeline) return;
+			updatingTimeline = true;
+			timelineObserver.disconnect();
 			const saved = { index: nextConversationIndex, role: lastSenderRole, assistant: lastAssistantSpecialist, prompt: lastUserPrompt, promptDraft: lastPromptDraft };
-			const page = earlierHistory.splice(Math.max(0, earlierHistory.length - 100));
-			nextConversationIndex = earlierHistory.length; lastSenderRole = null; lastAssistantSpecialist = null; lastPromptDraft = null;
-			renderingHistory = true;
-			try { for (const msg of page) addMessage(msg.role, msg.content, historyOptions(msg)); }
-			finally { renderingHistory = false; nextConversationIndex = saved.index; lastSenderRole = saved.role; lastAssistantSpecialist = saved.assistant; lastUserPrompt = saved.prompt; lastPromptDraft = saved.promptDraft; }
-			const fragment = document.createDocumentFragment();
-			for (const child of [...messageList.children]) { if (!before.has(child)) fragment.appendChild(child); }
-			messageList.insertBefore(fragment, anchor);
-			if (earlierHistory.length) historyButton.textContent = 'Show Earlier Messages (' + earlierHistory.length + ')';
-			else { historyButton.remove(); historyButton = null; }
-			if (anchor && anchorTop !== undefined) messageList.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
+			try {
+				const existing = new Map([...messageList.querySelectorAll(':scope > .msg')].map(node => [Number(node.dataset.conversationIndex), node]));
+				const activeWrapper = currentAssistantDiv?.closest('.msg');
+				const activeIndex = activeWrapper ? Number(activeWrapper.dataset.conversationIndex) : -1;
+				const boundUserIndex = requestSlots.get(activeWrapper?.dataset.requestId)?.user;
+				const activeUserIndex = Number.isSafeInteger(boundUserIndex) && boundUserIndex >= 0 && historyWindow.get(boundUserIndex)?.role === 'user' ? boundUserIndex : activeIndex - 1;
+				const pins = activeIndex >= 0 ? [activeUserIndex, activeIndex] : [];
+				const view = historyWindow.view(pins);
+				const wanted = new Set(view.indices);
+				const top = messageList.getBoundingClientRect().top;
+				const anchor = [...existing].find(([index, node]) => wanted.has(index) && node.getBoundingClientRect().bottom > top)?.[1];
+				const anchorTop = anchor?.getBoundingClientRect().top;
+				const stripes = new Map();
+				for (const stripe of messageList.querySelectorAll(':scope > .checkpoint-stripe')) {
+					const index = Number(stripe.dataset.conversationIndex);
+					if (wanted.has(index)) { stripes.set(index, [...(stripes.get(index) || []), stripe]); }
+					else stripe.remove();
+				}
+				for (const [index, node] of existing) {
+					if (wanted.has(index)) continue;
+					const record = historyWindow.get(index);
+					if (record?.role === 'assistant') {
+						const vote = node.querySelector('.msg-action-fb[aria-pressed="true"]');
+						record.feedback = vote ? vote.getAttribute('aria-label') === uiText('helpful') ? 'up' : 'down' : undefined;
+					}
+					node.remove();
+				}
+				const fragment = document.createDocumentFragment();
+				lastSenderRole = null; lastAssistantSpecialist = null; lastPromptDraft = null;
+				for (let index = view.start - 1; index >= 0; index--) {
+					const prior = historyWindow.get(index);
+					if (prior?.role === 'user') { lastPromptDraft = historyOptions(prior).promptDraft; lastUserPrompt = lastPromptDraft?.text || ''; break; }
+				}
+				renderingHistory = true;
+				for (const index of view.indices) {
+					const record = historyWindow.get(index);
+					let node = existing.get(index);
+					if (!node && record) { nextConversationIndex = index; node = addMessage(record.role, record.content, historyOptions(record)); }
+					if (!node) continue;
+					fragment.appendChild(node);
+					for (const stripe of stripes.get(index) || [...messageList.querySelectorAll(':scope > .checkpoint-stripe')].filter(stripe => Number(stripe.dataset.conversationIndex) === index)) fragment.appendChild(stripe);
+					if (record?.role === 'user') { lastPromptDraft = historyOptions(record).promptDraft; lastUserPrompt = lastPromptDraft?.text || ''; }
+					if (record) { lastSenderRole = record.role; lastAssistantSpecialist = record.role === 'assistant' ? record.specialistId || historySpecialist : null; }
+				}
+				messageList.appendChild(fragment);
+				historyButton?.remove(); historyNewerControls?.remove(); historyRangeLabel?.remove();
+				historyButton = null; historyNewerControls = null; historyRangeLabel = null;
+				const first = messageList.querySelector(':scope > .msg');
+				if (view.older) {
+					historyButton = document.createElement('button'); historyButton.type = 'button'; historyButton.className = 'secondary-button';
+					historyButton.textContent = uiText('historyEarlier', view.older); historyButton.addEventListener('click', loadEarlierHistory);
+					messageList.insertBefore(historyButton, first);
+				}
+				if (view.older || view.newer) {
+					historyRangeLabel = document.createElement('div'); historyRangeLabel.className = 'timeline-range'; historyRangeLabel.tabIndex = -1; historyRangeLabel.setAttribute('role', 'status'); historyRangeLabel.setAttribute('aria-live', 'polite');
+					historyRangeLabel.textContent = uiText('historyRange', view.start + 1, view.end, view.total);
+					messageList.insertBefore(historyRangeLabel, first);
+				}
+				if (view.newer) {
+					historyNewerControls = document.createElement('div'); historyNewerControls.className = 'timeline-navigation';
+					for (const [label, action] of [[uiText('historyNewer', view.newer), loadNewerHistory], [uiText('historyLatest'), showLatestHistory]]) {
+						const control = document.createElement('button'); control.type = 'button'; control.className = 'secondary-button'; control.textContent = label; control.addEventListener('click', action); historyNewerControls.appendChild(control);
+					}
+					const live = activeIndex >= view.end ? existing.get(activeUserIndex) || activeWrapper : null;
+					messageList.insertBefore(historyNewerControls, live?.isConnected ? live : null);
+				}
+				if (anchor?.isConnected && anchorTop !== undefined && direction !== 'latest' && direction !== 'initial') messageList.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
+				if (checkpointPopoverAnchor && !checkpointPopoverAnchor.isConnected) closeCheckpointPopover();
+				if (direction === 'older') (historyButton || historyRangeLabel)?.focus({ preventScroll: true });
+				if (direction === 'newer') historyNewerControls?.querySelector('button')?.focus({ preventScroll: true });
+			} finally {
+				renderingHistory = false; nextConversationIndex = saved.index; lastSenderRole = saved.role; lastAssistantSpecialist = saved.assistant; lastUserPrompt = saved.prompt; lastPromptDraft = saved.promptDraft;
+				updatingTimeline = false; timelineObserver.observe(messageList, { childList: true });
+			}
 			refreshPromptReuseAffordance();
 		}
+		const timelineObserver = new MutationObserver(records => {
+			if (records.some(record => [...record.addedNodes].some(node => node instanceof HTMLElement && node.classList.contains('msg')))) scheduleTimelineWindow();
+		});
+		timelineObserver.observe(messageList, { childList: true });
+		jumpToLatest?.addEventListener('click', showLatestHistory);
+		messageList.addEventListener('scroll', () => { if (historyWindow.view().newer > 0) { followingLatest = false; if (jumpToLatest) jumpToLatest.hidden = false; } });
+		window.addEventListener('pagehide', () => { timelineObserver.disconnect(); if (timelineFrame !== null) cancelAnimationFrame(timelineFrame); });
 		function addMessage(role, content, opts) {
 			opts = opts || {};
 			const wrapper = document.createElement('div');
@@ -2378,6 +2560,7 @@
 			}
 			const conversationIndex = nextConversationIndex++;
 			wrapper.dataset.conversationIndex = String(conversationIndex);
+			stampPersistedIdentity(wrapper, opts);
 			// Phase 68 — stamp the persisted timestamp on every wrapper so the
 			// hover popover can render "Time" / "Sent" without a second lookup.
 			// Falls back to "now" only when a freshly-rendered bubble has no
@@ -2399,10 +2582,10 @@
 				body.className = 'msg-body';
 				if (isStructured) {
 					const text = renderStructuredContent(body, content);
-					body.appendChild(buildAssistantActions(text));
+					body.appendChild(buildAssistantActions(text, opts));
 				} else {
 					body.innerHTML = renderMarkdown(content);
-					body.appendChild(buildAssistantActions(content));
+					body.appendChild(buildAssistantActions(content, opts));
 				}
 				// Hydrate any persisted ui-block placeholders to live blocks.
 				if (typeof window.__sotaHydrateUiBlocks === 'function') {
@@ -2450,7 +2633,7 @@
 			// back-to-back (Phase 59 edge case).
 			if (role === 'user') {
 				if (!renderingHistory) scrollToBottom(true);
-				const pending = checkpointsByTurnIndex.get(conversationIndex);
+				const pending = checkpointsByTurnIndex.get(opts.persistedIndex);
 				if (Array.isArray(pending)) {
 					for (const cp of pending) {
 						insertCheckpointStripe(wrapper, cp);
@@ -2459,6 +2642,7 @@
 			}
 			lastSenderRole = role;
 			if (!renderingHistory) { refreshPromptReuseAffordance(); scrollToBottom(); updateEmptyState(); }
+			recordTimelineMessage(conversationIndex, role, content, opts);
 			return wrapper;
 		}
 
@@ -2495,6 +2679,8 @@
 				wrapper.classList.add('msg-follow-on');
 			}
 			wrapper.dataset.conversationIndex = String(nextConversationIndex++);
+			if (activeRequestId) wrapper.dataset.requestId = activeRequestId;
+			if (activeTurnId) wrapper.dataset.turnId = activeTurnId;
 			// Phase 68 — record the wall-clock start so the hover popover can
 			// resolve a relative time even before metrics arrive.
 			wrapper.dataset.timestamp = String(Date.now());
@@ -2530,6 +2716,7 @@
 			refreshPromptReuseAffordance();
 			scrollToBottom();
 			currentAssistantDiv = body;
+			recordTimelineMessage(Number(wrapper.dataset.conversationIndex), 'assistant', '', { requestId: activeRequestId, turnId: activeTurnId, timestamp: Number(wrapper.dataset.timestamp), specialistId: resolvedId, promptDraft: lastPromptDraft });
 			updateEmptyState();
 			return wrapper;
 		}
@@ -2594,30 +2781,21 @@
 		// follows '@url ' but isn't a valid URL is left in the text untouched
 		// so the user sees their typo and can correct it.
 		function extractInlineUrlMentions(text) {
-			if (typeof text !== 'string' || text.indexOf('@url') < 0) return text;
-			const re = /(^|\s)@url\s+(https?:\/\/[^\s]+)/g;
-			let cleaned = text;
-			let m;
-			const found = [];
-			while ((m = re.exec(text)) !== null) {
-				found.push({ full: m[0], lead: m[1], url: m[2] });
+			const parsed = SotaWorkflows.inlineUrlMentions(text);
+			for (const mention of parsed.mentions) {
+				const candidate = { ...mention, label: '@url ' + mention.url };
+				if (!mentionAlreadyAdded(candidate)) mentions.push(candidate);
 			}
-			for (const entry of found) {
-				const candidate = { kind: 'url', url: entry.url, label: '@url ' + entry.url };
-				if (!mentionAlreadyAdded(candidate)) {
-					mentions.push(candidate);
-				}
-				cleaned = cleaned.replace(entry.full, entry.lead);
-			}
-			if (found.length > 0) renderContextChips();
-			return cleaned.replace(/\s{2,}/g, ' ').trim();
+			if (parsed.mentions.length) renderContextChips();
+			return parsed.text;
 		}
 
-		function sendMessage() {
+		function sendMessage(renderOnly = false, requestId) {
 			if (isStreaming) {
 				vscode.postMessage({ type: 'cancelRequest' });
 				return;
 			}
+			if (!renderOnly && isCurrentModelUnavailable()) { modelChip.focus(); return; }
 			let text = messageInput.value.trim();
 
 			// `@url <link>` is a deferred chip — when the user types '@url '
@@ -2631,6 +2809,7 @@
 
 			clearPromptRestore();
 			const submittedDraft = { ...captureComposerDraft(), text };
+			activeRequestId = requestId || crypto.randomUUID(); activeTurnId = null; activeHostTurnPending = true;
 
 			// Build the user bubble. When images are attached we render them
 			// as a structured array (image parts followed by the text part)
@@ -2652,9 +2831,9 @@
 					name: img.name,
 				}));
 				structured.push({ type: 'text', text: bubbleText || '(image attachment)' });
-				addMessage('user', structured, { timestamp: Date.now(), promptDraft: submittedDraft });
+				addMessage('user', structured, { timestamp: Date.now(), promptDraft: submittedDraft, requestId: activeRequestId });
 			} else {
-				addMessage('user', bubbleText || '(no text)', { timestamp: Date.now(), promptDraft: submittedDraft });
+				addMessage('user', bubbleText || '(no text)', { timestamp: Date.now(), promptDraft: submittedDraft, requestId: activeRequestId });
 			}
 			// Up-Arrow recall keeps the user's typed text
 			// without the mention-chip annotation tail, so they round-trip
@@ -2690,8 +2869,9 @@
 			const mentionsLegacy = mentions
 				.map(m => (m.path ? m.path : (m.kind === 'workspace' ? '[workspace]' : '')))
 				.filter(p => typeof p === 'string' && p.length > 0);
-			vscode.postMessage({
+			if (renderOnly !== true) vscode.postMessage({
 				type: 'sendMessage',
+				requestId: activeRequestId,
 				conversationId: activeConversationId,
 				text: text,
 				model: currentModel,
@@ -2702,6 +2882,7 @@
 				specialistId: currentAgent,
 				chatMode: currentMode,
 				includeWorkspaceContext: includeContext.checked,
+				excludedContext: [...excludedContext], contextSnapshotId,
 			});
 
 			attachments = [];
@@ -2717,6 +2898,13 @@
 		 * by `setStreamingState` and overrides the empty styling.
 		 */
 		function updateSendAffordance() {
+			document.getElementById('queueMessageBtn').hidden = !isStreaming;
+			document.getElementById('redirectMessageBtn').hidden = !isStreaming;
+			const unavailable = isCurrentModelUnavailable();
+			document.getElementById('unavailableModelNotice').hidden = !unavailable;
+			document.getElementById('queueMessageBtn').disabled = unavailable;
+			document.getElementById('redirectMessageBtn').disabled = unavailable;
+			sendBtn.disabled = !isStreaming && unavailable;
 			if (isStreaming) {
 				sendBtn.classList.remove('is-empty');
 				return;
@@ -2888,6 +3076,7 @@
 		}
 
 		function renderContextChips() {
+			contextSourcesChanged();
 			persistDraft();
 			updateSendAffordance();
 			contextChips.textContent = '';
@@ -2985,16 +3174,28 @@
 			});
 		}
 
+		function isSavedModel(model) {
+			return typeof model === 'string' && (model.startsWith('catalog:') || MODEL_METADATA_RAW.has(model));
+		}
+		function isCurrentModelUnavailable() {
+			if (!currentModel.startsWith('catalog:') || !providerCatalogSnapshot) return false;
+			const provider = providerCatalogSnapshot.providers.find(entry => entry.id === currentModel.split(':')[1]);
+			const configuredInventory = provider && provider.configurationComplete === true && (provider.id === 'zai' ? provider.catalogStatus === 'catalog-unavailable' : ['foundry', 'bedrock'].includes(provider.id) && ['configuration-only', 'not-configured'].includes(provider.catalogStatus));
+			const missingCredential = provider && provider.credentialStatus === 'missing' && provider.credentialSource === 'none' && provider.catalogStatus === 'not-configured';
+			return Boolean(provider && !provider.truncated && (provider.catalogStatus === 'ready' || configuredInventory || missingCredential) && !provider.models.some(model => model.id === currentModel && model.chat !== false));
+		}
 		function updateModelLabel() {
 			const acpAgent = getCurrentAcpAgent();
-			modelLabel.textContent = acpAgent ? uiText('managedByAcp') : MODEL_LABELS[currentModel] || currentModel;
-			modelChip.disabled = Boolean(acpAgent);
+			modelLabel.textContent = acpAgent && !currentModel.startsWith('catalog:acp:') ? uiText('managedByAcp') : MODEL_LABELS.get(currentModel) || currentModel;
+			modelChip.disabled = Boolean(acpAgent) && !currentModel.startsWith('catalog:acp:');
 			modelChip.title = acpAgent ? uiText('acpModelHelp', acpAgent) : '';
-			if (acpAgent) { modelMenu.hidden = true; }
+			if (modelChip.disabled) { modelMenu.hidden = true; }
 			updateReasoningChipVisibility();
+			updateSendAffordance();
 		}
 
 		function getCurrentAcpAgent() {
+			if (currentModel.startsWith('catalog:') && !currentModel.startsWith('catalog:acp:')) return '';
 			return SPECIALISTS.find(specialist => specialist.id === currentAgent)?.acpAgent || '';
 		}
 
@@ -3643,6 +3844,7 @@
 		});
 
 		messageInput.addEventListener('input', (e) => {
+			contextSourcesChanged();
 			persistDraft();
 			messageInput.style.height = 'auto';
 			// The CSS sets a 64px min-height (3 rows) and 240px max-height
@@ -3796,8 +3998,8 @@
 		// user actually hovers something.
 		const MODEL_METADATA_RAW = (function () {
 			const node = document.getElementById('modelMetadataData');
-			if (!node || !node.textContent) return {};
-			try { return JSON.parse(node.textContent); } catch (e) { return {}; }
+			if (!node || !node.textContent) return new Map();
+			try { return new Map(Object.entries(JSON.parse(node.textContent))); } catch (e) { return new Map(); }
 		})();
 		let modelTooltipEl = null;
 		function ensureModelTooltip() {
@@ -3809,18 +4011,19 @@
 			return modelTooltipEl;
 		}
 		function fmtTokens(n) {
-			if (typeof n !== 'number') return '?';
+			if (typeof n !== 'number' || n <= 0) return uiText('unknown');
 			if (n >= 1000000) return (n % 1000000 === 0 ? (n / 1000000) : (n / 1000000).toFixed(1)) + 'M';
 			if (n >= 1000) return (n % 1000 === 0 ? (n / 1000) : (n / 1000).toFixed(1)) + 'K';
 			return String(n);
 		}
 		function fmtPricing(info) {
 			if (!info) return '';
+			if (info.pricingStatus === 'unknown') return uiText('unknown');
 			if (info.inputCostPer1M === 0 && info.outputCostPer1M === 0) return 'subscription';
 			return '$' + info.inputCostPer1M + ' / $' + info.outputCostPer1M + ' per Mtok';
 		}
 		function showModelTooltip(modelId, anchor) {
-			const info = MODEL_METADATA_RAW[modelId];
+			const info = MODEL_METADATA_RAW.get(modelId);
 			if (!info) return;
 			const tip = ensureModelTooltip();
 			const caps = Array.isArray(info.capabilities) ? info.capabilities.join(' / ') : '';
@@ -3850,7 +4053,7 @@
 		modelMenu.querySelectorAll('.popover-item').forEach((item) => {
 			if (item.querySelector('.popover-item-info')) return;
 			const modelId = item.getAttribute('data-model');
-			if (!modelId || !MODEL_METADATA_RAW[modelId]) return;
+			if (!modelId || !MODEL_METADATA_RAW.has(modelId)) return;
 			const icon = document.createElement('span');
 			icon.className = 'popover-item-info';
 			icon.setAttribute('aria-label', 'Model details');
@@ -3871,6 +4074,20 @@
 
 		const modelSearch = document.getElementById('modelSearch');
 		const modelSearchEmpty = document.getElementById('modelSearchEmpty');
+		let discoveredModels = [];
+		function renderDiscoveredModels(query = '') {
+			modelMenu.querySelectorAll('[data-discovered]').forEach(node => node.remove());
+			const matching = discoveredModels.filter(model => [model.label, model.providerName, model.model].join(' ').toLocaleLowerCase().includes(query.toLocaleLowerCase()));
+			let previousProvider;
+			for (const model of matching.slice(0, 100)) {
+				if (previousProvider !== model.providerName) { const heading = document.createElement('div'); heading.className = 'popover-section-label'; heading.dataset.discovered = 'true'; heading.textContent = model.providerName; modelMenu.append(heading); previousProvider = model.providerName; }
+				const item = document.createElement('button'); item.type = 'button'; item.className = 'popover-item'; item.dataset.model = model.id; item.dataset.discovered = 'true'; item.setAttribute('role', 'menuitemradio'); item.setAttribute('aria-checked', String(model.id === currentModel));
+				const check = document.createElement('span'); check.className = 'item-check';
+				item.append(check, document.createTextNode(model.label));
+				item.addEventListener('focus', () => showModelTooltip(model.id, item)); item.addEventListener('blur', hideModelTooltip); modelMenu.append(item);
+			}
+			if (matching.length > 100) { const note = document.createElement('div'); note.className = 'popover-section-label'; note.dataset.discovered = 'true'; note.textContent = uiText('narrowModelSearch', matching.length); modelMenu.append(note); }
+		}
 		const modelItems = Array.from(modelMenu.querySelectorAll('[data-model]'));
 		for (const item of modelItems) {
 			item.removeAttribute('role');
@@ -3881,6 +4098,7 @@
 			item.addEventListener('blur', hideModelTooltip);
 		}
 		function filterModels() {
+			renderDiscoveredModels(modelSearch.value.trim());
 			const query = modelSearch.value.trim().toLocaleLowerCase();
 			let group = null;
 			for (const node of modelMenu.children) {
@@ -3910,7 +4128,7 @@
 			const target = e.target.closest('.popover-item');
 			if (!target) return;
 			currentModel = target.dataset.model;
-			vscode.postMessage({ type: 'selectModel', conversationId: activeConversationId, model: currentModel });
+			vscode.postMessage({ type: 'selectModel', conversationId: activeConversationId, model: currentModel, specialistId: currentAgent });
 			persistDraft();
 			updateModelLabel();
 			updateModelMenuChecks();
@@ -4000,7 +4218,7 @@
 			const target = e.target.closest('.popover-item');
 			if (!target) return;
 			currentAgent = target.dataset.agent || 'anton';
-			vscode.postMessage({ type: 'selectSpecialist', conversationId: activeConversationId, specialistId: currentAgent });
+			vscode.postMessage({ type: 'selectSpecialist', conversationId: activeConversationId, specialistId: currentAgent, model: currentModel });
 			updateAgentLabel();
 			updateAgentMenuChecks();
 			updateHeaderSubtitle();
@@ -4083,6 +4301,12 @@
 
 		window.addEventListener('message', (event) => {
 			const message = event.data;
+			if (message.type === 'turnAccepted') { acceptTurn(message); return; }
+			if (message.type === 'turnResumed') { resumeTurn(message); return; }
+			if (message.type === 'messagePersisted') { acknowledgeTimelineMessage(message); return; }
+			// Completion and error may precede persistence. Old turns can still be
+			// acknowledged, but cannot finish or append tokens to a newer bubble.
+			if (message.requestId && message.turnId && message.type !== 'messageMetrics' && (message.conversationId !== activeConversationId || message.requestId !== activeRequestId || message.turnId !== activeTurnId)) return;
 			switch (message.type) {
 				case 'streamToken':
 					// Inline tool-result review: the arrival of an assistant
@@ -4181,6 +4405,7 @@
 					mountUiBlock(message);
 					break;
 				case 'requestSettled':
+					activeHostTurnPending = false; refreshPromptReuseAffordance();
 					if (isStreaming) {
 						finalizeStreamingText();
 						clearStreamingIndicator();
@@ -4222,10 +4447,10 @@
 					// agent run (agent-bridge path). Live-only by design —
 					// reloaded messages keep no metrics so the popover renders
 					// "—" placeholders for those fields.
-					const idx = message.conversationIndex;
-					const wrapper = messageList.querySelector(
-						'.msg-assistant[data-conversation-index="' + idx + '"]'
-					);
+					const slots = requestSlots.get(message.requestId);
+					const wrapper = message.requestId
+						? message.conversationId === activeConversationId && slots?.turnId === message.turnId ? messageList.querySelector('.msg-assistant[data-conversation-index="' + slots.assistant + '"]') : null
+						: messageList.querySelector('.msg-assistant[data-persisted-index="' + message.conversationIndex + '"]');
 					if (wrapper) {
 						wrapper.dataset.model = String(message.model || '');
 						wrapper.dataset.latencyMs = String(message.latencyMs || 0);
@@ -4242,10 +4467,66 @@
 					}
 					break;
 				}
+				case 'providerCatalog': {
+					providerCatalogSnapshot = message.snapshot;
+					discoveredModels = (message.snapshot?.providers || []).flatMap(provider => provider.models.filter(model => model.chat !== false && typeof model.id === 'string' && model.id.startsWith('catalog:') && typeof model.label === 'string').map(model => ({ ...model, providerName: provider.name })));
+					const catalogIds = new Set(discoveredModels.map(model => model.id));
+					// Provider-controlled IDs belong in maps, never object properties. Also
+					// retire metadata for models removed from the current provider snapshot.
+					for (const id of MODEL_LABELS.keys()) { if (id.startsWith('catalog:')) MODEL_LABELS.delete(id); }
+					for (const id of MODEL_METADATA_RAW.keys()) { if (id.startsWith('catalog:') && !catalogIds.has(id)) MODEL_METADATA_RAW.delete(id); }
+					for (const [id, metadata] of Object.entries(message.metadata || {})) { if (catalogIds.has(id)) MODEL_METADATA_RAW.set(id, metadata); }
+					for (const model of discoveredModels) MODEL_LABELS.set(model.id, model.label);
+					filterModels(); updateModelLabel(); updateModelMenuChecks();
+					if (message.snapshot) SotaWorkflows.renderProviderInventory(document.getElementById('providerDiscoveryStatus'), message.snapshot, uiText);
+					updateAuthGate(latestConnectionStatus);
+					break;
+				}
+				case 'agentCapabilities': {
+					const capability = message.capabilities;
+					const label = value => value === true ? uiText('supported') : value === false ? uiText('unsupported') : uiText('unknown');
+					document.getElementById('agentCapabilitySummary').textContent = capability ? `${capability.transport.toUpperCase()} · ${uiText('images')}: ${label(capability.images)} · Plan: ${label(capability.plan)} · ${uiText('billing')}: ${capability.metering}` : '';
+					break;
+				}
+				case 'adapterUsage': {
+					const parts = [];
+					if (typeof message.contextTokens === 'number') parts.push(uiText('adapterContext', message.contextTokens, message.contextWindow ?? uiText('unknown')));
+					if (message.cost) parts.push(uiText('adapterReportedCost', message.cost.amount, message.cost.currency));
+					if (parts.length) document.getElementById('agentCapabilitySummary').textContent = parts.join(' · ');
+					break;
+				}
+				case 'adapterRecovery':
+					draftStatus.hidden = false; draftStatus.textContent = uiText(message.recovery === 'resumed' ? 'sessionResumed' : message.recovery === 'interrupted' ? 'sessionInterrupted' : 'sessionTranscript');
+					break;
+				case 'followupQueue':
+					if (message.conversationId === activeConversationId) SotaWorkflows.renderQueue(document.getElementById('followupQueue'), message.entries || [], !!message.paused, (queueAction, id) => vscode.postMessage({ type: 'queueAction', conversationId: activeConversationId, queueAction, id }), uiText);
+					break;
+				case 'queueAccepted':
+					if (message.conversationId === activeConversationId && pendingQueueDraft && pendingQueueDraft.id === message.id && JSON.stringify(pendingQueueDraft.draft) === JSON.stringify(captureComposerDraft())) {
+						messageInput.value = ''; attachments = []; mentions = []; imageAttachments = []; renderContextChips(); updateSendAffordance(); persistDraft();
+					}
+					if (pendingQueueDraft?.id === message.id) pendingQueueDraft = undefined;
+					break;
+				case 'queueError':
+					if (message.conversationId === activeConversationId) { draftStatus.hidden = false; draftStatus.textContent = message.error; }
+					if (pendingQueueDraft?.id === message.id) pendingQueueDraft = undefined;
+					break;
+				case 'editQueuedDraft':
+					if (message.conversationId === activeConversationId) { previousPromptDraft = captureComposerDraft(); applyPromptDraft(draftFromWire(message.draft)); promptRestoreNotice.hidden = false; }
+					break;
+				case 'dispatchQueuedDraft':
+					if (message.conversationId === activeConversationId && !isStreaming) {
+						const existingDraft = captureComposerDraft();
+						applyPromptDraft(draftFromWire(message.draft)); sendMessage(true, message.draft.requestId); applyPromptDraft(existingDraft);
+					}
+					break;
 				case 'workspaceContextPreview':
-					if (message.conversationId === activeConversationId && includeContext.checked) {
-						contextPreview.textContent = message.error || message.markdown || uiText('contextEmpty');
-						contextSummary.textContent = message.markdown ? uiText('contextTokens', Number(message.estimatedTokens || 0).toLocaleString()) : uiText('on');
+					if (message.conversationId === activeConversationId && contextPreviewFingerprint === composerContextFingerprint() && (message.requestId ? message.requestId === contextPreviewRequestId : includeContext.checked)) {
+						contextSnapshotId = message.id;
+						if (Array.isArray(message.excludedContext)) { excludedContext = [...message.excludedContext]; contextPreviewFingerprint = composerContextFingerprint(); persistDraft(); }
+						if (message.sections) SotaWorkflows.renderContext(contextPreview, message.sections, (id, included) => { excludedContext = included ? excludedContext.filter(value => value !== id) : [...new Set([...excludedContext, id])]; persistDraft(); updateContextPreview(); }, uiText);
+						else contextPreview.textContent = message.error || message.markdown || uiText('contextEmpty');
+						contextSummary.textContent = message.markdown ? uiText('contextTokens', Number(message.estimatedTokens || 0).toLocaleString()) : uiText(includeContext.checked ? 'on' : 'off');
 					}
 					break;
 				case 'streamError':
@@ -4300,15 +4581,15 @@
 					if (Array.isArray(message.messages)) {
 						conversationHasUnmeteredUsage = message.messages.some(msg => msg.role === 'assistant' && msg.usageUnavailable);
 						historySpecialist = message.lastSpecialist || 'anton';
-						const start = Math.max(0, message.messages.length - 200);
-						earlierHistory = message.messages.slice(0, start); nextConversationIndex = start;
-						renderingHistory = true;
-						try { for (const msg of message.messages.slice(start)) addMessage(msg.role, msg.content, historyOptions(msg)); }
-						finally { renderingHistory = false; }
-						if (start) {
-							historyButton = document.createElement('button'); historyButton.className = 'secondary-button'; historyButton.textContent = 'Show Earlier Messages (' + start + ')';
-							historyButton.addEventListener('click', loadEarlierHistory); messageList.prepend(historyButton);
-						}
+						historyWindow.reset(message.messages.map((record, persistedIndex) => ({ ...record, persistedIndex })));
+						nextConversationIndex = message.messages.length;
+						const lastRecord = message.messages.at(-1);
+						lastSenderRole = lastRecord?.role || null;
+						lastAssistantSpecialist = lastRecord?.role === 'assistant' ? lastRecord.specialistId || historySpecialist : null;
+						const lastPrompt = message.messages.findLast(record => record.role === 'user');
+						lastPromptDraft = lastPrompt ? historyOptions(lastPrompt).promptDraft : null;
+						lastUserPrompt = lastPromptDraft?.text || '';
+						renderTimelineWindow('initial');
 						refreshPromptReuseAffordance();
 						const lastUser = messageList.querySelector('.msg-user:last-of-type') || [...messageList.querySelectorAll('.msg-user')].pop();
 						if (lastUser) updateTranscriptTaskHeader(Number(lastUser.dataset.conversationIndex), lastUserPrompt);
@@ -4372,7 +4653,7 @@
 							checkpointsByTurnIndex.set(entry.turnIndex, [entry]);
 						}
 						const wrapper = messageList.querySelector(
-							'.msg-user[data-conversation-index="' + entry.turnIndex + '"]'
+							'.msg-user[data-persisted-index="' + entry.turnIndex + '"]'
 						);
 						if (wrapper) {
 							insertCheckpointStripe(wrapper, entry);
@@ -4380,7 +4661,13 @@
 					}
 					break;
 				case 'checkpointsLoaded':
+					if ((message.reset === true || message.conversationId) && message.conversationId !== activeConversationId) break;
 					if (Array.isArray(message.checkpoints)) {
+						if (message.reset === true) {
+							closeCheckpointPopover();
+							checkpointsByTurnIndex.clear();
+							messageList.querySelectorAll('.checkpoint-stripe').forEach(stripe => stripe.remove());
+						}
 						for (const cp of message.checkpoints) {
 							if (!cp || typeof cp.turnIndex !== 'number') continue;
 							const entry = {
@@ -4399,7 +4686,7 @@
 								checkpointsByTurnIndex.set(entry.turnIndex, [entry]);
 							}
 							const wrapper = messageList.querySelector(
-								'.msg-user[data-conversation-index="' + entry.turnIndex + '"]'
+								'.msg-user[data-persisted-index="' + entry.turnIndex + '"]'
 							);
 							if (wrapper) {
 								insertCheckpointStripe(wrapper, entry);
@@ -4411,6 +4698,7 @@
 					addImageAttachment({ mime: message.mime, base64: message.base64, name: message.name });
 					break;
 				case 'connectionState':
+					latestConnectionStatus = message.status;
 					updateConnectionUi(message.status);
 					updateAuthGate(message.status);
 					break;
@@ -4449,7 +4737,14 @@
 					applyMcpServerSaveResult(message);
 					break;
 				case 'systemMessage':
-					addMessage('system', message.content || '');
+					if (!message.conversationId || message.conversationId === activeConversationId) addMessage('system', message.content || '', { persistedIndex: message.persistedIndex, timestamp: message.timestamp });
+					break;
+				case 'chatSelection':
+					if (message.conversationId !== activeConversationId || message.requestedModel !== currentModel || message.requestedSpecialistId !== currentAgent) break;
+					currentModel = message.model;
+					currentAgent = message.specialistId;
+					persistDraft(); updateAgentLabel(); updateAgentMenuChecks(); updateHeaderSubtitle(); updateComposerPlaceholder(); updateModelLabel(); updateModelMenuChecks();
+					if (message.error) { draftStatus.hidden = false; draftStatus.textContent = message.error; }
 					break;
 				case 'specialistChange':
 					if (message.specialistId) {
@@ -4493,6 +4788,7 @@
 					// user submits when ready.
 					if (messageInput && typeof message.text === 'string') {
 						messageInput.value = message.text;
+						messageInput.dispatchEvent(new Event('input'));
 						messageInput.style.height = 'auto';
 						messageInput.style.height = Math.min(messageInput.scrollHeight, 200) + 'px';
 						try { messageInput.focus(); } catch (e) { /* noop */ }
@@ -4514,6 +4810,8 @@
 					renderTasksPane(message);
 					break;
 				case 'historySnapshot':
+					if (typeof message.query === 'string' && (message.query !== historySearch.value.trim() || message.historyScope !== historyView.value || message.workspaceOnly !== (historyScope === 'workspace'))) break;
+					if (message.append && lastHistorySnapshot) message.conversations = [...lastHistorySnapshot.conversations, ...message.conversations].filter((item, index, all) => all.findIndex(other => other.id === item.id) === index);
 					renderHistoryPane(message);
 					break;
 				case 'workspaceIndexUpdate':
@@ -4598,6 +4896,7 @@
 			// re-render the already-finalised prose.
 			const wrapper = document.createElement('span');
 			wrapper.className = 'msg-text-rendered';
+			streamingSources.set(wrapper, raw);
 			wrapper.innerHTML = renderMarkdown(raw);
 			if (typeof window.__sotaHydrateUiBlocks === 'function') {
 				window.__sotaHydrateUiBlocks(wrapper);
@@ -4672,8 +4971,11 @@
 			// The "source" we hand to the copy action is the rendered text
 			// content — sufficient for clipboard use without needing to
 			// reassemble the markdown source.
-			const source = currentAssistantDiv.textContent || '';
-			currentAssistantDiv.appendChild(buildAssistantActions(source));
+			const rawParts = [...currentAssistantDiv.querySelectorAll('.msg-text-stream, .msg-text-rendered')].map(element => streamingSources.get(element) || '').filter(Boolean);
+			const source = rawParts.join('\n\n') || currentAssistantDiv.textContent || '';
+			const wrapper = currentAssistantDiv.closest('.msg');
+			if (wrapper) recordTimelineMessage(Number(wrapper.dataset.conversationIndex), 'assistant', source, { timestamp: Number(wrapper.dataset.timestamp), specialistId: currentAssistantDiv.dataset.specialistId || currentAgent, promptDraft: lastPromptDraft });
+			currentAssistantDiv.appendChild(buildAssistantActions(source, historyWindow.get(Number(wrapper?.dataset.conversationIndex))));
 			refreshPromptReuseAffordance();
 		}
 
@@ -6420,22 +6722,19 @@
 		 * so renderers don't need to know about the host wire format.
 		 */
 		function buildUiBlockHelpers(blockId) {
+			const conversationId = activeConversationId;
+			const submit = (payload, text) => {
+				if (conversationId !== activeConversationId) return;
+				const requestId = crypto.randomUUID();
+				renderSubmittedTurn({ text, includeWorkspaceContext: false }, requestId);
+				vscode.postMessage({ ...payload, blockId, conversationId, requestId });
+			};
 			return {
-				blockId: blockId,
-				respond: function (value) {
-					vscode.postMessage({
-						type: 'uiBlockResponse',
-						blockId: blockId,
-						responseValue: value,
-					});
-				},
-				onAction: function (name, payload) {
-					vscode.postMessage({
-						type: 'uiBlockAction',
-						blockId: blockId,
-						actionName: typeof name === 'string' ? name : 'unnamed',
-						actionPayload: payload,
-					});
+				blockId,
+				respond: value => submit({ type: 'uiBlockResponse', responseValue: value }, `UI block response (${blockId}): ${JSON.stringify(value)}`),
+				onAction: (name, payload) => {
+					const actionName = typeof name === 'string' ? name : 'unnamed';
+					submit({ type: 'uiBlockAction', actionName, actionPayload: payload }, `UI block action (${blockId}.${actionName}): ${JSON.stringify(payload)}`);
 				},
 			};
 		}
@@ -6995,7 +7294,8 @@
 			const apiKeys = hasApiKeysShape ? status.apiKeys : {};
 			const providerState = (status && status.providerState && typeof status.providerState === 'object') ? status.providerState : null;
 			const hasOAuth = providers.some(p => p && p.connected);
-			let ready = hasOAuth || Boolean(apiKeys.anthropic) || Boolean(apiKeys.openai);
+			let ready = hasOAuth || Boolean(apiKeys.anthropic) || Boolean(apiKeys.openai)
+				|| Boolean(providerCatalogSnapshot?.providers.some(provider => provider.catalogStatus === 'ready' && provider.models.some(model => model.chat !== false)));
 			// providerState gives us full coverage including Foundry / Bedrock /
 			// Google — the legacy apiKeys flag only covered the original two
 			// providers.
@@ -8648,6 +8948,12 @@
 			if (!hdrCost || !hdrCostTokens || !hdrCostDollars) {
 				return;
 			}
+			if (message.usageUnavailable) {
+				hdrCostTokens.textContent = uiText('usageUnavailable'); hdrCostDollars.textContent = '—';
+				hdrCost.title = uiText('externalUsage'); hdrCost.hidden = false; lastCostBreakdown = [];
+				if (hdrCostPopover && !hdrCostPopover.hidden) renderCostPopover();
+				return;
+			}
 			const tokens = Number(message && message.tokens) || 0;
 			const dollars = Number(message && message.dollars) || 0;
 			const inputTokens = Number(message && message.inputTokens) || 0;
@@ -8950,7 +9256,7 @@
 				rowEl.className = 'hdr-cost-popover-row';
 				const label = document.createElement('span');
 				label.className = 'hdr-cost-popover-label';
-				label.textContent = MODEL_LABELS[row.model] || row.model;
+				label.textContent = MODEL_LABELS.get(row.model) || row.model;
 				const value = document.createElement('span');
 				value.className = 'hdr-cost-popover-value';
 				value.textContent = formatTokenCount(tokens) + ' · ' + formatDollars(dollars);

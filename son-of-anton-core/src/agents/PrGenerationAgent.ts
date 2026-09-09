@@ -54,6 +54,7 @@ export class PrGenerationAgent extends BaseAgent {
 				systemPrompt,
 				userMessage,
 				context.onToken,
+				{ images: context.images, signal: context.signal },
 			);
 
 			// Parse the generated PR metadata

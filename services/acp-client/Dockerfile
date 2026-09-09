@@ -12,9 +12,11 @@ COPY package*.json tsconfig.json ./
 RUN npm ci
 
 COPY src/ ./src/
+# Preserve the core output layout, including ACP's small transitive dependency tree.
 COPY _shared/acp/dist/ ./_shared/acp/dist/
 COPY _shared/auth/dist/ ./_shared/auth/dist/
-RUN npm run build
+COPY scripts/check-runtime.cjs ./scripts/check-runtime.cjs
+RUN npm run build && npm run check:runtime
 
 ENV ACP_HOST=0.0.0.0
 EXPOSE 3300

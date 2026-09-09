@@ -7,10 +7,13 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { ideReleasePolicy } from './ide-release-policy.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const product = JSON.parse(await readFile(path.join(root, 'product.json')));
 const pkg = JSON.parse(await readFile(path.join(root, 'package.json')));
+const policy = ideReleasePolicy(pkg.version, { ref: process.env.GITHUB_REF, channel: process.env.SOTA_RELEASE_CHANNEL, requireSigning: process.env.SOTA_REQUIRE_SIGNING });
+process.env.SOTA_REQUIRE_SIGNING = String(policy.requireSigning);
 const target = `${process.platform}-${process.arch}`;
 if (!['darwin-arm64', 'darwin-x64', 'linux-x64', 'win32-x64'].includes(target)) { throw new Error(`Unsupported native IDE package target: ${target}`); }
 const source = path.resolve(root, '..', `Son of Anton-${target}`);
@@ -27,9 +30,19 @@ const packagedProduct = JSON.parse(await readFile(path.join(resources, 'product.
 if (packagedProduct.version !== pkg.version) { throw new Error('Packaged IDE version differs from the source version'); }
 const prefix = `son-of-anton-${pkg.version}-${target}`;
 const assets = [];
+let signing = 'unsigned';
+const sign = file => {
+	const output = run(process.execPath, ['scripts/sign-ide.mjs', file, '--json'], { stdio: ['ignore', 'pipe', 'inherit'] });
+	let result;
+	try { result = JSON.parse(output); } catch { throw new Error('Signing helper returned an invalid result'); }
+	const expected = process.platform === 'darwin' ? ['ad-hoc', 'developer-id', 'developer-id-notarized'] : ['unsigned', 'authenticode'];
+	if (result?.target !== file || !expected.includes(result.signing)) { throw new Error('Signing helper did not verify the requested artifact'); }
+	if (policy.requireSigning && result.signing !== (process.platform === 'darwin' ? 'developer-id-notarized' : 'authenticode')) { throw new Error('Required signing and notarization did not complete'); }
+	return result.signing;
+};
 if (process.platform === 'darwin') {
 	// Sign the complete nested application before putting it into either archive.
-	run(process.execPath, ['scripts/sign-ide.mjs', app]);
+	const applicationSigning = sign(app);
 	const zip = `${prefix}.zip`;
 	run('ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', app, path.join(output, zip)]); assets.push(zip);
 	const staging = path.join(output, 'dmg-content');
@@ -49,19 +62,21 @@ if (process.platform === 'darwin') {
 		}
 	}
 	finally { await rm(staging, { recursive: true, force: true }); }
-	if (process.env.SOTA_MACOS_NOTARY_KEY_PATH) {
-		run('xcrun', ['notarytool', 'submit', path.join(output, dmg), '--key', process.env.SOTA_MACOS_NOTARY_KEY_PATH, '--key-id', process.env.MACOS_NOTARY_KEY_ID, '--issuer', process.env.MACOS_NOTARY_KEY_ISSUER, '--wait', '--timeout', '30m']);
-		run('xcrun', ['stapler', 'staple', path.join(output, dmg)]);
-	}
+	// The final DMG has its own signature and notarization ticket. The helper uses
+	// the same base64 credentials supplied by CI and removes its temporary key.
+	signing = sign(path.join(output, dmg));
+	if (signing !== applicationSigning) { throw new Error('Application and disk image signing results differ'); }
 } else if (process.platform === 'win32') {
 	run(process.execPath, ['node_modules/gulp/bin/gulp.js', `vscode-win32-${process.arch}-inno-updater`]);
-	run(process.execPath, ['scripts/sign-ide.mjs', source]);
+	const applicationSigning = sign(source);
 	run(process.execPath, ['node_modules/gulp/bin/gulp.js', `vscode-win32-${process.arch}-user-setup`]);
 	const setupDirectory = path.join(root, `.build/win32-${process.arch}/user-setup`);
 	const setups = (await readdir(setupDirectory)).filter(file => file.endsWith('.exe'));
 	if (setups.length !== 1) { throw new Error('Expected exactly one Windows user installer'); }
 	const setup = `${prefix}-setup.exe`; await cp(path.join(setupDirectory, setups[0]), path.join(output, setup));
-	run(process.execPath, ['scripts/sign-ide.mjs', path.join(output, setup)]); assets.push(setup);
+	signing = sign(path.join(output, setup));
+	if (signing !== applicationSigning) { throw new Error('Application and Windows installer signing results differ'); }
+	assets.push(setup);
 	const zip = `${prefix}.zip`; run('7z', ['a', '-tzip', path.join(output, zip), '.'], { cwd: source }); assets.push(zip);
 } else {
 	const tar = `${prefix}.tar.gz`; run('tar', ['-czf', path.join(output, tar), '-C', path.dirname(source), path.basename(source)]); assets.push(tar);
@@ -104,6 +119,6 @@ if (process.platform === 'darwin') {
 	finally { await rm(staging, { recursive: true, force: true }); }
 }
 const files = await Promise.all(assets.map(async name => { const bytes = await readFile(path.join(output, name)); return { name, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') }; }));
-await writeFile(path.join(output, 'manifest.json'), JSON.stringify({ version: 1, product: product.nameLong, ideVersion: pkg.version, commit: packagedProduct.commit, target, createdAt: new Date().toISOString(), signing: process.platform === 'darwin' ? process.env.MACOS_SIGNING_IDENTITY ? 'developer-id' : 'ad-hoc' : process.platform === 'win32' && process.env.WINDOWS_SIGNING_CERT_BASE64 ? 'authenticode' : 'unsigned', files }, null, 2) + '\n');
+await writeFile(path.join(output, 'manifest.json'), JSON.stringify({ version: 1, product: product.nameLong, ideVersion: pkg.version, commit: packagedProduct.commit, target, createdAt: new Date().toISOString(), signing, files }, null, 2) + '\n');
 await writeFile(path.join(output, 'SHA256SUMS.txt'), files.map(file => `${file.sha256}  ${file.name}\n`).join(''));
 console.log(`IDE installers: ${output}`);

@@ -6,7 +6,7 @@
 import type { ChatRequestLike, ChatContextLike, ChatStreamLike, CancellationLike } from '../chatStream';
 import type { ConfigStore, ProjectContextProvider } from '../host';
 import { getVoice } from '../chat/personas';
-import { LlmClient, ModelId, supportsAgenticToolLoop, type LlmContentPart, type LlmMessage, type LlmStreamComplete, type SystemPromptPart } from '../llm/LlmClient';
+import { LlmClient, ModelId, modelSupportsImages, supportsAgenticToolLoop, type LlmContentPart, type LlmMessage, type LlmStreamComplete, type SystemPromptPart } from '../llm/LlmClient';
 import { detectUncertainty, UNCERTAINTY_ESCALATION_THRESHOLD } from '../llm/confidence';
 import { MODEL_METADATA } from '../llm/modelMetadata';
 import { ModelRouter } from '../llm/ModelRouter';
@@ -18,6 +18,8 @@ import { formatSignOff, pickSignOffQuote } from '../personality/specialistQuotes
 import { buildTodoTools } from '../tools/todoTools';
 import type { TodoEntry, Tool, ToolDefinition, ToolExecutionContext } from '../tools/types';
 import { AgentEvent } from './agentEvents';
+import { getDiscoveredModel } from '../llm/DiscoveredModels';
+import { validateImages, type AcpImage, type AcpCapabilities, type AcpUsage } from '../acp/protocol';
 import { AgentManager } from './AgentManager';
 import { MetricsTracker } from './MetricsTracker';
 import { ProjectMemory } from './ProjectMemory';
@@ -78,6 +80,10 @@ const SUGGESTIONS_SENTINEL_INSTRUCTION = [
  * Context provided to specialist agents for each subtask.
  */
 export interface AgentContext {
+	conversationId?: string;
+	maxToolCalls?: number;
+	maxRuntimeMs?: number;
+	images?: readonly AcpImage[];
 	/** Cancel the downstream agent when the parent stops or its deadline expires. */
 	signal?: AbortSignal;
 	instruction: string;
@@ -115,6 +121,12 @@ export interface AgentContext {
  * adding a new field doesn't cascade through every call site.
  */
 export interface ChatTurnOptions {
+	readonly images?: readonly AcpImage[];
+	readonly mode?: 'plan' | 'act';
+	readonly maxToolCalls?: number;
+	readonly maxRuntimeMs?: number;
+	readonly onUsage?: (usage: AcpUsage) => void;
+	readonly onRecovery?: (state: 'resumed' | 'transcript' | 'interrupted') => void;
 	/** Per-turn model override from the chat composer's picker. */
 	readonly modelOverride?: ModelId;
 	/** Per-turn workspace snapshot block injected into the system prompt. */
@@ -301,6 +313,7 @@ export abstract class BaseAgent {
 		if (!orchestratorHint) {
 			return baseline;
 		}
+		if (orchestratorHint.startsWith('catalog:') && getDiscoveredModel(orchestratorHint)) { return orchestratorHint; }
 		// Map direct-Anthropic baselines to claude-code-* when the
 		// orchestrator is on Claude Code. The mapping is intentionally
 		// narrow — only models in the direct-Anthropic provider get
@@ -505,7 +518,9 @@ export abstract class BaseAgent {
 		server: string,
 		tool: string,
 		inputs: Record<string, unknown>,
+		signal?: AbortSignal,
 	): Promise<McpToolResult> {
+		signal?.throwIfAborted();
 		const span = this.agentManager.addSpan({
 			taskId,
 			name: `${server}/${tool}`,
@@ -515,7 +530,7 @@ export abstract class BaseAgent {
 		});
 
 		try {
-			const result = await this.mcpClient.callTool({ server, tool, inputs });
+			const result = await this.mcpClient.callTool({ server, tool, inputs, signal });
 			span.attributes['latencyMs'] = result.latencyMs;
 			span.attributes['isError'] = result.isError;
 			return result;
@@ -554,10 +569,10 @@ export abstract class BaseAgent {
 		systemPrompt: string,
 		userMessage: string,
 		onToken?: (token: string) => void,
-		options?: { escalateOnUncertainty?: boolean },
+		options?: { escalateOnUncertainty?: boolean; images?: readonly AcpImage[]; signal?: AbortSignal },
 	): Promise<{ text: string; tokenUsage: TokenUsage }> {
 		const escalateOnUncertainty = !!options?.escalateOnUncertainty;
-		const initial = await this.callLlmOnce(taskId, model, systemPrompt, userMessage, onToken, false);
+		const initial = await this.callLlmOnce(taskId, model, systemPrompt, userMessage, onToken, false, options?.images, options?.signal);
 
 		if (!escalateOnUncertainty) {
 			return initial;
@@ -582,7 +597,7 @@ export abstract class BaseAgent {
 		// Retry once on the stronger model. We don't recurse into a chain of
 		// escalations — sonnet → opus is the second hop and that's where the
 		// ladder ends.
-		const escalated = await this.callLlmOnce(taskId, escalationTarget, systemPrompt, userMessage, onToken, true);
+		const escalated = await this.callLlmOnce(taskId, escalationTarget, systemPrompt, userMessage, onToken, true, options?.images, options?.signal);
 
 		const tokenUsage: TokenUsage = {
 			inputTokens: initial.tokenUsage.inputTokens + escalated.tokenUsage.inputTokens,
@@ -605,6 +620,8 @@ export abstract class BaseAgent {
 		userMessage: string,
 		onToken: ((token: string) => void) | undefined,
 		isEscalation: boolean,
+		images?: readonly AcpImage[],
+		signal?: AbortSignal,
 	): Promise<{ text: string; tokenUsage: TokenUsage }> {
 		const span = this.agentManager.addSpan({
 			taskId,
@@ -630,8 +647,9 @@ export abstract class BaseAgent {
 		let completion: LlmStreamComplete | undefined;
 		for await (const event of this.llmClient.streamRequest({
 			model,
+			signal,
 			systemPrompt,
-			messages: [{ role: 'user', content: userMessage }],
+			messages: [{ role: 'user', content: this.turnContent(userMessage, { images, modelOverride: model }) }],
 			// Key the rate limiter on this specialist so unrelated agents debit
 			// their own per-agent bucket rather than sharing the 'default' one.
 			agentHandle: this.handle,
@@ -648,6 +666,7 @@ export abstract class BaseAgent {
 			}
 		}
 
+		signal?.throwIfAborted();
 		span.endTime = Date.now();
 
 		const inputTokens = completion?.inputTokens ?? 0;
@@ -683,6 +702,8 @@ export abstract class BaseAgent {
 			return;
 		}
 		this.spendGuard.recordUsage({
+			accounting: model.startsWith('claude-code-') || model.startsWith('codex-') || (model.startsWith('catalog:') && !getDiscoveredModel(model)?.pricing) ? 'unavailable' : 'estimated',
+			route: 'native',
 			inputTokens: usage.inputTokens,
 			outputTokens: usage.outputTokens,
 			cachedTokens: usage.cachedTokens,
@@ -789,8 +810,8 @@ export abstract class BaseAgent {
 	/**
 	 * Query the code graph for file summary information.
 	 */
-	protected async queryFileGraph(taskId: string, filePath: string): Promise<string> {
-		const result = await this.callMcpTool(taskId, 'code-graph', 'file_summary', { filePath });
+	protected async queryFileGraph(taskId: string, filePath: string, signal?: AbortSignal): Promise<string> {
+		const result = await this.callMcpTool(taskId, 'code-graph', 'file_summary', { filePath }, signal);
 		return this.graphContentOrEmpty(result);
 	}
 
@@ -947,6 +968,7 @@ export abstract class BaseAgent {
 		initialMessages: LlmMessage[];
 		tools: ReadonlyArray<ToolDefinition>;
 		maxIterations?: number;
+		maxToolCalls?: number;
 		signal?: AbortSignal;
 		onToken?: (token: string) => void;
 		executeTool: (call: { name: string; input: Record<string, unknown>; id: string }) => Promise<{ result: string; isError?: boolean }>;
@@ -995,6 +1017,7 @@ export abstract class BaseAgent {
 		let lastText = '';
 
 		for (let iteration = 1; iteration <= maxIterations; iteration++) {
+			args.signal?.throwIfAborted();
 			const span = this.agentManager.addSpan({
 				taskId: args.taskId,
 				name: `tool-loop-${iteration}`,
@@ -1039,6 +1062,7 @@ export abstract class BaseAgent {
 				}
 			}
 
+			args.signal?.throwIfAborted();
 			span.endTime = Date.now();
 			lastText = text;
 
@@ -1079,6 +1103,9 @@ export abstract class BaseAgent {
 				};
 			}
 
+			// Enforce before executing any tool, including internal todo tools.
+			if (executedCalls.length + pendingCalls.length > toolLimit(args.maxToolCalls)) { throw new Error(`Agent tool-call budget reached (${toolLimit(args.maxToolCalls)})`); }
+
 			// Append the assistant turn (text + tool_use blocks) to the
 			// conversation. Anthropic requires tool_use blocks alongside
 			// any text the model emitted in the same assistant message.
@@ -1089,11 +1116,12 @@ export abstract class BaseAgent {
 			for (const call of pendingCalls) {
 				assistantContent.push({ type: 'tool_use', id: call.id, name: call.name, input: call.input, ...(call.thoughtSignature ? { thoughtSignature: call.thoughtSignature } : {}) });
 			}
-			messages.push({ role: 'assistant', content: assistantContent });
+			messages.push({ role: 'assistant', content: assistantContent, ...(completion?.reasoningContent ? { reasoningContent: completion.reasoningContent } : {}) });
 
 			// Execute each tool and append the results as a single user turn.
 			const resultParts: LlmContentPart[] = [];
 			for (const call of pendingCalls) {
+				args.signal?.throwIfAborted();
 				let result: { result: string; isError?: boolean };
 				let isTodo = false;
 				try {
@@ -1154,6 +1182,19 @@ export abstract class BaseAgent {
 	 * every call site — only callers that supply the new field touch their
 	 * invocation.
 	 */
+	getExecutionCapabilities(model: ModelId = this.defaultModel): AcpCapabilities {
+		const subscription = model.startsWith('claude-code-') || model.startsWith('codex-');
+		const discovered = getDiscoveredModel(model);
+		return { transport: 'native', images: discovered?.images ?? modelSupportsImages(model), plan: true, resume: false, metering: subscription || discovered && !discovered.pricing ? 'unavailable' : 'estimated' };
+	}
+
+	protected turnContent(text: string, options?: ChatTurnOptions): string | LlmContentPart[] {
+		validateImages(options?.images);
+		if (!options?.images?.length) { return text; }
+		if (this.getExecutionCapabilities(options.modelOverride).images !== true) { throw new Error('This model does not support image attachments. Select an image-capable model or remove the attachments.'); }
+		return [{ type: 'text', text }, ...options.images.map(image => ({ type: 'image' as const, base64Data: image.data, mimeType: image.mimeType }))];
+	}
+
 	async runChatTurn(
 		userMessage: string,
 		emit: (token: string) => void,
@@ -1174,10 +1215,12 @@ export abstract class BaseAgent {
 		this.agentManager.startTask(task.id);
 
 		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(new Error('Agent runtime budget reached')), turnTimeout(options?.maxRuntimeMs ?? this.config.perTurnTimeoutMs));
 		const cancelSubscription = cancellation.onCancellationRequested(() => controller.abort());
+		if (cancellation.isCancellationRequested) { controller.abort(); }
 
 		try {
-			const systemPrompt = this.buildSystemPrompt(this.getRoleDescription(), {
+			const systemPrompt = this.buildSystemPrompt(`${this.getRoleDescription()}${options?.mode === 'plan' ? '\n\nPlan mode: analyze and propose only. No tools are available and no changes have been applied.' : ''}`, {
 				workspaceContextSnapshot,
 				emitFollowupSuggestions,
 				conversationId,
@@ -1196,10 +1239,11 @@ export abstract class BaseAgent {
 			for await (const event of this.llmClient.streamRequest({
 				model: turnModel,
 				systemPrompt,
-				messages: [{ role: 'user', content: userMessage }],
+				messages: [{ role: 'user', content: this.turnContent(userMessage, options) }],
 				signal: controller.signal,
 				agentHandle: this.handle,
 			})) {
+				controller.signal.throwIfAborted();
 				if (event.type === 'token') {
 					emit(event.token);
 					fullText += event.token;
@@ -1209,6 +1253,7 @@ export abstract class BaseAgent {
 					throw new Error(event.error);
 				}
 			}
+			controller.signal.throwIfAborted();
 			// Debit the shared session budget with this call's usage.
 			this.recordSpend(turnModel, {
 				inputTokens: completion?.inputTokens ?? 0,
@@ -1237,6 +1282,7 @@ export abstract class BaseAgent {
 			this.agentManager.failTask(task.id, message);
 			throw err;
 		} finally {
+			clearTimeout(timeout);
 			cancelSubscription.dispose();
 		}
 	}
@@ -1382,7 +1428,7 @@ export abstract class BaseAgent {
 		// `sota.agents.<handle>.model = "gpt-5"` also degrades to single-shot
 		// instead of crashing the tool loop on the first tool call.
 		const effectiveModel: ModelId = modelOverride ?? this.defaultModel;
-		if (!toolExecutionContext || forceSingleShot || !supportsAgenticToolLoop(effectiveModel)) {
+		if (!toolExecutionContext || forceSingleShot || options?.mode === 'plan' || !supportsAgenticToolLoop(effectiveModel)) {
 			// No tool context, the caller forced it, or the model can't drive the
 			// tool loop — fall back to single-shot streaming.
 			return this.runChatTurn(
@@ -1390,6 +1436,7 @@ export abstract class BaseAgent {
 				token => emit({ type: 'token', token }),
 				cancellation,
 				{
+					...options,
 					modelOverride,
 					workspaceContextSnapshot,
 					emitFollowupSuggestions,
@@ -1402,6 +1449,7 @@ export abstract class BaseAgent {
 		this.agentManager.startTask(task.id);
 
 		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(new Error('Agent runtime budget reached')), turnTimeout(options?.maxRuntimeMs ?? this.config.perTurnTimeoutMs));
 		const cancelSubscription = cancellation.onCancellationRequested(() => controller.abort());
 		if (cancellation.isCancellationRequested) { controller.abort(); }
 
@@ -1422,9 +1470,10 @@ export abstract class BaseAgent {
 				model: turnModel,
 				systemPrompt,
 				systemPromptParts,
-				initialMessages: [{ role: 'user', content: userMessage }],
+				initialMessages: [{ role: 'user', content: this.turnContent(userMessage, options) }],
 				tools,
 				maxIterations: 10,
+				maxToolCalls: options?.maxToolCalls,
 				signal: controller.signal,
 				includeTodoTools: true,
 				onToken: (tok) => {
@@ -1471,6 +1520,7 @@ export abstract class BaseAgent {
 			this.agentManager.failTask(task.id, message);
 			throw err;
 		} finally {
+			clearTimeout(timeout);
 			cancelSubscription.dispose();
 		}
 	}
@@ -1550,7 +1600,8 @@ export function truncateForTaskTitle(input: string): string {
  * still function.
  */
 function estimateCostUsd(model: ModelId, usage: TokenUsage): number {
-	const info = MODEL_METADATA[model];
+	const pricing = getDiscoveredModel(model)?.pricing;
+	const info = pricing ? { inputCostPer1M: pricing.inputPerMillion, outputCostPer1M: pricing.outputPerMillion } : MODEL_METADATA[model];
 	if (!info) {
 		return 0;
 	}
@@ -1558,3 +1609,7 @@ function estimateCostUsd(model: ModelId, usage: TokenUsage): number {
 	const outputMillions = usage.outputTokens / 1_000_000;
 	return inputMillions * info.inputCostPer1M + outputMillions * info.outputCostPer1M;
 }
+
+function turnTimeout(value: number | undefined): number { return typeof value === 'number' && Number.isFinite(value) ? Math.max(1, Math.min(3_600_000, value)) : 300_000; }
+
+function toolLimit(value: number | undefined): number { return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.min(1000, Math.floor(value))) : 100; }

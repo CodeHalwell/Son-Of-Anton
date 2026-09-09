@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
+import { dependencyRevision, dependencySchedule } from './webview/dependencyGraph';
 
 /**
  * Lifecycle state of a single subtask as rendered on the kanban board.
@@ -54,11 +55,13 @@ export interface BoardSnapshot {
 	readonly conversationId: string;
 	readonly tasks: ReadonlyArray<BoardTask>;
 	readonly createdAt: number;
+	readonly executionPlanId?: string;
 }
 
 interface BoardEntry {
 	readonly conversationId: string;
 	readonly createdAt: number;
+	readonly executionPlanId?: string;
 	tasks: BoardTask[];
 }
 
@@ -84,11 +87,12 @@ export class TaskBoardModel implements vscode.Disposable {
 	 * `plan-proposed` event arrives. Each subtask starts in `backlog` and is
 	 * promoted to `ready` by `recomputeStates`.
 	 */
-	setPlan(conversationId: string, tasks: BoardTask[]): void {
+	setPlan(conversationId: string, tasks: BoardTask[], executionPlanId?: string): void {
 		this.boards.set(conversationId, {
 			conversationId,
 			createdAt: Date.now(),
-			tasks: tasks.map(t => ({ ...t })),
+			executionPlanId,
+			tasks: tasks.map(t => ({ ...t, dependencies: [...t.dependencies], scopeFiles: [...t.scopeFiles] })),
 		});
 		this.recomputeStates(conversationId);
 		this._onDidChangeBoard.fire({ conversationId });
@@ -121,6 +125,22 @@ export class TaskBoardModel implements vscode.Disposable {
 		this._onDidChangeBoard.fire({ conversationId });
 	}
 
+	/** Validate graph edits without changing the board while the confirmation is open. */
+	previewDependencies(conversationId: string, taskId: string, dependencies: readonly string[], expectedRevision: string) {
+		const snapshot = this.getSnapshot(conversationId);
+		if (!snapshot || dependencyRevision(snapshot.tasks) !== expectedRevision) { throw new Error('Board changed. Review the current dependency plan again.'); }
+		if (snapshot.tasks.some(task => ['in-progress', 'review'].includes(task.state))) { throw new Error('Dependencies cannot be changed while a task is running.'); }
+		const task = snapshot.tasks.find(item => item.id === taskId);
+		if (!task || !['backlog', 'ready'].includes(task.state)) { throw new Error('Only pending tasks can change dependencies.'); }
+		const tasks = snapshot.tasks.map(item => item.id === taskId ? { ...item, dependencies: [...dependencies] } : item);
+		return { tasks, schedule: dependencySchedule(tasks) };
+	}
+
+	setDependencies(conversationId: string, taskId: string, dependencies: readonly string[], expectedRevision: string): void {
+		this.previewDependencies(conversationId, taskId, dependencies, expectedRevision);
+		this.updateTask(conversationId, taskId, { dependencies: [...dependencies] });
+	}
+
 	/**
 	 * Reassign a tile to a different specialist. Skips the no-op case so we
 	 * don't fire spurious change events when the user drops a tile back onto
@@ -151,7 +171,8 @@ export class TaskBoardModel implements vscode.Disposable {
 		return {
 			conversationId: board.conversationId,
 			createdAt: board.createdAt,
-			tasks: board.tasks.map(t => ({ ...t })),
+			executionPlanId: board.executionPlanId,
+			tasks: board.tasks.map(t => ({ ...t, dependencies: [...t.dependencies], scopeFiles: [...t.scopeFiles] })),
 		};
 	}
 

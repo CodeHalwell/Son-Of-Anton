@@ -84,7 +84,7 @@ suite('Personality', () => {
 	});
 
 	suite('Command palette branding', () => {
-		let packageJson: { contributes: { commands: Array<{ command: string; title: string }> } };
+		let packageJson: { contributes: { commands: Array<{ command: string; title: string; category?: string }> } };
 		let labels: Record<string, string>;
 
 		suiteSetup(() => {
@@ -93,15 +93,16 @@ suite('Personality', () => {
 			labels = JSON.parse(fs.readFileSync(path.join(_dir, '..', 'package.nls.json'), 'utf-8'));
 		});
 
-		test('all sota.* commands use "Anton:" prefix', () => {
+		test('all sota.* commands retain Anton branding in their title or category', () => {
 			const commands = packageJson.contributes.commands
 				.filter(c => c.command.startsWith('sota.') && !c.command.startsWith('sota.konami'));
 
 			for (const cmd of commands) {
 				const title = cmd.title.startsWith('%') && cmd.title.endsWith('%') ? labels[cmd.title.slice(1, -1)] : cmd.title;
+				const category = cmd.category?.startsWith('%') && cmd.category.endsWith('%') ? labels[cmd.category.slice(1, -1)] : cmd.category;
 				assert.ok(
-					title?.startsWith('Anton:'),
-					`Command "${cmd.command}" has title "${cmd.title}" — expected "Anton:" prefix`,
+					title && (title.startsWith('Anton:') || category === 'Anton' || category === 'Son of Anton'),
+					`Command "${cmd.command}" must have an "Anton:" title or an "Anton" / "Son of Anton" command-palette category`,
 				);
 			}
 		});

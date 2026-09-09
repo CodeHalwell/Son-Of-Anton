@@ -131,7 +131,9 @@ export async function detectCredentials(
 
 	const lmstudioHasBaseUrl = nonEmpty(lmstudioSecret)
 		|| nonEmpty(config.get<string>('lmstudioApiKey'))
-		|| nonEmpty(config.get<string>('lmstudioBaseUrl'));
+		|| nonEmpty(config.get<string>('lmstudioBaseUrl'))
+		|| nonEmpty(env.LMSTUDIO_API_KEY)
+		|| nonEmpty(env.LM_API_TOKEN);
 
 	const deepseekHasKey = nonEmpty(deepSeekSecret)
 		|| nonEmpty(config.get<string>('deepSeekApiKey'))
@@ -151,7 +153,8 @@ export async function detectCredentials(
 
 	const togetherHasKey = nonEmpty(togetherSecret)
 		|| nonEmpty(config.get<string>('togetherApiKey'))
-		|| nonEmpty(env.TOGETHER_API_KEY);
+		|| nonEmpty(env.TOGETHER_API_KEY)
+		|| nonEmpty(env.TOGETHERAI_API_KEY);
 
 	const fireworksHasKey = nonEmpty(fireworksSecret)
 		|| nonEmpty(config.get<string>('fireworksApiKey'))

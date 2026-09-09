@@ -176,9 +176,20 @@ export class McpClient {
 		return this.cachedListing ?? [];
 	}
 
+	/** Host-only notifications never initialize a server or expose an agent-callable tool. */
+	async notifyServer(server: string, method: string, params: Record<string, unknown>, expectedCommand?: string): Promise<boolean> {
+		if (this.disposed || !method.startsWith('notifications/son-of-anton/')) { return false; }
+		const active = this.connections.get(server);
+		if (!active || active.connection.state !== 'ready' || active.config.url || (expectedCommand && active.config.command !== expectedCommand)) { return false; }
+		await active.connection.notify(method, params);
+		return true;
+	}
+
 	async callTool(call: McpToolCall): Promise<McpToolResult> {
 		call.signal?.throwIfAborted();
-		await this.ensureInitialised();
+		// Initialization is shared: stop waiting for this turn without cancelling
+		// another caller's connection startup or sending this tool after its deadline.
+		await waitWithCancellation(this.ensureInitialised(), call.signal);
 		call.signal?.throwIfAborted();
 		const active = this.connections.get(call.server);
 		if (!active) {
@@ -205,7 +216,7 @@ export class McpClient {
 			};
 		}
 		const start = Date.now();
-		const result = await active.connection.callTool(call.tool, call.inputs, call.signal);
+		const result = await waitWithCancellation(active.connection.callTool(call.tool, call.inputs, call.signal), call.signal);
 		return {
 			content: result.content,
 			isError: result.isError,
@@ -373,7 +384,7 @@ export class McpClient {
 		if (this.disposed) { return; }
 		const active = [...this.connections.values()].map(a => ({
 			name: a.config.name,
-			signature: a.signature,
+			signature: a.connection.state === 'ready' ? a.signature : `${a.signature}:disconnected`,
 		}));
 		const delta = diffServerConfigs(active, next);
 
@@ -463,4 +474,20 @@ export class McpClient {
 		}
 		return out;
 	}
+}
+
+/** Bound a caller's wait while consuming late results from shared or uncooperative work. */
+function waitWithCancellation<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+	if (!signal) { return work; }
+	return new Promise<T>((resolve, reject) => {
+		const cleanup = () => signal.removeEventListener('abort', abort);
+		const abort = () => {
+			cleanup();
+			// Preserve explicit deadline reasons and the existing MCP cancellation message.
+			reject(signal.reason instanceof Error && signal.reason.name !== 'AbortError' ? signal.reason : new Error('MCP request cancelled'));
+		};
+		signal.addEventListener('abort', abort, { once: true });
+		work.then(value => { cleanup(); resolve(value); }, error => { cleanup(); reject(error); });
+		if (signal.aborted) { abort(); }
+	});
 }

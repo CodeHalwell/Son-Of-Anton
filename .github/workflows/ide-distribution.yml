@@ -33,6 +33,11 @@ on:
         description: Create a draft GitHub release after every native install check passes
         type: boolean
         default: false
+      channel:
+        description: Stable releases require macOS notarization and Windows signing
+        type: choice
+        options: [preview, stable]
+        default: preview
       require_signing:
         description: Require Developer ID, notarization and Windows Authenticode credentials
         type: boolean
@@ -51,15 +56,25 @@ jobs:
     runs-on: ubuntu-22.04
     outputs:
       build: ${{ steps.release.outputs.build }}
+      channel: ${{ steps.release.outputs.channel }}
+      require_signing: ${{ steps.release.outputs.require_signing }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Skip tags that already have a release
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
+          INPUT_RELEASE_CHANNEL: ${{ inputs.channel }}
+          INPUT_REQUIRE_SIGNING: ${{ inputs.require_signing }}
         run: |
           node <<'NODE'
           const fs = require('node:fs');
           (async () => {
+            const { ideReleasePolicy } = await import('./scripts/ide-release-policy.mjs');
+            const version = JSON.parse(fs.readFileSync('package.json', 'utf8')).version;
+            const policy = ideReleasePolicy(version, { ref: process.env.GITHUB_REF, channel: process.env.INPUT_RELEASE_CHANNEL, requireSigning: process.env.INPUT_REQUIRE_SIGNING });
             let build = true;
             if (process.env.GITHUB_REF.startsWith('refs/tags/ide-v')) {
               const tag = process.env.GITHUB_REF.slice('refs/tags/'.length);
@@ -76,6 +91,7 @@ jobs:
               }
             }
             fs.appendFileSync(process.env.GITHUB_OUTPUT, `build=${build}\n`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `channel=${policy.channel}\nrequire_signing=${policy.requireSigning}\n`);
           })().catch(error => { console.error(error); process.exitCode = 1; });
           NODE
 
@@ -134,6 +150,8 @@ jobs:
       - name: Linux build and desktop dependencies
         if: runner.os == 'Linux'
         run: |
+          # Chrome is already installed; its unrelated repository can be mid-publication.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libx11-dev libx11-xcb-dev libxkbfile-dev libsecret-1-dev libkrb5-dev libgtk-3-0 libnss3 libgbm1 libasound2 xvfb dpkg-dev desktop-file-utils
       - name: Assert native architecture
@@ -145,7 +163,7 @@ jobs:
           npm ci
           npm --prefix son-of-anton-core ci
           npm --prefix son-of-anton-cli ci
-          npm --prefix extensions/son-of-anton ci
+          npm --prefix extensions/son-of-anton ci --include=dev
           npm --prefix services/code-graph/mcp-server ci
       - name: Compile before validation
         run: |
@@ -153,6 +171,8 @@ jobs:
           npm --prefix son-of-anton-cli run build
           npm --prefix services/code-graph/mcp-server run build
           node node_modules/typescript/bin/tsc -p extensions/son-of-anton/tsconfig.json --noEmit
+          node node_modules/typescript/bin/tsc -p extensions/son-of-anton/tsconfig.test.json --noEmit
+          npx tsgo --project extensions/son-of-anton/tsconfig.json --noEmit
           npm run compile-check-ts-native
           npm run gulp compile-extensions
           npm --prefix build run typecheck
@@ -160,8 +180,13 @@ jobs:
         run: |
           node --test son-of-anton-core/dist/acp/*.test.js son-of-anton-core/dist/checkpoint/*.test.js son-of-anton-core/dist/workspace/*.test.js
           node --test son-of-anton-core/dist/util/readBoundedFile.test.js son-of-anton-core/dist/credentials/ProtectedSecretStore.test.js
+          node --test son-of-anton-core/dist/llm/LmStudioEndpointSecurity.test.js son-of-anton-core/dist/llm/BedrockDiscovery.test.js
+          node --test son-of-anton-core/dist/agents/OrchestratorReassignment.test.js
           node --test son-of-anton-cli/dist/test/updateInstall.test.js
-          node --test scripts/test/ide-release.test.mjs
+          node --test scripts/test/ide-release.test.mjs scripts/test/ide-package.test.mjs
+      - name: IDE host regressions
+        working-directory: extensions/son-of-anton
+        run: npm test -- --grep '^(Chat transcript write ownership|Conversation revision compare-and-swap|Conversation branch failure recovery|Provider Finder configuration boundary|Conversation history activation|Chat checkpoint index recovery|Permanent conversation deletion|ACP chat model routing|Impact navigation identities|Chat turn ownership|Chat workflow upgrades|IDE releases and integration profiles|Integration profile route persistence|Board reassignment execution integration|Board dependency planning and agent proposals) ' --fail-zero
       - name: Graph watcher regressions
         run: node --test services/code-graph/mcp-server/test/incremental.test.mjs
       - name: Build native code graph
@@ -181,7 +206,8 @@ jobs:
         run: npm run gulp "vscode-$IDE_TARGET-min"
       - name: Create native installers
         env:
-          SOTA_REQUIRE_SIGNING: ${{ inputs.require_signing || false }}
+          SOTA_RELEASE_CHANNEL: ${{ needs.prepare.outputs.channel }}
+          SOTA_REQUIRE_SIGNING: ${{ needs.prepare.outputs.require_signing }}
           MACOS_SIGNING_CERT_P12: ${{ secrets.MACOS_SIGNING_CERT_P12 }}
           MACOS_SIGNING_CERT_PASSWORD: ${{ secrets.MACOS_SIGNING_CERT_PASSWORD }}
           MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
@@ -245,8 +271,10 @@ jobs:
           overwrite: true
 
   release:
+    env:
+      SOTA_RELEASE_CHANNEL: ${{ needs.prepare.outputs.channel }}
     name: Draft downloadable IDE release
-    needs: build
+    needs: [prepare, build]
     if: startsWith(github.ref, 'refs/tags/ide-v') || (github.event_name == 'workflow_dispatch' && inputs.draft_release)
     runs-on: ubuntu-22.04
     permissions:

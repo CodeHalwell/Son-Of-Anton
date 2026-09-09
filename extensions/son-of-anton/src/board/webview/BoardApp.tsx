@@ -12,7 +12,9 @@
  * mount after that initial push if the bundle is still loading).
  */
 
+import { boardEditRevision } from './dependencyGraph';
 import { useEffect, useMemo, useState } from 'react';
+import { DependencyEditor } from './DependencyEditor';
 import { BoardChat } from './BoardChat';
 import { KanbanColumn } from './KanbanColumn';
 import { postToHost, setBoardConversation } from './vscode';
@@ -86,7 +88,8 @@ function BoardInner({ state }: BoardInnerProps): JSX.Element {
 	const [assignee, setAssignee] = useState('');
 	const [filter, setFilter] = useState<'all' | 'active' | 'attention' | 'done'>('all');
 	const [chatOpen, setChatOpen] = useState(false);
-	useEffect(() => { setQuery(''); setAssignee(''); setFilter('all'); }, [state.conversationId]);
+	const [dependenciesOpen, setDependenciesOpen] = useState(false);
+	useEffect(() => { setQuery(''); setAssignee(''); setFilter('all'); setDependenciesOpen(false); }, [state.conversationId]);
 	const personasById = useMemo(() => {
 		const map = new Map<string, PersonaView>();
 		for (const p of state.personas) {
@@ -139,6 +142,7 @@ function BoardInner({ state }: BoardInnerProps): JSX.Element {
 				<div className="board-toolbar">
 					<label className="task-search"><span aria-hidden="true">⌕</span><input type="search" aria-label="Search tasks" placeholder="Search tasks, files, or agents…" value={query} onChange={event => setQuery(event.target.value)} /></label>
 					<select aria-label="Filter by agent" value={assignee} onChange={event => setAssignee(event.target.value)}><option value="">All Agents</option>{assignees.map(id => <option key={id} value={id}>@{id}</option>)}</select>
+					<button type="button" className="secondary-button" aria-pressed={dependenciesOpen} onClick={() => setDependenciesOpen(!dependenciesOpen)}>{dependenciesOpen ? 'Show Board' : 'Dependencies'}</button>
 					<span className="results-count" role="status">{visibleTasks.length} {visibleTasks.length === 1 ? 'task' : 'tasks'}</span>
 					{isFiltered && <button type="button" className="quiet-button" onClick={() => { setQuery(''); setAssignee(''); setFilter('all'); }}>Clear Filters</button>}
 				</div>
@@ -154,7 +158,8 @@ function BoardInner({ state }: BoardInnerProps): JSX.Element {
 						<div className="empty-workflow"><span>01 · Plan</span><span>02 · Build</span><span>03 · Review</span></div>
 					</section>
 				)}
-				{hasTasks && (
+				{hasTasks && dependenciesOpen && <DependencyEditor key={state.conversationId} tasks={tasks} executionPlanId={state.snapshot?.executionPlanId} />}
+				{hasTasks && !dependenciesOpen && (
 					<section className="columns" aria-label="Task board" tabIndex={0}>
 						{visibleTasks.length === 0 && <div className="column-empty">No tasks match your filters.</div>}
 						{COLUMNS.filter(col => !isFiltered || buckets[col.state].length > 0).map(col => (
@@ -164,6 +169,7 @@ function BoardInner({ state }: BoardInnerProps): JSX.Element {
 								state={col.state}
 								tasks={buckets[col.state]}
 								personasById={personasById}
+								assignment={state.snapshot?.executionPlanId && state.conversationId && tasks.every(task => ['backlog', 'ready'].includes(task.state)) ? { conversationId: state.conversationId, expectedRevision: boardEditRevision(state.snapshot), personas: state.personas } : undefined}
 							/>
 						))}
 					</section>

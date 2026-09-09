@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import * as vscode from 'vscode';
+import { integrationProfileValue } from '../integrations/SystemIntegrations';
 
 /**
  * Returns a WorkspaceConfiguration-shaped wrapper for `section` that:
@@ -17,6 +18,8 @@ export function globalScopedConfig(section: string): vscode.WorkspaceConfigurati
 	const fresh = () => vscode.workspace.getConfiguration(section);
 	const wrapper = {
 		get: <T>(key: string, defaultValue?: T) => {
+			const profile = integrationProfileValue(`${section}.${key}`);
+			if (profile !== undefined) { return profile as T; }
 			const inner = fresh();
 			return defaultValue === undefined ? inner.get<T>(key) : inner.get<T>(key, defaultValue);
 		},
@@ -40,6 +43,8 @@ export function liveConfig(section: string): vscode.WorkspaceConfiguration {
 	const fresh = () => vscode.workspace.getConfiguration(section);
 	const wrapper = {
 		get: <T>(key: string, defaultValue?: T) => {
+			const profile = integrationProfileValue(`${section}.${key}`);
+			if (profile !== undefined) { return profile as T; }
 			const inner = fresh();
 			return defaultValue === undefined ? inner.get<T>(key) : inner.get<T>(key, defaultValue);
 		},

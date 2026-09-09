@@ -18,6 +18,7 @@ import {
 import { AgentEvent } from './agentEvents';
 import { BaseAgent, AgentContext, truncateForTaskTitle } from './BaseAgent';
 import { loadAgentPrompt } from './promptLoader';
+import { planEditRevision } from './planEditing';
 import {
 	AgentHandle,
 	ExecutionPlan,
@@ -73,6 +74,44 @@ export class OrchestratorAgent extends BaseAgent {
 		return this.activePlan;
 	}
 
+	/** Update an idle, unapproved plan only after a host preview of the same complete task set. */
+	updatePlanDependencies(conversationId: string, taskId: string, dependencies: readonly string[], expectedTaskIds: readonly string[]): void {
+		const plan = this.activePlan;
+		if (!plan || plan.conversationId !== conversationId || plan.approved || plan.subtasks.some(task => task.status !== 'pending')) { throw new Error('Only the owning conversation’s pending, unapproved plan can be edited.'); }
+		if (JSON.stringify(plan.subtasks.map(task => task.id).sort()) !== JSON.stringify([...expectedTaskIds].sort())) { throw new Error('Execution plan changed. Refresh the board before editing dependencies.'); }
+		const target = plan.subtasks.find(task => task.id === taskId); if (!target) { throw new Error('Task is not in the active execution plan.'); }
+		const graph = new Map(plan.subtasks.map(task => [task.id, task.id === taskId ? [...dependencies] : task.dependencies]));
+		const visiting = new Set<string>(); const visited = new Set<string>();
+		const visit = (id: string): void => {
+			if (visiting.has(id)) { throw new Error('Dependency edits would create a cycle.'); } if (visited.has(id)) { return; }
+			const links = graph.get(id); if (!links || new Set(links).size !== links.length) { throw new Error('Invalid or missing dependency.'); }
+			visiting.add(id); for (const dependency of links) { visit(dependency); } visiting.delete(id); visited.add(id);
+		};
+		for (const id of graph.keys()) { visit(id); }
+		target.dependencies = [...dependencies];
+	}
+
+	/** Commit a Board assignment only against the same idle plan and complete task revision. */
+	reassignPlanSubtask(conversationId: string, planId: string, taskId: string, newAssignee: string, expectedRevision: string): void {
+		const plan = this.activePlan;
+		if (!plan || plan.conversationId !== conversationId || plan.approved || plan.subtasks.some(task => task.status !== 'pending')) { throw new Error('Only the owning conversation’s pending, unapproved plan can be edited.'); }
+		if (plan.id !== planId || planEditRevision(plan.id, plan.subtasks) !== expectedRevision) { throw new Error('Execution plan changed. Refresh the board before reassigning a task.'); }
+		const specialist = this.specialists.get(newAssignee as AgentHandle);
+		if (!specialist) { throw new Error('The selected specialist is not registered for execution.'); }
+		const target = plan.subtasks.find(task => task.id === taskId); if (!target) { throw new Error('Task is not in the active execution plan.'); }
+		if (target.assignee === specialist.handle) { return; }
+		// Move the existing declaration without changing its files or access type.
+		// A read-only task remains read-only when assigned to a different specialist.
+		const matchingFiles = (entry: ScopeEntry) => JSON.stringify([...entry.files].sort()) === JSON.stringify([...target.scopeFiles].sort());
+		const identified = plan.scopeDeclaration.entries.filter(entry => entry.subtaskId === target.id);
+		const candidates = identified.length ? identified : plan.scopeDeclaration.entries.filter(entry => entry.subtaskId === undefined && entry.agent === target.assignee && matchingFiles(entry));
+		if (identified.length > 1 || (target.scopeFiles.length && candidates.length !== 1)) { throw new Error('Task scope no longer has an unambiguous execution declaration. Refresh the plan before reassigning it.'); }
+		const scope = candidates.length === 1 ? candidates[0] : undefined;
+		if (scope && (scope.agent !== target.assignee || !matchingFiles(scope))) { throw new Error('Task scope no longer matches its execution declaration. Refresh the plan before reassigning it.'); }
+		if (scope) { scope.subtaskId = target.id; scope.agent = specialist.handle; }
+		target.assignee = specialist.handle;
+	}
+
 	protected getRoleDescription(): string {
 		// H10 — base prompt loaded from `prompts/anton-orchestrator.prompt.md`
 		// with the live specialist roster substituted into `{{SPECIALISTS}}`
@@ -94,6 +133,21 @@ export class OrchestratorAgent extends BaseAgent {
 		token: CancellationLike,
 		structuredEmit?: (event: AgentEvent) => void,
 	): Promise<void> {
+		const externalCancellation = token;
+		const controller = new AbortController();
+		const cancel = token.onCancellationRequested(() => controller.abort());
+		if (token.isCancellationRequested) { controller.abort(); }
+		const duration = request.maxRuntimeMs ?? (request.command === 'approve' ? this.activePlan?.maxRuntimeMs : undefined) ?? this.config.perTurnTimeoutMs ?? 300_000;
+		const runtimeError = new Error('Orchestrator runtime budget reached');
+		let runtimeExpired = false;
+		const deadline = setTimeout(() => {
+			if (!controller.signal.aborted) {
+				runtimeExpired = true;
+				controller.abort(runtimeError);
+			}
+		}, Number.isFinite(duration) ? Math.max(1, Math.min(3_600_000, duration)) : 300_000);
+		const boundedToken: CancellationLike = { get isCancellationRequested() { return controller.signal.aborted; }, onCancellationRequested: listener => { controller.signal.addEventListener('abort', listener); return { dispose: () => controller.signal.removeEventListener('abort', listener) }; } };
+		token = boundedToken; request = { ...request, signal: controller.signal };
 		const task = this.agentManager.createTask('Orchestrator', truncateForTaskTitle(request.prompt));
 		this.agentManager.startTask(task.id);
 
@@ -102,6 +156,11 @@ export class OrchestratorAgent extends BaseAgent {
 		const personalityEnabled = this.configStore ? isPersonalityEnabled(this.configStore) : true;
 
 		try {
+			if (externalCancellation.isCancellationRequested) { throw new Error('Cancelled'); }
+			if ((request.command === 'approve' || request.command === 'reject') && this.activePlan
+				&& request.conversationId !== undefined && this.activePlan.conversationId !== request.conversationId) {
+				throw new Error('This plan belongs to another conversation. Open its conversation to approve or reject it.');
+			}
 			// Handle slash commands
 			if (request.command === 'plan') {
 				await this.handlePlanCommand(request, stream, task.id, token, personalityEnabled, structuredEmit);
@@ -124,10 +183,21 @@ export class OrchestratorAgent extends BaseAgent {
 				await this.handlePlanCommand(request, stream, task.id, token, personalityEnabled, structuredEmit);
 			}
 
+			// Handlers may return normally after observing the bounded token.
+			// A deadline must still terminate the turn as a failure.
+			if (runtimeExpired) { throw runtimeError; }
+			if (externalCancellation.isCancellationRequested) { throw new Error('Cancelled'); }
 			this.agentManager.completeTask(task.id);
 		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
+			const message = runtimeExpired ? runtimeError.message : err instanceof Error ? err.message : String(err);
 			this.agentManager.failTask(task.id, message);
+			if (externalCancellation.isCancellationRequested && !runtimeExpired) { return; }
+			if (structuredEmit) {
+				// The host owns presentation and persistence; also streaming the
+				// error as Markdown would display the same failure twice.
+				structuredEmit({ type: 'error', message });
+				return;
+			}
 			stream.markdown(`\n\n**Error:** ${message}`);
 			// Apocalyptic quote with a Gilfoyle preference -- the catch block is
 			// the closest thing this agent has to a Son-of-Anton-goes-rogue
@@ -137,7 +207,7 @@ export class OrchestratorAgent extends BaseAgent {
 				preferredCharacters: ['Gilfoyle'],
 				fallbackPicker: () => getApocalypticQuote(),
 			});
-		}
+		} finally { clearTimeout(deadline); cancel.dispose(); }
 	}
 
 	/**
@@ -158,7 +228,7 @@ export class OrchestratorAgent extends BaseAgent {
 			return;
 		}
 
-		const graphContext = await this.gatherGraphContext(taskId, request.prompt);
+		const graphContext = await this.gatherGraphContext(taskId, request.prompt, request.signal);
 
 		if (token.isCancellationRequested) {
 			stream.markdown('\n**Cancelled.**\n');
@@ -188,6 +258,8 @@ export class OrchestratorAgent extends BaseAgent {
 			planModel,
 			systemPrompt,
 			planPrompt,
+			undefined,
+			{ images: request.images, signal: request.signal },
 		);
 
 		if (token.isCancellationRequested) {
@@ -201,12 +273,18 @@ export class OrchestratorAgent extends BaseAgent {
 		// dispatched specialists as `orchestratorModelHint`.
 		plan.orchestratorModel = request.modelOverride;
 		plan.workspaceContextSnapshot = request.workspaceContextSnapshot;
+		plan.images = request.images;
+		plan.maxToolCalls = request.maxToolCalls;
+		plan.maxRuntimeMs = request.maxRuntimeMs;
+		plan.conversationId = request.conversationId;
 		this.activePlan = plan;
 
 		structuredEmit?.({
 			type: 'plan-proposed',
 			plan: {
+				id: plan.id,
 				subtasks: plan.subtasks.map(subtask => ({
+					id: subtask.id,
 					instruction: subtask.instruction,
 					assignee: subtask.assignee,
 					scopeFiles: subtask.scopeFiles,
@@ -292,14 +370,8 @@ export class OrchestratorAgent extends BaseAgent {
 		const onToken = (token: string): void => {
 			stream.markdown(token);
 		};
-		try {
-			await this.callLlm(taskId, turnModel, systemPrompt, request.prompt, onToken);
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			if (!token.isCancellationRequested) {
-				stream.markdown(`\n\n**Error:** ${message}\n`);
-			}
-		}
+		if (token.isCancellationRequested) { return; }
+		await this.callLlm(taskId, turnModel, systemPrompt, request.prompt, onToken, { images: request.images, signal: request.signal });
 	}
 
 	private async handleApproveCommand(
@@ -478,7 +550,7 @@ export class OrchestratorAgent extends BaseAgent {
 				// `.then`/`.catch` and the `inFlightDoneResolvers` queue so
 				// the outer loop can re-evaluate dependencies as soon as any
 				// subtask resolves.
-				this.executeSubtask(subtask, taskId, stream, structuredEmit, token)
+				this.executeSubtask(subtask, plan, taskId, stream, structuredEmit, token)
 					.then(result => {
 						results.set(subtask.id, result);
 						if (result.success) {
@@ -568,7 +640,7 @@ export class OrchestratorAgent extends BaseAgent {
 		const allChanges = [...results.values()].flatMap(r => r.changes);
 		const successCount = [...results.values()].filter(r => r.success).length;
 
-		stream.markdown(`- **${successCount}/${results.size}** subtasks completed successfully\n`);
+		stream.markdown(`- **${successCount}/${plan.subtasks.length}** subtasks completed successfully\n`);
 		stream.markdown(`- **${allChanges.length}** file changes proposed\n`);
 
 		for (const change of allChanges) {
@@ -580,7 +652,7 @@ export class OrchestratorAgent extends BaseAgent {
 		// "anything failed" rather than "everything failed" as the threshold,
 		// because partial-failure is still the moment that warrants gallows
 		// humour.
-		const allSucceeded = results.size > 0 && successCount === results.size;
+		const allSucceeded = successCount === plan.subtasks.length;
 		if (allSucceeded) {
 			this.appendQuote(stream, personalityEnabled, {
 				tone: 'witty',
@@ -594,7 +666,10 @@ export class OrchestratorAgent extends BaseAgent {
 			});
 		}
 
-		this.activePlan = undefined;
+		if (this.activePlan === plan) { this.activePlan = undefined; }
+		if (!allSucceeded && !token.isCancellationRequested) {
+			throw new Error(`Plan execution failed: ${plan.subtasks.length - successCount} of ${plan.subtasks.length} subtasks failed or were blocked.`);
+		}
 	}
 
 	/**
@@ -687,6 +762,7 @@ export class OrchestratorAgent extends BaseAgent {
 	 */
 	private async executeSubtask(
 		subtask: Subtask,
+		plan: ExecutionPlan,
 		parentTaskId: string,
 		stream: ChatStreamLike,
 		structuredEmit?: (event: AgentEvent) => void,
@@ -712,9 +788,10 @@ export class OrchestratorAgent extends BaseAgent {
 			// Build graph context for the subtask's scope
 			let graphContext = '';
 			for (const file of subtask.scopeFiles) {
-				const summary = await this.queryFileGraph(parentTaskId, file);
+				const summary = await this.queryFileGraph(parentTaskId, file, controller.signal);
 				graphContext += `### ${file}\n${summary}\n\n`;
 			}
+			controller.signal.throwIfAborted();
 
 			// `onToken` is omitted when no structured channel is wired (native chat
 			// participant flow), keeping the cheaper non-streaming LLM path.
@@ -731,8 +808,12 @@ export class OrchestratorAgent extends BaseAgent {
 				onToken: structuredEmit
 					? (token) => structuredEmit({ type: 'subtask-token', subtaskId: subtask.id, token })
 					: undefined,
-				orchestratorModelHint: this.activePlan?.orchestratorModel,
-				workspaceContextSnapshot: this.activePlan?.workspaceContextSnapshot,
+				orchestratorModelHint: plan.orchestratorModel,
+				workspaceContextSnapshot: plan.workspaceContextSnapshot,
+				images: plan.images,
+				conversationId: plan.conversationId,
+				maxToolCalls: plan.maxToolCalls,
+				maxRuntimeMs: plan.maxRuntimeMs,
 			};
 
 			// Per-turn timeout (H9). Race the specialist's execute() against a
@@ -741,7 +822,8 @@ export class OrchestratorAgent extends BaseAgent {
 			// by re-running. The losing branch is fenced with a `settled` flag
 			// so a late-resolving execute() can't smuggle a stale result back
 			// into the orchestrator.
-			const perTurnTimeoutMs = this.config.perTurnTimeoutMs ?? 5 * 60 * 1000;
+			const requestedTimeout = plan.maxRuntimeMs ?? this.config.perTurnTimeoutMs ?? 5 * 60 * 1000;
+			const perTurnTimeoutMs = Number.isFinite(requestedTimeout) ? Math.max(1, Math.min(3_600_000, requestedTimeout)) : 300_000;
 
 			// Execute with retry loop
 			let result: SubtaskResult | undefined;
@@ -798,6 +880,7 @@ export class OrchestratorAgent extends BaseAgent {
 				controller.signal.throwIfAborted();
 				if (this.reviewAgent && result.success) {
 					const reviewResult = await this.reviewAgent.execute({
+						...context,
 						instruction: `Review changes from @${subtask.assignee}: ${subtask.instruction}`,
 						signal: controller.signal,
 						scopeFiles: result.changes.map(c => c.filePath),
@@ -932,7 +1015,7 @@ export class OrchestratorAgent extends BaseAgent {
 	/**
 	 * Gather graph context for a request by querying the MCP code graph.
 	 */
-	private async gatherGraphContext(taskId: string, request: string): Promise<string> {
+	private async gatherGraphContext(taskId: string, request: string, signal?: AbortSignal): Promise<string> {
 		const sections: string[] = [];
 		const fallback = '## Relevant Files\n(Code graph not available)';
 
@@ -956,10 +1039,12 @@ export class OrchestratorAgent extends BaseAgent {
 				'code-graph',
 				'semantic_search',
 				{ query: request, limit: 5, maxResults: 5, agentRole: this.config.handle },
+				signal,
 			);
 			const text = this.mcpContentOrEmpty(searchResult);
 			sections.push(text.length > 0 ? '## Relevant Files\n' + text : fallback);
 		} catch {
+			signal?.throwIfAborted();
 			sections.push(fallback);
 		}
 
@@ -995,6 +1080,7 @@ export class OrchestratorAgent extends BaseAgent {
 
 						// Build scope declaration
 						scopeEntries.push({
+							subtaskId: subtask.id,
 							agent: subtask.assignee,
 							files: subtask.scopeFiles,
 							accessType: subtask.assignee === 'anton-security' ? 'read' : 'write',

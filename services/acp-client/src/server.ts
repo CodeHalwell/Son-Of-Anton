@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import http from 'node:http';
-import { object } from '../_shared/acp/dist/protocol';
+import { object } from '../_shared/acp/dist/acp/protocol';
 import { enforceHttpAuth } from '../_shared/auth/dist/index';
 import { ACPClientImpl } from './client';
 import { ACPDispatcher, type TaskAssignment } from './dispatcher';

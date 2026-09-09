@@ -64,7 +64,7 @@ export interface AgentToolDescriptor {
 export interface SessionConfig {
 	task?: string;
 	cwd?: string;
-	mcpServers?: import('../_shared/acp/dist/protocol').AcpMcpServer[];
+	mcpServers?: import('../_shared/acp/dist/acp/protocol').AcpMcpServer[];
 	requestPermissions?: boolean;
 	context?: SessionContext;
 	tools?: string[];

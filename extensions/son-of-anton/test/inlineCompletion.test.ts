@@ -6,7 +6,7 @@ import { strict as assert } from 'node:assert';
 import { createRequire } from 'node:module';
 import type * as VsCode from 'vscode';
 import type { CompletionProvider } from '../src/inline/CompletionProvider';
-const requireFromTest = createRequire(process.cwd() + '/test/inlineCompletion.test.ts');
+const requireFromTest = createRequire(import.meta.url);
 const vscode = requireFromTest('vscode');
 
 interface Fixture {
@@ -27,8 +27,11 @@ async function withCompletions(debounceMs: number, run: (fixture: Fixture) => Pr
 	vscode.InlineCompletionItem = class InlineCompletionItem { insertText: string; constructor(text: string) { this.insertText = text; } };
 	vscode.workspace.getConfiguration = () => ({ get: (key: string, fallback: object) => ({ 'completions.debounceMs': debounceMs, 'completions.model': 'gpt-5-mini' })[key] ?? fallback });
 	const listeners = new Set<() => void>();
-	const token = { isCancellationRequested: false, onCancellationRequested: (listener: () => void) => { listeners.add(listener); return { dispose: () => listeners.delete(listener) }; } };
-	const document = { uri: { scheme: 'file' }, fileName: 'test.ts', languageId: 'typescript', version: 1, isClosed: false, lineCount: 1, lineAt: () => ({ text: 'if (ready) {', range: { end: { line: 0, character: 12 } } }), getText: () => 'if (ready) {' } as VsCode.TextDocument;
+	const token: VsCode.CancellationToken = { isCancellationRequested: false, onCancellationRequested: listener => {
+		const notify = () => listener(undefined); listeners.add(notify);
+		return { dispose: () => { listeners.delete(notify); } };
+	} };
+	const document = { uri: { scheme: 'file' }, fileName: 'test.ts', languageId: 'typescript', version: 1, isClosed: false, lineCount: 1, lineAt: () => ({ text: 'if (ready) {', range: { end: { line: 0, character: 12 } } }), getText: () => 'if (ready) {' } as unknown as VsCode.TextDocument;
 	let started!: () => void; let release!: () => void;
 	const ready = new Promise<void>(resolve => { started = resolve; });
 	const pending = new Promise<void>(resolve => { release = resolve; });
@@ -36,7 +39,7 @@ async function withCompletions(debounceMs: number, run: (fixture: Fixture) => Pr
 	const { CompletionProvider } = requireFromTest('../src/inline/CompletionProvider');
 	const provider: CompletionProvider = new CompletionProvider({ request: async (request: typeof requests[number]) => { requests.push(request); started(); await pending; return '\n\treturn true;\n'; } });
 	try {
-		await run({ provider, document, requests, ready, release, cancel: () => { token.isCancellationRequested = true; for (const listener of listeners) listener(); }, complete: () => provider.provideInlineCompletionItems(document, { line: 0, character: 12 } as VsCode.Position, {} as VsCode.InlineCompletionContext, token) });
+		await run({ provider, document, requests, ready, release, cancel: () => { Object.assign(token, { isCancellationRequested: true }); for (const listener of listeners) listener(); }, complete: () => provider.provideInlineCompletionItems(document, { line: 0, character: 12 } as VsCode.Position, {} as VsCode.InlineCompletionContext, token) });
 		assert.equal(listeners.size, 0, 'Every completion releases its cancellation listener');
 	} finally {
 		provider.dispose();

@@ -24,6 +24,8 @@
  * usage object.
  */
 export interface SpendSample {
+	readonly accounting?: 'estimated' | 'reported' | 'unavailable';
+	readonly route?: 'native' | 'acp';
 	readonly inputTokens?: number;
 	readonly outputTokens?: number;
 	/** Cache-read tokens. Counted towards the token cap alongside input tokens. */
@@ -34,6 +36,10 @@ export interface SpendSample {
 
 /** Point-in-time view of a session's accumulated spend. */
 export interface SpendSnapshot {
+	/** Absent means every recorded request had normal accounting; never infer that unmetered calls were free. */
+	readonly unmeteredRequests?: number;
+	readonly estimatedCostUsd?: number;
+	readonly reportedCostUsd?: number;
 	readonly inputTokens: number;
 	readonly outputTokens: number;
 	readonly cachedTokens: number;
@@ -106,6 +112,9 @@ export class SessionBudget implements ISpendGuard {
 	private cachedTokens = 0;
 	private costUsd = 0;
 	private requestCount = 0;
+	private unmeteredRequests = 0;
+	private estimatedCostUsd = 0;
+	private reportedCostUsd = 0;
 	private readonly limits: SessionBudgetLimits;
 
 	constructor(limits: SessionBudgetLimits) {
@@ -137,6 +146,9 @@ export class SessionBudget implements ISpendGuard {
 		this.cachedTokens += clamp(sample.cachedTokens);
 		this.costUsd += clamp(sample.costUsd);
 		this.requestCount += 1;
+		if (sample.accounting === 'unavailable') { this.unmeteredRequests++; }
+		if (sample.accounting === 'estimated') { this.estimatedCostUsd += clamp(sample.costUsd); }
+		if (sample.accounting === 'reported') { this.reportedCostUsd += clamp(sample.costUsd); }
 	}
 
 	snapshot(): SpendSnapshot {
@@ -147,6 +159,9 @@ export class SessionBudget implements ISpendGuard {
 			totalTokens: this.inputTokens + this.outputTokens + this.cachedTokens,
 			costUsd: this.costUsd,
 			requestCount: this.requestCount,
+			...(this.unmeteredRequests ? { unmeteredRequests: this.unmeteredRequests } : {}),
+			...(this.estimatedCostUsd ? { estimatedCostUsd: this.estimatedCostUsd } : {}),
+			...(this.reportedCostUsd ? { reportedCostUsd: this.reportedCostUsd } : {}),
 		};
 	}
 

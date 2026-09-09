@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import * as vscode from 'vscode';
+import { integrationProfileValue } from '../integrations/SystemIntegrations';
 import { spawn } from 'node:child_process';
 import { ToolExecutionContext } from 'son-of-anton-core/tools/types';
 import type { HookRunner } from 'son-of-anton-core/persistence/HookRunner';
@@ -158,7 +159,7 @@ export function createWorkspaceToolContext(options?: CreateWorkspaceToolContextO
 			// VS Code config API picks up live changes without an extension
 			// reload, and crucially is not influenced by tool input — the LLM
 			// cannot escalate its own privileges through this channel.
-			return vscode.workspace.getConfiguration().get<T>(key);
+			return integrationProfileValue(key) as T | undefined ?? vscode.workspace.getConfiguration().get<T>(key);
 		},
 		readFile: async (relPath: string) => {
 			const uri = resolveSafe(relPath);

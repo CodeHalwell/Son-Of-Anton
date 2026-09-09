@@ -16,11 +16,12 @@
 
 import { useCallback, useState } from 'react';
 import type { DragEvent } from 'react';
-import { KanbanCard } from './KanbanCard';
+import { KanbanCard, type AssignmentView } from './KanbanCard';
 import { postToHost } from './vscode';
 import type { BoardTaskView, PersonaView, SubtaskState } from './protocol';
 
 interface KanbanColumnProps {
+	readonly assignment?: AssignmentView;
 	readonly title: string;
 	readonly state: SubtaskState;
 	readonly tasks: ReadonlyArray<BoardTaskView>;
@@ -33,7 +34,7 @@ interface DropPayload {
 	readonly assignee: string;
 }
 
-export function KanbanColumn({ title, state, tasks, personasById }: KanbanColumnProps): JSX.Element {
+export function KanbanColumn({ title, state, tasks, personasById, assignment }: KanbanColumnProps): JSX.Element {
 	const [dragOver, setDragOver] = useState(false);
 	const [visibleCount, setVisibleCount] = useState(50);
 
@@ -104,7 +105,7 @@ export function KanbanColumn({ title, state, tasks, personasById }: KanbanColumn
 			<div className="column-body">
 				{tasks.length === 0 && <div className="column-empty">{state === 'failed' ? 'Nothing needs attention' : state === 'done' ? 'Completed work lands here' : 'No tasks here'}</div>}
 				{tasks.slice(0, visibleCount).map(task => (
-					<KanbanCard key={task.id} task={task} persona={personasById.get(task.assignee)} />
+					<KanbanCard key={task.id} task={task} persona={personasById.get(task.assignee)} assignment={assignment} />
 				))}
 				{tasks.length > visibleCount && <button type="button" className="quiet-button" onClick={() => setVisibleCount(count => count + 50)}>Show More ({tasks.length - visibleCount} remaining)</button>}
 			</div>

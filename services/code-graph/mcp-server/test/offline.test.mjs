@@ -121,3 +121,25 @@ test('structural-only and missing-native installs advertise accurate capabilitie
 	assert.deepEqual((await broken.client.listTools()).tools.map(tool => tool.name), ['codegraph_status']);
 	await assert.rejects(broken.call('symbol_lookup', { query: 'settings' }), /could not start/);
 });
+
+test('installed native impact analysis retains both indexed routes through a shared dependent', { timeout: 30000 }, async t => {
+	const app = await fixture(t);
+	const sources = {
+		'impact-target.ts': 'export function changedOperation() { return 1; }\n',
+		'impact-a.ts': 'import { changedOperation } from "./impact-target"; export function dependentA() { return changedOperation(); }\n',
+		'impact-b.ts': 'import { changedOperation } from "./impact-target"; export function dependentB() { return changedOperation(); }\n',
+		'impact-shared.test.ts': 'import { dependentA } from "./impact-a"; import { dependentB } from "./impact-b"; export function checkBoth() { return dependentA() + dependentB(); }\n',
+	};
+	for (const [name, source] of Object.entries(sources)) { await fs.writeFile(path.join(app.workspace, name), source); }
+	const live = await connect(app);
+	await live.until(async () => (await live.call('codegraph_status')).state === 'ready');
+	const target = path.join(app.workspace, 'impact-target.ts');
+	const detailed = await live.call('impact_analysis', { path: target, details: true, depth: 2 });
+	assert.deepEqual(detailed.paths.map(chain => chain.map(filename => path.basename(filename))), [
+		['impact-a.ts', 'impact-target.ts'], ['impact-b.ts', 'impact-target.ts'],
+		['impact-shared.test.ts', 'impact-a.ts', 'impact-target.ts'], ['impact-shared.test.ts', 'impact-b.ts', 'impact-target.ts'],
+	]);
+	assert.deepEqual([detailed.fileBased, detailed.truncated, detailed.unsavedDocuments.documents], [true, false, []]);
+	const flat = await live.call('impact_analysis', { path: target, details: false, depth: 2 });
+	assert.deepEqual(flat.map(filename => path.basename(filename)).sort(), ['impact-a.ts', 'impact-b.ts', 'impact-shared.test.ts']);
+});

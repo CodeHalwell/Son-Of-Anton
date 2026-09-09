@@ -52,7 +52,8 @@ function makeBroker(statuses: ProviderStatus[] = []): CredentialBroker {
 const ENV_KEYS = [
 	'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'AZURE_OPENAI_API_KEY', 'FOUNDRY_API_KEY',
 	'AWS_ACCESS_KEY_ID', 'AWS_PROFILE', 'GOOGLE_API_KEY', 'GEMINI_API_KEY',
-	'CEREBRAS_API_KEY', 'TOGETHER_API_KEY', 'FIREWORKS_API_KEY',
+	'CEREBRAS_API_KEY', 'TOGETHER_API_KEY', 'TOGETHERAI_API_KEY', 'FIREWORKS_API_KEY',
+	'LMSTUDIO_API_KEY', 'LM_API_TOKEN',
 ];
 let savedEnv: Record<string, string | undefined>;
 

@@ -46,7 +46,7 @@ export class ReviewAgent extends BaseAgent {
 				systemPrompt,
 				userMessage,
 				context.onToken,
-				{ escalateOnUncertainty: true },
+				{ escalateOnUncertainty: true, images: context.images, signal: context.signal },
 			);
 
 			tokenUsage.naiveInputTokens = context.scopeFiles.length * 5000;

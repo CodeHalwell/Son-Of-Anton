@@ -7,7 +7,7 @@ import { ACPClientImpl } from './client';
 import { AgentRegistry } from './registry/agentRegistry';
 import { createServer } from './server';
 import { requireServiceToken } from '../_shared/auth/dist/index';
-import { AcpRuntime } from '../_shared/acp/dist/AcpRuntime';
+import { AcpRuntime } from '../_shared/acp/dist/acp/AcpRuntime';
 
 async function start(): Promise<void> {
 	const token = requireServiceToken('acp-client');

@@ -65,13 +65,13 @@ async function openSurface(t, surface, width = 1440, initialState, suppliedHtml,
 		html = source.slice(source.indexOf('return /* html */`<!DOCTYPE html>')).split('`')[1];
 		const labelsSource = await readFile(path.join(extension, 'src/chat/chatUiStrings.ts'), 'utf8');
 		const labels = Object.fromEntries([...labelsSource.matchAll(/(\w+): vscode\.l10n\.t\('([^']*)'\)/g)].map(match => [match[1], match[2]]));
-		const values = { conversationId: 'initial-conversation', uiStringsJson: JSON.stringify(labels), 'this.webview.cspSource': 'https://sota.test', nonce: 'ui-fixture', cssUri: 'https://sota.test/chat.css', webviewJsUri: 'https://sota.test/chat-webview.js', defaultModel: 'sonnet', initialTab: 'chat', specialistRolesJson: JSON.stringify(specialists), personasJson: JSON.stringify(PERSONAS), rosterJson: JSON.stringify(getRoster()), slashCommandsJson: '[]', modelMetadataJson: JSON.stringify(MODEL_METADATA) };
+		const values = { conversationId: 'initial-conversation', uiStringsJson: JSON.stringify(labels), 'this.webview.cspSource': 'https://sota.test', nonce: 'ui-fixture', cssUri: 'https://sota.test/chat.css', workflowsJsUri: 'https://sota.test/chat-workflows.js', webviewJsUri: 'https://sota.test/chat-webview.js', defaultModel: 'sonnet', initialTab: 'chat', specialistRolesJson: JSON.stringify(specialists), personasJson: JSON.stringify(PERSONAS), rosterJson: JSON.stringify(getRoster()), slashCommandsJson: '[]', modelMetadataJson: JSON.stringify(MODEL_METADATA) };
 		html = html.replace(/\$\{([^}]+)\}/g, (_, name) => { assert.ok(name in values, name); return values[name]; });
 	} else { html = '<!doctype html><html lang="en"><head><meta charset="utf-8"></head><body><div id="root"></div><script src="https://sota.test/board.js"></script></body></html>'; }
 	await context.route('**/*', async route => {
 		const url = new URL(route.request().url());
 		if (url.origin !== 'https://sota.test') { await route.abort(); return; }
-		const asset = { '/chat.css': 'media/chat.css', '/chat-webview.js': 'media/chat-webview.js', '/board.js': 'dist/board.js', '/council.js': 'media/council.js', '/council.css': 'media/council.css' }[url.pathname];
+		const asset = { '/chat.css': 'media/chat.css', '/chat-webview.js': 'media/chat-webview.js', '/chat-workflows.js': 'dist/chat-workflows.js', '/board.js': 'dist/board.js', '/council.js': 'media/council.js', '/council.css': 'media/council.css' }[url.pathname];
 		await route.fulfill({ status: 200, contentType: asset ? (asset.endsWith('.css') ? 'text/css' : 'text/javascript') : 'text/html', body: asset ? await readFile(path.join(extension, asset)) : html });
 	});
 	await page.goto('https://sota.test/');
@@ -87,11 +87,12 @@ async function panelHtml(relativeFile, exportName, method, args = []) {
 	const compiled = typescript.transpileModule(source, { compilerOptions: { module: typescript.ModuleKind.CommonJS, target: typescript.ScriptTarget.ES2022 } }).outputText;
 	const exports = {};
 	const sourceRequire = createRequire(filename);
-	const localRequire = name => name === 'vscode' ? { l10n: { t: (value, ...args) => value.replace(/\{(\d+)\}/g, (match, index) => args[Number(index)] === undefined ? match : String(args[Number(index)])) } } : name.startsWith('son-of-anton-core/') ? require(path.join(root, 'son-of-anton-core/dist', name.slice('son-of-anton-core/'.length))) : sourceRequire(name);
+	const localRequire = name => name === 'vscode' ? { workspace: {}, l10n: { t: (value, ...args) => value.replace(/\{(\d+)\}/g, (match, index) => args[Number(index)] === undefined ? match : String(args[Number(index)])) } } : name.startsWith('son-of-anton-core/') ? require(path.join(root, 'son-of-anton-core/dist', name.slice('son-of-anton-core/'.length))) : sourceRequire(name);
 	new Function('require', 'exports', compiled)(localRequire, exports);
 	if (!method) { return exports[exportName](...args); }
 	const panel = Object.assign(Object.create(exports[exportName].prototype), { panel: { webview: { cspSource: 'https://sota.test' } } });
-	return panel[method](...args);
+	const result = panel[method](...args);
+	return method === 'update' ? panel.panel.webview.html : result;
 }
 async function post(page, message) { await page.evaluate(data => window.dispatchEvent(new MessageEvent('message', { data, origin: window.origin, source: window.parent })), message); }
 
@@ -374,6 +375,19 @@ test('board: complete lifecycle, filters, keyboard card actions and responsive l
 	await screenshot(page, 'task-board-narrow');
 });
 
+test('board: assignment controls send the displayed plan revision without optimistic changes', async t => {
+	const page = await openSurface(t, 'board');
+	const first = { ...fixture, snapshot: { ...fixture.snapshot, executionPlanId: 'plan-first', tasks: [{ ...fixture.snapshot.tasks[1], id: 'plan-first-subtask-0' }] } };
+	await post(page, first); const selector = page.getByRole('combobox', { name: /Assign task/ }); await selector.waitFor();
+	assert.ok(await selector.locator('option[value="anton-docs"]').count());
+	await selector.selectOption('anton-test'); const sent = await page.evaluate(() => sentMessages.filter(message => message.type === 'reassign').at(-1));
+	assert.deepEqual({ conversationId: sent.conversationId, taskId: sent.taskId, newAssignee: sent.newAssignee, planId: JSON.parse(sent.expectedRevision)[0] }, { conversationId: 'ui-fixture', taskId: 'plan-first-subtask-0', newAssignee: 'anton-test', planId: 'plan-first' });
+	assert.equal(await selector.inputValue(), 'anton-code'); assert.equal(await page.locator('.tile').getAttribute('data-assignee'), 'anton-code');
+	const next = { ...first, snapshot: { ...first.snapshot, tasks: [{ ...first.snapshot.tasks[0], assignee: 'anton-test', scopeFiles: ['changed.ts'] }] } };
+	await post(page, next); await selector.selectOption('anton-docs'); const later = await page.evaluate(() => sentMessages.filter(message => message.type === 'reassign').at(-1)); assert.notEqual(later.expectedRevision, sent.expectedRevision);
+	await post(page, { ...next, snapshot: { ...next.snapshot, executionPlanId: undefined } }); assert.equal(await page.getByRole('combobox', { name: /Assign task/ }).count(), 0);
+});
+
 test('chat controls: code actions execute under the shipped content security policy', async t => {
 	const page = await openSurface(t, 'chat', 420);
 	const code = '// path: src/example.ts\nexport const answer = 42;';
@@ -440,20 +454,37 @@ test('setup wizard: every provider form, help, save feedback, back, cancel and s
 
 test('impact analysis: every filter and keyboard file navigation handle long content', async t => {
 	const nodes = ['direct', 'transitive', 'test', 'documentation'].map((type, index) => ({ id: String(index), label: 'Review ' + type, filePath: '/workspace/' + 'long-folder/'.repeat(12) + type + '.ts', type, depth: index }));
-	const html = await panelHtml('impact/ImpactAnalysisPanel', 'ImpactAnalysisPanel', 'getHtml', [{ target: { name: 'clamp', filePath: '/workspace/example.ts' }, nodes, edges: [], summary: { directCount: 1, transitiveCount: 1, testCount: 1, documentationCount: 1 } }]);
+	const html = await panelHtml('impact/ImpactAnalysisPanel', 'ImpactAnalysisPanel', 'update', [{ target: { name: 'clamp', filePath: '/workspace/example.ts' }, nodes, edges: [], summary: { directCount: 1, transitiveCount: 1, testCount: 1, documentationCount: 1 } }]);
 	const page = await openSurface(t, 'panel', 800, undefined, html);
 	for (const node of nodes) {
 		await page.locator(`[data-filter="${node.type}"]`).click();
 		assert.equal(await page.locator('.node-item').count(), 1);
 		await page.locator('.node-item').focus();
 		await page.keyboard.press('Enter');
-		assert.equal(await page.evaluate(() => sentMessages.at(-1)?.filePath), node.filePath);
+		const navigationId = await page.locator('.node-item').getAttribute('data-navigation-id');
+		assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { command: 'navigateToFile', navigationId });
 	}
 	await page.locator('[data-filter="all"]').click();
 	assert.equal(await page.locator('.node-item').count(), 4);
 	await page.setViewportSize({ width: 360, height: 620 });
 	await assertNoPageOverflow(page);
 	await screenshot(page, 'impact-analysis');
+});
+
+test('impact analysis: same-file callers send distinct identities through keyboard and pointer navigation', async t => {
+	const nodes = [12, 38, undefined].map((line, index) => ({ id: `caller-${index}`, label: `Caller ${index + 1}`, filePath: '/workspace/callers.ts', line, type: 'direct', depth: 1 }));
+	const html = await panelHtml('impact/ImpactAnalysisPanel', 'ImpactAnalysisPanel', 'update', [{ target: { name: 'target', filePath: '/workspace/target.ts' }, nodes, edges: [], summary: { directCount: 3, transitiveCount: 0, testCount: 0, documentationCount: 0 } }]);
+	const page = await openSurface(t, 'panel', 400, undefined, html);
+	const rows = page.locator('.node-item'); const navigationIds = await rows.evaluateAll(items => items.map(item => item.dataset.navigationId));
+	assert.equal(new Set(navigationIds).size, 3); assert.ok(navigationIds.every(id => typeof id === 'string' && id.length > 0));
+	await rows.nth(0).focus(); await page.keyboard.press('Enter');
+	await rows.nth(1).focus(); await page.keyboard.press('Space');
+	await rows.nth(2).click();
+	assert.deepEqual(await page.evaluate(() => sentMessages), navigationIds.map(navigationId => ({ command: 'navigateToFile', navigationId })));
+	await page.locator('[data-filter="test"]').click(); assert.equal(await rows.count(), 0);
+	await page.locator('[data-filter="all"]').click(); await rows.nth(0).click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { command: 'navigateToFile', navigationId: navigationIds[0] });
+	await assertNoPageOverflow(page); await screenshot(page, 'impact-same-file-callers');
 });
 
 test('fleet dashboard: active, failed and completed tasks expose refresh, cancellation and results', async t => {
@@ -540,6 +571,50 @@ test('history: search, date groups, active title, bounded rendering, and keyboar
 	for (const width of [280, 400, 800]) { await page.setViewportSize({ width, height: 900 }); await assertNoPageOverflow(page); }
 });
 
+test('history: debounce typing, flush explicit filters, reject stale results and cancel on close', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	await page.clock.install(); await page.clock.pauseAt(Date.now());
+	await page.evaluate(() => {
+		sentMessages.length = 0;
+		const input = document.getElementById('historySearch');
+		for (const value of ['a', 'au', 'authentication']) { input.value = value; input.dispatchEvent(new Event('input', { bubbles: true })); }
+	});
+	await page.clock.runFor(249);
+	assert.equal(await page.evaluate(() => sentMessages.filter(message => message.type === 'searchHistory').length), 0);
+	await page.clock.runFor(1);
+	const requests = () => page.evaluate(() => sentMessages.filter(message => message.type === 'searchHistory').map(({ query, historyScope, offset }) => ({ query, historyScope, offset })));
+	assert.deepEqual(await requests(), [{ query: 'authentication', historyScope: 'active', offset: 0 }]);
+	await page.evaluate(() => {
+		const input = document.getElementById('historySearch'); input.value = 'latest'; input.dispatchEvent(new Event('input', { bubbles: true }));
+		const view = document.getElementById('historyView'); view.value = 'archived'; view.dispatchEvent(new Event('change', { bubbles: true }));
+	});
+	await page.clock.runFor(300);
+	assert.deepEqual(await requests(), [{ query: 'authentication', historyScope: 'active', offset: 0 }, { query: 'latest', historyScope: 'archived', offset: 0 }]);
+	const conversation = { id: 'matching', title: 'Latest result', updatedAt: Date.now(), messageCount: 1 };
+	await post(page, { type: 'historySnapshot', query: 'latest', historyScope: 'archived', workspaceOnly: false, conversations: [conversation], nextOffset: 50 });
+	await post(page, { type: 'historySnapshot', query: 'authentication', historyScope: 'active', workspaceOnly: false, conversations: [{ ...conversation, title: 'Obsolete result' }] });
+	assert.equal(await page.locator('.history-pane-row-open').count(), 1);
+	assert.match(await page.locator('.history-pane-row-open').textContent(), /Latest result/);
+	await page.evaluate(() => {
+		const input = document.getElementById('historySearch'); input.value = 'next'; input.dispatchEvent(new Event('input', { bubbles: true }));
+		document.getElementById('historyShowMore').click();
+	});
+	assert.deepEqual((await requests()).at(-1), { query: 'next', historyScope: 'archived', offset: 0 });
+	await page.evaluate(() => {
+		const input = document.getElementById('historySearch'); input.value = 'submit'; input.dispatchEvent(new Event('input', { bubbles: true }));
+		input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+	});
+	await page.clock.runFor(300);
+	assert.equal((await requests()).length, 4);
+	assert.equal((await requests()).at(-1).query, 'submit');
+	await page.evaluate(() => {
+		const input = document.getElementById('historySearch'); input.value = 'closed'; input.dispatchEvent(new Event('input', { bubbles: true }));
+		window.dispatchEvent(new Event('pagehide'));
+	});
+	await page.clock.runFor(300);
+	assert.equal((await requests()).length, 4);
+});
+
 test('drafts: separate conversations, restore after reload, and clear only the sent draft', async t => {
 	const page = await openSurface(t, 'chat', 420);
 	await page.locator('#messageInput').fill('Please review my unfinished implementation');
@@ -577,7 +652,7 @@ test('model picker: search by provider, choose with keyboard, escape restores fo
 	await page.keyboard.press('Enter');
 	await page.locator('#modelMenu').waitFor({ state: 'hidden' });
 	assert.equal(await page.locator('#modelChip').evaluate(button => button === document.activeElement), true);
-	assert.deepEqual(await page.evaluate(() => sentMessages.find(message => message.type === 'selectModel')), { type: 'selectModel', conversationId: 'initial-conversation', model: selected });
+	assert.deepEqual(await page.evaluate(() => sentMessages.find(message => message.type === 'selectModel')), { type: 'selectModel', conversationId: 'initial-conversation', model: selected, specialistId: 'anton' });
 	await page.locator('#modelChip').click();
 	await page.getByRole('searchbox', { name: 'Search Models…' }).fill('does-not-exist');
 	await page.locator('#modelSearchEmpty').waitFor({ state: 'visible' });
@@ -1011,4 +1086,627 @@ test('Council task review, cancellation and retry route through the native host'
 	await post(page, { ...fixture, snapshot: { ...fixture.snapshot, tasks: [{ ...fixture.snapshot.tasks[5], state: 'in-progress', id: 'council:fixture', proposalId: 'retained' }] } }); await frames(page);
 	await page.getByRole('button', { name: 'Cancel Task' }).click();
 	assert.deepEqual((await page.evaluate(() => window.sentMessages)).filter(message => ['review-proposal', 'rerun', 'cancel-task'].includes(message.type)), [{ type: 'review-proposal', taskId: 'council:fixture', conversationId: fixture.conversationId }, { type: 'rerun', taskId: 'council:fixture', conversationId: fixture.conversationId }, { type: 'cancel-task', taskId: 'council:fixture', conversationId: fixture.conversationId }]);
+});
+
+test('board dependency planner validates cycles and previews a scoped scheduling change', async t => {
+	const page = await openSurface(t, 'board', 1200);
+	const tasks = [
+		{ ...fixture.snapshot.tasks[1], id: 'foundation', instruction: 'Build foundation', dependencies: [], state: 'ready' },
+		{ ...fixture.snapshot.tasks[1], id: 'interface', instruction: 'Build interface', dependencies: ['foundation'], state: 'backlog' },
+		{ ...fixture.snapshot.tasks[1], id: 'tests', instruction: 'Add tests', dependencies: ['foundation'], state: 'backlog' },
+	];
+	await post(page, { ...fixture, snapshot: { ...fixture.snapshot, executionPlanId: 'dependency-plan', tasks } }); await frames(page);
+	await page.getByRole('button', { name: 'Dependencies', exact: true }).click();
+	await page.getByRole('checkbox', { name: /Build interface/ }).check();
+	assert.match(await page.getByRole('alert').textContent(), /cycle/);
+	assert.equal(await page.getByRole('button', { name: 'Apply Dependencies' }).isDisabled(), true);
+	await page.getByRole('combobox', { name: 'Task to edit dependencies' }).selectOption('tests');
+	await page.getByRole('checkbox', { name: /Build interface/ }).check();
+	assert.equal(await page.getByRole('heading', { name: 'Wave 3', exact: true }).count(), 1);
+	await page.getByRole('button', { name: 'Apply Dependencies' }).click();
+	const message = await page.evaluate(() => sentMessages.find(message => message.type === 'set-dependencies'));
+	assert.deepEqual({ id: message.taskId, dependencies: message.dependencies, conversation: message.conversationId }, { id: 'tests', dependencies: ['foundation', 'interface'], conversation: fixture.conversationId });
+	assert.ok(message.expectedRevision.includes('foundation'));
+});
+
+test('dependency drafts reset atomically when switching tasks or receiving a new board revision', async t => {
+	const page = await openSurface(t, 'board', 1200);
+	const tasks = [
+		{ ...fixture.snapshot.tasks[1], id: 'foundation', instruction: 'Build foundation', dependencies: [], state: 'ready' },
+		{ ...fixture.snapshot.tasks[1], id: 'interface', instruction: 'Build interface', dependencies: ['foundation'], state: 'backlog' },
+		{ ...fixture.snapshot.tasks[1], id: 'tests', instruction: 'Add tests', dependencies: ['foundation'], state: 'backlog' },
+	];
+	await post(page, { ...fixture, snapshot: { ...fixture.snapshot, executionPlanId: 'dependency-plan', tasks } }); await frames(page);
+	await page.getByRole('button', { name: 'Dependencies', exact: true }).click();
+	const select = page.getByRole('combobox', { name: 'Task to edit dependencies' });
+	const interfaceBox = page.getByRole('checkbox', { name: /Build interface/ });
+	const foundationBox = page.getByRole('checkbox', { name: /Build foundation/ });
+	const apply = page.getByRole('button', { name: 'Apply Dependencies' });
+	for (let iteration = 0; iteration < 6; iteration++) {
+		await select.selectOption('foundation'); await interfaceBox.check();
+		await select.focus(); await select.selectOption('tests');
+		assert.deepEqual({ focused: await select.evaluate(element => element === document.activeElement), foundation: await foundationBox.isChecked(), interface: await interfaceBox.isChecked(), applyDisabled: await apply.isDisabled() }, { focused: true, foundation: true, interface: false, applyDisabled: true });
+		await interfaceBox.check(); await apply.click();
+	}
+	const requests = await page.evaluate(() => sentMessages.filter(message => message.type === 'set-dependencies'));
+	assert.equal(requests.length, 6);
+	assert.ok(requests.every(message => message.taskId === 'tests' && JSON.stringify(message.dependencies) === JSON.stringify(['foundation', 'interface'])));
+	await post(page, { ...fixture, snapshot: { ...fixture.snapshot, executionPlanId: 'dependency-plan', tasks: tasks.map(task => task.id === 'tests' ? { ...task, dependencies: [] } : task) } }); await frames(page);
+	assert.deepEqual({ selected: await select.inputValue(), foundation: await foundationBox.isChecked(), interface: await interfaceBox.isChecked(), applyDisabled: await apply.isDisabled() }, { selected: 'tests', foundation: false, interface: false, applyDisabled: true });
+	await post(page, { ...fixture, snapshot: { ...fixture.snapshot, executionPlanId: 'dependency-plan', tasks: tasks.slice(0, 2) } }); await frames(page);
+	assert.deepEqual({ selected: await select.inputValue(), interface: await interfaceBox.isChecked(), applyDisabled: await apply.isDisabled() }, { selected: 'foundation', interface: false, applyDisabled: true });
+	await post(page, { ...fixture, snapshot: { ...fixture.snapshot, executionPlanId: 'dependency-plan', tasks: tasks.slice(0, 2).map(task => task.id === 'foundation' ? { ...task, state: 'in-progress' } : task) } }); await frames(page);
+	assert.equal(await interfaceBox.isDisabled(), true);
+});
+
+test('dependency editing requires an entirely pending Board with a real execution plan', async t => {
+	const page = await openSurface(t, 'board', 1200);
+	const tasks = [
+		{ ...fixture.snapshot.tasks[1], id: 'pending', instruction: 'Pending work', dependencies: [], state: 'ready' },
+		{ ...fixture.snapshot.tasks[1], id: 'prerequisite', instruction: 'Earlier work', dependencies: [], state: 'ready' },
+	];
+	const snapshot = { ...fixture.snapshot, executionPlanId: 'pending-plan', tasks };
+	await post(page, { ...fixture, snapshot }); await frames(page);
+	await page.getByRole('button', { name: 'Dependencies', exact: true }).click();
+	const checkbox = page.getByRole('checkbox', { name: /Earlier work/ });
+	const apply = page.getByRole('button', { name: 'Apply Dependencies' });
+	await checkbox.check(); assert.equal(await apply.isEnabled(), true);
+	for (const state of ['done', 'failed', 'in-progress', 'review']) {
+		await post(page, { ...fixture, snapshot: { ...snapshot, tasks: [tasks[0], { ...tasks[1], state }] } }); await frames(page);
+		assert.equal(await checkbox.isDisabled(), true, state); assert.equal(await apply.isDisabled(), true, state);
+		assert.equal(await page.getByRole('combobox', { name: 'Task to edit dependencies' }).isEnabled(), true);
+		assert.equal(await page.getByRole('heading', { name: 'Scheduling Preview', exact: true }).isVisible(), true);
+		assert.match(await page.getByRole('status').filter({ hasText: 'pending execution plan' }).textContent(), /preview remains available/);
+	}
+	await post(page, { ...fixture, snapshot: { ...snapshot, executionPlanId: undefined } }); await frames(page);
+	assert.equal(await checkbox.isDisabled(), true); assert.equal(await apply.isDisabled(), true);
+	assert.equal(await page.evaluate(() => sentMessages.some(message => message.type === 'set-dependencies')), false);
+	await post(page, { ...fixture, snapshot }); await frames(page);
+	await checkbox.check(); await apply.click();
+	assert.equal(await page.evaluate(() => sentMessages.filter(message => message.type === 'set-dependencies').length), 1);
+});
+
+test('bounded timeline evicts both ends while preserving response drafts, votes and checkpoints', async t => {
+	const page = await openSurface(t, 'chat', 420);
+	const messages = Array.from({ length: 1000 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `Message ${index}`, timestamp: index + 1, ...(index % 2 ? { responseId: `saved-${index}` } : { request: { text: `Prompt ${index}`, attachments: ['terminal-output'], includeWorkspaceContext: false } }) }));
+	await post(page, { type: 'loadConversation', conversationId: 'windowed', messages }); await frames(page);
+	await post(page, { type: 'checkpointsLoaded', checkpoints: [{ checkpointId: 'older-checkpoint', turnIndex: 0, capturedAt: Date.now(), summary: 'Before first turn' }] });
+	const first = page.locator('.msg[data-conversation-index="0"]');
+	while (await first.count() === 0) {
+		await page.getByRole('button', { name: /Show Earlier Messages/ }).click(); await frames(page);
+		assert.ok(await page.locator('.msg').count() <= 300);
+	}
+	assert.equal(await page.locator('.checkpoint-stripe[data-checkpoint-id="older-checkpoint"]').count(), 1);
+	const response = page.locator('.msg[data-conversation-index="1"]');
+	await response.getByRole('button', { name: 'Mark Response as Helpful', exact: true }).click();
+	await page.getByRole('button', { name: 'Jump to Latest Messages', exact: true }).click(); await frames(page);
+	assert.equal(await first.count(), 0);
+	assert.equal(await page.locator('.msg').first().getAttribute('data-conversation-index'), '700');
+	while (await first.count() === 0) { await page.getByRole('button', { name: /Show Earlier Messages/ }).click(); await frames(page); }
+	assert.equal(await response.getByRole('button', { name: 'Mark Response as Helpful', exact: true }).getAttribute('aria-pressed'), 'true');
+	await response.getByRole('button', { name: 'Reuse Prompt', exact: true }).click();
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Prompt 0');
+	assert.match(await page.locator('#contextChips').innerText(), /Terminal output/);
+	assert.equal(await page.locator('#includeWorkspaceContext').isChecked(), false);
+	await page.locator('.checkpoint-stripe[data-checkpoint-id="older-checkpoint"] button').click();
+	await page.getByRole('menuitem', { name: 'Compare with current', exact: true }).click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'checkpointCompare', checkpointId: 'older-checkpoint' });
+	await page.getByRole('button', { name: /Show Newer Messages/ }).click(); await frames(page);
+	assert.equal(await page.locator('.msg').first().getAttribute('data-conversation-index'), '100');
+	assert.equal(await page.locator('.msg').count(), 300);
+	assert.equal(await page.locator('.msg').evaluateAll(nodes => new Set(nodes.map(node => node.dataset.conversationIndex)).size), 300);
+	await assertNoPageOverflow(page);
+});
+
+test('bounded timeline pins a streaming turn and restores its original Markdown after eviction', async t => {
+	const page = await openSurface(t, 'chat', 420);
+	const messages = Array.from({ length: 800 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `Message ${index}`, timestamp: index + 1 }));
+	await post(page, { type: 'loadConversation', conversationId: 'live-window', messages }); await frames(page);
+	await page.locator('#messageInput').fill('Keep the active response'); await page.locator('#sendBtn').click();
+	await post(page, { type: 'streamToken', token: '## Live result\n\n```ts\nconst answer = 42;' }); await frames(page);
+	const live = page.locator('.msg[data-conversation-index="801"]');
+	await live.evaluate(node => { window.liveTimelineNode = node; });
+	for (let pageNumber = 0; pageNumber < 5; pageNumber++) {
+		await page.getByRole('button', { name: /Show Earlier Messages/ }).click(); await frames(page);
+		assert.ok(await page.locator('.msg').count() <= 300);
+		assert.equal(await live.evaluate(node => node === window.liveTimelineNode), true);
+		assert.equal(await page.locator('.msg[data-conversation-index="800"]').count(), 1);
+	}
+	await post(page, { type: 'streamToken', token: '\n```\n\n**Finished**.' }); await frames(page);
+	assert.equal(await live.locator('pre code').textContent(), 'const answer = 42;');
+	assert.equal(await live.locator('strong').textContent(), 'Finished');
+	await post(page, { type: 'messageComplete', totalTokens: 20 }); await frames(page);
+	assert.equal(await live.count(), 0, 'A completed response leaves the pinned set while reading old messages');
+	await page.getByRole('button', { name: 'Jump to Latest Messages', exact: true }).click(); await frames(page);
+	assert.equal(await live.locator('pre code').textContent(), 'const answer = 42;');
+	assert.equal(await live.locator('strong').textContent(), 'Finished');
+	await live.getByRole('button', { name: 'Reuse Prompt', exact: true }).click();
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Keep the active response');
+	assert.ok(await page.locator('.msg').count() <= 300);
+	await post(page, { type: 'conversationCleared', conversationId: 'clean' }); await frames(page);
+	assert.equal(await page.locator('.msg').count(), 0);
+	assert.equal(await page.locator('.timeline-navigation').count(), 0);
+	await page.locator('#messageInput').fill('New conversation'); await page.locator('#sendBtn').click(); await frames(page);
+	assert.equal(await page.locator('.msg-user').getAttribute('data-conversation-index'), '0');
+});
+
+test('provider discovery searches the complete catalog and distinguishes catalog access from inference verification', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const models = Array.from({ length: 180 }, (_, index) => ({ id: `catalog:fixture:model-${index}`, model: `model-${index}`, label: `Fixture Model ${index}`, chat: true }));
+	await post(page, { type: 'providerCatalog', snapshot: { updatedAt: Date.now(), software: [{ name: 'Fixture CLI', installed: true, auth: 'file-present', configFiles: ['/fixture/config.json'] }], providers: [
+		{ id: 'fixture', name: 'Fixture Cloud', credentialSource: 'environment', catalogStatus: 'available', inferenceStatus: 'not-verified', models },
+		{ id: 'offline', name: 'Local Offline', credentialSource: 'none', catalogStatus: 'unreachable', inferenceStatus: 'not-verified', models: [], error: 'Local service is not running.' },
+	] } });
+	await page.locator('#modelChip').click();
+	assert.equal(await page.locator('[data-model][data-discovered]').count(), 100);
+	await page.locator('#modelSearch').fill('Fixture Model 179');
+	assert.equal(await page.locator('[data-model][data-discovered]:visible').count(), 1);
+	await page.locator('#modelSearch').press('Enter');
+	assert.match(await page.locator('#modelChip').innerText(), /Fixture Model 179/);
+	await page.getByRole('tab', { name: 'Settings tab', exact: true }).click();
+	await page.locator('.provider-discovery summary').first().click();
+	const status = await page.locator('#providerDiscoveryStatus').innerText();
+	assert.match(status, /Fixture Cloud[\s\S]*available[\s\S]*180[\s\S]*not verified/);
+	assert.match(status, /Local Offline[\s\S]*unreachable[\s\S]*Local service is not running/);
+	await page.getByText('Detected Coding Tools', { exact: true }).click();
+	assert.match(await page.locator('#providerDiscoveryStatus').innerText(), /Fixture CLI[\s\S]*Installed/);
+	assert.doesNotMatch(await page.locator('#providerDiscoveryStatus').innerText(), /\/fixture\/config.json/);
+	await assertNoPageOverflow(page); await screenshot(page, 'provider-discovery-sidebar');
+});
+
+test('ACP model selection uses the host-confirmed specialist and model atomically', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const model = { id: 'catalog:acp:fixture%2Fmodel', model: 'model', label: 'ACP fixture model', chat: true };
+	await post(page, { type: 'loadConversation', conversationId: 'acp-selection', lastSpecialist: 'anton-spec', lastModel: 'sonnet', messages: [] });
+	await post(page, { type: 'providerCatalog', snapshot: { updatedAt: Date.now(), software: [], providers: [{ id: 'acp', name: 'ACP', credentialSource: 'adapter', catalogStatus: 'ready', inferenceStatus: 'not-verified', models: [model] }] } });
+	await page.locator('#modelChip').click(); await page.locator('#modelSearch').fill('ACP fixture');
+	await page.locator(`[data-model="${model.id}"]`).click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.findLast(message => message.type === 'selectModel')), { type: 'selectModel', conversationId: 'acp-selection', model: model.id, specialistId: 'anton-spec' });
+	assert.equal(await page.evaluate(() => sentMessages.filter(message => message.type === 'selectSpecialist').length), 0, 'The browser must not guess which specialist can run an adapter');
+	await post(page, { type: 'chatSelection', conversationId: 'acp-selection', requestedModel: model.id, requestedSpecialistId: 'anton-spec', model: model.id, specialistId: 'anton-code' });
+	await page.locator('#messageInput').fill('Use that exact adapter model'); await page.locator('#sendBtn').click();
+	const send = await page.evaluate(() => sentMessages.findLast(message => message.type === 'sendMessage'));
+	assert.equal(send.model, model.id); assert.equal(send.specialistId, 'anton-code');
+});
+
+test('ACP route rejection restores the accepted chips without losing the draft or applying stale acknowledgements', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const model = { id: 'catalog:acp:missing%2Fmodel', model: 'model', label: 'Unavailable ACP fixture', chat: true };
+	await post(page, { type: 'loadConversation', conversationId: 'acp-rejection', lastSpecialist: 'anton-spec', lastModel: 'sonnet', messages: [] });
+	await post(page, { type: 'providerCatalog', snapshot: { updatedAt: Date.now(), software: [], providers: [{ id: 'acp', name: 'ACP', credentialSource: 'adapter', catalogStatus: 'ready', inferenceStatus: 'not-verified', models: [model] }] } });
+	await page.locator('#messageInput').fill('Keep my unsent prompt');
+	await page.locator('#modelChip').click(); await page.locator('#modelSearch').fill('Unavailable ACP'); await page.locator(`[data-model="${model.id}"]`).click();
+	const reply = { type: 'chatSelection', conversationId: 'acp-rejection', requestedModel: model.id, requestedSpecialistId: 'anton-spec', model: 'sonnet', specialistId: 'anton-spec', error: 'Open Anton: Browse ACP Adapters' };
+	await post(page, { ...reply, conversationId: 'other-conversation' });
+	assert.equal(await page.locator('#modelLabel').textContent(), model.label);
+	await post(page, reply);
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Keep my unsent prompt');
+	assert.match(await page.locator('#draftStatus').textContent(), /Browse ACP Adapters/);
+	await post(page, { ...reply, model: model.id, specialistId: 'anton-code', error: undefined });
+	assert.notEqual(await page.locator('#modelLabel').textContent(), model.label, 'An acknowledgement for the superseded selection must be ignored');
+	await page.locator('#sendBtn').click();
+	const send = await page.evaluate(() => sentMessages.findLast(message => message.type === 'sendMessage'));
+	assert.equal(send.model, 'sonnet'); assert.equal(send.specialistId, 'anton-spec'); assert.equal(send.text, 'Keep my unsent prompt');
+});
+
+test('slash ACP selection updates both chips from the pre-command selection', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const model = { id: 'catalog:acp:slash%2Fmodel', model: 'model', label: 'Slash ACP fixture', chat: true };
+	await post(page, { type: 'loadConversation', conversationId: 'acp-slash', lastSpecialist: 'anton-spec', lastModel: 'sonnet', messages: [] });
+	await post(page, { type: 'providerCatalog', snapshot: { updatedAt: Date.now(), software: [], providers: [{ id: 'acp', name: 'ACP', credentialSource: 'adapter', catalogStatus: 'ready', inferenceStatus: 'not-verified', models: [model] }] } });
+	await page.locator('#messageInput').fill(`/model ${model.id}`); await page.locator('#sendBtn').click();
+	await post(page, { type: 'chatSelection', conversationId: 'acp-slash', requestedModel: 'sonnet', requestedSpecialistId: 'anton-spec', model: model.id, specialistId: 'anton-code' });
+	assert.equal(await page.locator('#modelLabel').textContent(), model.label);
+	assert.match(await page.locator('#agentLabel').textContent(), /Anton Code/);
+});
+
+test('provider catalogs isolate special object keys and retire removed picker metadata', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const model = { id: 'catalog:openai:fixture-safe', model: 'fixture-safe', label: 'Safe Catalog Model', chat: true };
+	const snapshot = models => ({ updatedAt: Date.now(), software: [], providers: [{ id: 'openai', name: 'OpenAI', credentialSource: 'environment', catalogStatus: 'ready', inferenceStatus: 'not-verified', models }] });
+	const metadata = JSON.parse('{"__proto__":{"blurb":"Injected prototype"},"constructor":{"blurb":"Injected constructor"},"sonnet":{"blurb":"Injected static metadata"}}');
+	metadata[model.id] = { blurb: 'Catalog metadata', capabilities: [], pricingStatus: 'unknown' };
+	await post(page, { type: 'providerCatalog', snapshot: snapshot([model, ...['__proto__', 'constructor', 'toString'].map(id => ({ ...model, id, label: `Injected ${id}` }))]), metadata });
+	await page.locator('#modelChip').click();
+	assert.equal(await page.locator('[data-model][data-discovered]').count(), 1);
+	await page.locator('#modelSearch').fill('Safe Catalog Model'); await page.locator('#modelSearch').press('Enter');
+	assert.match(await page.locator('#modelChip').innerText(), /Safe Catalog Model/);
+	await post(page, { type: 'loadConversation', conversationId: 'catalog-selected', lastModel: model.id, messages: [] });
+	assert.match(await page.locator('#modelChip').innerText(), /Safe Catalog Model/);
+	for (const state of [{ catalogStatus: 'error' }, { catalogStatus: 'disabled' }, { catalogStatus: 'not-configured', configurationComplete: true }, { catalogStatus: 'ready', truncated: true }]) {
+		const partial = snapshot([]); Object.assign(partial.providers[0], state);
+		await post(page, { type: 'providerCatalog', snapshot: partial });
+		assert.equal(await page.locator('#unavailableModelNotice').isVisible(), false);
+		assert.equal(await page.locator('#sendBtn').isDisabled(), false);
+	}
+	await post(page, { type: 'providerCatalog', snapshot: snapshot([]), metadata: { [model.id]: metadata[model.id] } });
+	await post(page, { type: 'loadConversation', conversationId: 'catalog-removed', lastModel: model.id, messages: [] });
+	assert.match(await page.locator('#modelChip').innerText(), /catalog:openai:fixture-safe/);
+	assert.equal(await page.locator('#unavailableModelNotice').isVisible(), true);
+	await page.locator('#messageInput').fill('Preserve the chosen provider'); await page.locator('#messageInput').press('Enter');
+	assert.equal(await page.locator('#sendBtn').isDisabled(), true);
+	assert.equal(await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').length), 0);
+	await assertNoPageOverflow(page); await screenshot(page, 'unavailable-provider-model-sidebar');
+	await page.locator('#modelChip').click();
+	assert.equal(await page.locator('[data-model][data-discovered]').count(), 0);
+	await page.locator('#modelSearch').fill('');
+	await page.locator('[data-model="sonnet"]').focus();
+	assert.doesNotMatch(await page.locator('.sota-model-tooltip').innerText(), /Injected/);
+	assert.equal(await page.evaluate(() => Object.prototype.blurb), undefined);
+	await page.locator('[data-model="sonnet"]').click();
+	assert.equal(await page.locator('#unavailableModelNotice').isVisible(), false);
+	assert.equal(await page.locator('#sendBtn').isDisabled(), false);
+});
+
+test('confirmed HTTP credential removal retires the selected model while missing evidence and lookup errors stay usable', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const model = { id: 'catalog:openai:credential-model', model: 'credential-model', label: 'Credential-backed model', chat: true };
+	const snapshot = (models, state = {}) => ({ updatedAt: Date.now(), software: [], providers: [{ id: 'openai', name: 'OpenAI', credentialSource: 'setting', catalogStatus: 'ready', inferenceStatus: 'not-tested', models, ...state }] });
+	const metadata = { [model.id]: { capabilities: ['text'], blurb: 'Credential-backed metadata', pricingStatus: 'unknown' } };
+	await post(page, { type: 'providerCatalog', snapshot: snapshot([model]), metadata });
+	await post(page, { type: 'loadConversation', conversationId: 'credential-removal', lastModel: model.id, messages: [] });
+	assert.match(await page.locator('#modelChip').innerText(), /Credential-backed model/);
+	for (const state of [
+		{ credentialSource: 'none', catalogStatus: 'not-configured' },
+		{ credentialSource: 'none', catalogStatus: 'error' },
+		{ credentialSource: 'none', catalogStatus: 'error', credentialStatus: 'missing' },
+		{ credentialSource: 'none', catalogStatus: 'disabled', credentialStatus: 'missing' },
+		{ credentialSource: 'none', catalogStatus: 'not-configured', credentialStatus: 'missing', truncated: true },
+	]) {
+		await post(page, { type: 'providerCatalog', snapshot: snapshot([], state) });
+		assert.deepEqual({ notice: await page.locator('#unavailableModelNotice').isVisible(), disabled: await page.locator('#sendBtn').isDisabled() }, { notice: false, disabled: false });
+	}
+	await post(page, { type: 'providerCatalog', snapshot: snapshot([], { credentialSource: 'none', catalogStatus: 'not-configured', credentialStatus: 'missing' }), metadata });
+	await page.locator('#messageInput').fill('Preserve this draft after sign-out'); await page.locator('#messageInput').press('Enter');
+	assert.deepEqual({ notice: await page.locator('#unavailableModelNotice').isVisible(), send: await page.locator('#sendBtn').isDisabled(), queue: await page.locator('#queueMessageBtn').isDisabled(), redirect: await page.locator('#redirectMessageBtn').isDisabled(), requests: await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').length), draft: await page.locator('#messageInput').inputValue() }, { notice: true, send: true, queue: true, redirect: true, requests: 0, draft: 'Preserve this draft after sign-out' });
+	assert.match(await page.locator('#modelChip').innerText(), /catalog:openai:credential-model/);
+	await page.locator('#modelChip').click();
+	assert.equal(await page.locator('[data-discovered][data-model="catalog:openai:credential-model"]').count(), 0);
+	await page.locator('#modelChip').click();
+	await post(page, { type: 'providerCatalog', snapshot: snapshot([model], { credentialSource: 'broker' }), metadata });
+	assert.deepEqual({ notice: await page.locator('#unavailableModelNotice').isVisible(), send: await page.locator('#sendBtn').isDisabled() }, { notice: false, send: false });
+	assert.match(await page.locator('#modelChip').innerText(), /Credential-backed model/);
+});
+
+test('configured inventories retire removed deployments and Z.AI models without treating invalid settings as an empty inventory', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	for (const provider of ['foundry', 'bedrock', 'zai']) {
+		const model = { id: `catalog:${provider}:deployment`, model: 'deployment', label: `${provider} deployment`, chat: true };
+		const snapshot = (models, state = {}) => ({ updatedAt: Date.now(), software: [], providers: [{ id: provider, name: provider, credentialSource: 'none', catalogStatus: provider === 'zai' ? 'catalog-unavailable' : 'configuration-only', configurationComplete: true, inferenceStatus: 'not-verified', models, ...state }] });
+		await post(page, { type: 'providerCatalog', snapshot: snapshot([model]) });
+		await post(page, { type: 'loadConversation', conversationId: provider, lastModel: model.id, messages: [] });
+		assert.equal(await page.locator('#unavailableModelNotice').isVisible(), false);
+		for (const state of [{ catalogStatus: 'error', configurationComplete: false }, { catalogStatus: 'error', configurationComplete: true }, { catalogStatus: 'disabled' }, { catalogStatus: provider === 'zai' ? 'configuration-only' : 'catalog-unavailable' }, { configurationComplete: false }, { truncated: true }]) {
+			await post(page, { type: 'providerCatalog', snapshot: snapshot([], state) });
+			assert.equal(await page.locator('#sendBtn').isDisabled(), false);
+		}
+		await post(page, { type: 'providerCatalog', snapshot: snapshot([]) });
+		assert.equal(await page.locator('#unavailableModelNotice').isVisible(), true);
+		await post(page, { type: 'providerCatalog', snapshot: snapshot([], { catalogStatus: provider === 'zai' ? 'catalog-unavailable' : 'not-configured' }) });
+		await page.locator('#messageInput').fill('Keep the selected deployment'); await page.locator('#messageInput').press('Enter');
+		assert.deepEqual({ send: await page.locator('#sendBtn').isDisabled(), queue: await page.locator('#queueMessageBtn').isDisabled(), redirect: await page.locator('#redirectMessageBtn').isDisabled(), requests: await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').length) }, { send: true, queue: true, redirect: true, requests: 0 });
+		assert.match(await page.locator('#modelChip').innerText(), new RegExp(`catalog:${provider}:deployment`));
+		await post(page, { type: 'providerCatalog', snapshot: snapshot([model]) });
+		assert.equal(await page.locator('#sendBtn').isDisabled(), false);
+	}
+});
+
+test('queued draft acknowledgements correlate request ids without erasing a newer composer draft', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	await page.locator('#messageInput').fill('Start the current task'); await page.locator('#sendBtn').click();
+	await post(page, { type: 'streamToken', token: 'I am reviewing the implementation.' });
+	await page.locator('#messageInput').fill('First follow-up'); await page.locator('#queueMessageBtn').click();
+	await page.locator('#messageInput').fill('Second follow-up'); await page.locator('#queueMessageBtn').click();
+	const queued = await page.evaluate(() => sentMessages.filter(message => message.type === 'queueMessage'));
+	assert.equal(queued.length, 2); assert.notEqual(queued[0].id, queued[1].id);
+	await post(page, { type: 'queueAccepted', conversationId: 'initial-conversation', id: queued[0].id });
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Second follow-up');
+	await post(page, { type: 'queueAccepted', conversationId: 'initial-conversation', id: queued[1].id });
+	assert.equal(await page.locator('#messageInput').inputValue(), '');
+	await post(page, { type: 'followupQueue', conversationId: 'initial-conversation', paused: false, entries: [{ id: 'first', label: 'First follow-up' }, { id: 'second', label: 'Second follow-up' }] });
+	await page.locator('#messageInput').fill('Keep this unsent draft');
+	await post(page, { type: 'queueAccepted', conversationId: 'initial-conversation', id: queued[1].id });
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Keep this unsent draft');
+	await assertNoPageOverflow(page); await screenshot(page, 'followup-queue-sidebar');
+	await post(page, { type: 'requestSettled', cancelled: false });
+	await post(page, { type: 'dispatchQueuedDraft', conversationId: 'initial-conversation', draft: queued[0] });
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Keep this unsent draft');
+	assert.equal(await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').length), 1, 'Host-dispatched drafts only render in the webview');
+	assert.equal(await page.locator('.msg-user').last().innerText(), 'First follow-up');
+});
+
+test('context source exclusions are scoped to the draft and stale preview responses cannot replace current sources', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	await page.locator('#workspaceContextDetails summary').click();
+	await page.waitForFunction(() => sentMessages.some(message => message.type === 'previewWorkspaceContext'));
+	const request = await page.evaluate(() => sentMessages.filter(message => message.type === 'previewWorkspaceContext').at(-1));
+	const sections = [
+		{ id: 'active-file', label: 'Active File', estimatedTokens: 42, excluded: false, markdown: 'src/editor.ts\nconst answer = 42;' },
+		{ id: 'diagnostics', label: 'Problems', estimatedTokens: 10, excluded: false, markdown: 'No current diagnostics.' },
+	];
+	await post(page, { type: 'workspaceContextPreview', conversationId: 'initial-conversation', requestId: request.id, id: 'snapshot-1', sections, markdown: 'Current context', estimatedTokens: 52 });
+	await page.getByRole('checkbox', { name: 'Include Active File', exact: true }).click();
+	const excluded = await page.evaluate(() => sentMessages.filter(message => message.type === 'previewWorkspaceContext').at(-1));
+	assert.deepEqual(excluded.excludedContext, ['active-file']);
+	await post(page, { type: 'workspaceContextPreview', conversationId: 'initial-conversation', requestId: request.id, id: 'stale', markdown: 'STALE PREVIEW' });
+	assert.doesNotMatch(await page.locator('#workspaceContextPreview').innerText(), /STALE/);
+	await post(page, { type: 'workspaceContextPreview', conversationId: 'initial-conversation', requestId: excluded.id, id: 'snapshot-2', sections: sections.map(section => ({ ...section, excluded: section.id === 'active-file' })), markdown: 'No current diagnostics.', estimatedTokens: 10 });
+	await page.locator('#workspaceContextPreview details').first().locator('summary').focus(); await page.keyboard.press('Enter');
+	await page.locator('#messageInput').fill('Review without the active file');
+	await assertNoPageOverflow(page); await screenshot(page, 'context-sources-sidebar');
+	await page.locator('#sendBtn').click();
+	const sent = await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').at(-1));
+	assert.deepEqual(sent.excludedContext, ['active-file']); assert.equal(sent.contextSnapshotId, 'snapshot-2');
+	await post(page, { type: 'loadConversation', conversationId: 'different-context', messages: [] });
+	await page.locator('#messageInput').fill('Fresh workspace context'); await page.locator('#sendBtn').click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').at(-1).excludedContext), []);
+});
+
+test('mention exclusions survive chip removal and late preview acknowledgements in the composer', async t => {
+	const page = await openSurface(t, 'chat', 400, { conversationDrafts: [['initial-conversation', { text: 'Review sources', mentions: [{ kind: 'file', path: 'A.ts', label: 'A.ts' }, { kind: 'file', path: 'B.ts', label: 'B.ts' }], attachments: [], excludedContext: [], includeContext: false }]] });
+	await page.locator('#workspaceContextDetails summary').click();
+	await page.waitForFunction(() => sentMessages.some(message => message.type === 'previewWorkspaceContext'));
+	const ids = await page.evaluate(() => ['A.ts', 'B.ts'].map(path => SotaWorkflows.mentionSourceId({ kind: 'file', path })));
+	const request = await page.evaluate(() => sentMessages.filter(message => message.type === 'previewWorkspaceContext').at(-1));
+	const sections = ids.map((id, index) => ({ id, label: index ? 'B.ts' : 'A.ts', markdown: index ? 'PRIVATE BODY' : 'Public body', estimatedTokens: 3, excluded: false }));
+	await post(page, { type: 'workspaceContextPreview', conversationId: 'initial-conversation', requestId: request.id, id: 'both', sections, excludedContext: [] });
+	await page.getByRole('checkbox', { name: 'Include B.ts', exact: true }).click();
+	const excluded = await page.evaluate(() => sentMessages.filter(message => message.type === 'previewWorkspaceContext').at(-1));
+	await post(page, { type: 'workspaceContextPreview', conversationId: 'initial-conversation', requestId: excluded.id, id: 'excluded', sections: sections.map(section => ({ ...section, excluded: section.id === ids[1], markdown: '' })), excludedContext: [ids[1]] });
+	await page.getByRole('button', { name: 'Remove mention A.ts', exact: true }).click();
+	await page.waitForFunction(old => sentMessages.filter(message => message.type === 'previewWorkspaceContext').at(-1)?.id !== old, excluded.id);
+	const remaining = await page.evaluate(() => sentMessages.filter(message => message.type === 'previewWorkspaceContext').at(-1));
+	await post(page, { type: 'workspaceContextPreview', conversationId: 'initial-conversation', requestId: excluded.id, id: 'stale', sections, excludedContext: [], markdown: 'STALE BODY' });
+	assert.doesNotMatch(await page.locator('#workspaceContextPreview').innerText(), /STALE/);
+	await post(page, { type: 'workspaceContextPreview', conversationId: 'initial-conversation', requestId: remaining.id, id: 'remaining', sections: [{ ...sections[1], excluded: true, markdown: '' }], excludedContext: [ids[1]] });
+	assert.equal(await page.getByRole('checkbox', { name: 'Include B.ts', exact: true }).isChecked(), false);
+	await page.locator('#sendBtn').click();
+	const sent = await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').at(-1));
+	assert.deepEqual({ mentions: sent.mentionsKinded, excluded: sent.excludedContext, snapshot: sent.contextSnapshotId }, { mentions: [{ kind: 'file', path: 'B.ts' }], excluded: [ids[1]], snapshot: 'remaining' });
+});
+
+test('saved and reused legacy mention exclusions conservatively cover every chip and deferred URL', async t => {
+	const draft = { text: 'Review @url https://example.com/private', mentions: [{ kind: 'file', path: 'B.ts', label: 'B.ts' }, { kind: 'file', path: 'C.ts', label: 'C.ts' }], attachments: [], excludedContext: ['mention:1'], includeContext: false };
+	const page = await openSurface(t, 'chat', 400, { conversationDrafts: [['initial-conversation', draft]] });
+	assert.equal(await page.locator('#contextMigrationNotice').isVisible(), true);
+	await page.locator('#workspaceContextDetails summary').click();
+	await page.waitForFunction(() => sentMessages.some(message => message.type === 'previewWorkspaceContext'));
+	const verify = async () => {
+		const preview = await page.evaluate(() => sentMessages.filter(message => message.type === 'previewWorkspaceContext').at(-1));
+		const expected = await page.evaluate(() => SotaWorkflows.contextMentions({ mentions: ['B.ts', 'C.ts'], text: 'Review @url https://example.com/private' }).map(SotaWorkflows.mentionSourceId));
+		assert.deepEqual(preview.excludedContext, expected);
+		assert.equal(preview.mentionsKinded.length, 3);
+		await page.locator('#sendBtn').click();
+		const sent = await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').at(-1));
+		assert.deepEqual(sent.excludedContext, expected);
+		assert.equal(sent.mentionsKinded.length, 3);
+		await post(page, { type: 'requestSettled', cancelled: false });
+	};
+	await verify();
+	await post(page, { type: 'loadConversation', conversationId: 'old-group', messages: [{ role: 'user', content: 'Old prompt', request: { text: draft.text, mentions: ['B.ts', 'C.ts'], excludedContext: ['mentions'], includeWorkspaceContext: false } }, { role: 'assistant', content: 'Old reply' }] });
+	await page.getByRole('button', { name: 'Reuse Prompt', exact: true }).click();
+	assert.equal(await page.locator('#contextMigrationNotice').isVisible(), true);
+	await verify();
+});
+
+test('empty legacy draft exclusions stay conservative when deferred URLs change during preview', async t => {
+	const page = await openSurface(t, 'chat', 400, { conversationDrafts: [['initial-conversation', { text: '', mentions: [], attachments: [], excludedContext: ['mention:1'], includeContext: false }]] });
+	await page.locator('#workspaceContextDetails summary').click();
+	await page.locator('#messageInput').fill('Review @url https://example.com/first');
+	await page.waitForFunction(() => sentMessages.filter(message => message.type === 'previewWorkspaceContext').at(-1)?.mentionsKinded.length === 1);
+	const before = await page.evaluate(() => sentMessages.filter(message => message.type === 'previewWorkspaceContext').at(-1));
+	const ids = await page.evaluate(() => ['first', 'second'].map(name => SotaWorkflows.mentionSourceId({ kind: 'url', url: 'https://example.com/' + name })));
+	await post(page, { type: 'prefillComposer', text: 'Review @url https://example.com/first @url https://example.com/second' });
+	await post(page, { type: 'workspaceContextPreview', conversationId: 'initial-conversation', requestId: before.id, id: 'stale-empty', sections: [], excludedContext: [ids[0]] });
+	await page.waitForFunction(() => sentMessages.filter(message => message.type === 'previewWorkspaceContext').at(-1)?.mentionsKinded.length === 2);
+	const current = await page.evaluate(() => sentMessages.filter(message => message.type === 'previewWorkspaceContext').at(-1));
+	assert.deepEqual(current.excludedContext, ['mention:v1:all']);
+	await post(page, { type: 'workspaceContextPreview', conversationId: 'initial-conversation', requestId: current.id, id: 'review-both', excludedContext: ids, sections: ids.map((id, index) => ({ id, label: index ? 'Second URL' : 'First URL', markdown: '', excluded: true, estimatedTokens: 0 })) });
+	await page.getByRole('checkbox', { name: 'Include Second URL', exact: true }).click();
+	await page.locator('#sendBtn').click();
+	const sent = await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').at(-1));
+	assert.deepEqual(sent.excludedContext, [ids[0]], 'Only explicit inclusion clears the conservative exclusion');
+	assert.equal(sent.mentionsKinded.length, 2);
+});
+
+test('assistant-first history windows restore off-window prompts across system messages and incomplete turns', async t => {
+	const page = await openSurface(t, 'chat', 420);
+	const messages = Array.from({ length: 601 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `Message ${index}` }));
+	for (const boundary of [201, 301, 401]) {
+		messages[boundary - 5] = { role: 'user', content: `Abandoned request ${boundary}` };
+		messages[boundary - 4] = { role: 'user', content: `Visible request ${boundary}`, model: 'haiku', specialistId: 'anton-code', request: { text: `Original prompt ${boundary}`, attachments: ['terminal-output'], includeWorkspaceContext: false, chatMode: 'plan' } };
+		for (let index = boundary - 3; index < boundary; index++) { messages[index] = { role: 'system', content: `Status before ${boundary}` }; }
+		messages[boundary] = { role: 'assistant', content: `Response at boundary ${boundary}` };
+	}
+	messages[600] = { role: 'user', content: 'Unanswered latest request' };
+	await post(page, { type: 'loadConversation', conversationId: 'assistant-boundaries', messages }); await frames(page);
+	const response = index => page.locator(`.msg[data-conversation-index="${index}"]`);
+	for (const boundary of [401, 301, 201]) {
+		assert.equal(await page.locator('.msg').first().getAttribute('data-conversation-index'), String(boundary));
+		assert.equal(await response(boundary - 4).count(), 0, 'The preceding prompt must still be outside the mounted window');
+		const reuse = response(boundary).getByRole('button', { name: 'Reuse Prompt', exact: true });
+		assert.equal(await reuse.isVisible(), true, 'Assistant-first pages must expose their off-window prompt immediately');
+		await reuse.click();
+		assert.equal(await page.locator('#messageInput').inputValue(), `Original prompt ${boundary}`);
+		assert.match(await page.locator('#contextChips').innerText(), /Terminal output/);
+		assert.equal(await page.locator('#includeWorkspaceContext').isChecked(), false);
+		assert.equal(await page.locator('#planActBtnPlan').getAttribute('aria-checked'), 'true');
+		assert.ok(await page.locator('.msg').count() <= 300);
+		if (boundary !== 201) {
+			await response(boundary).evaluate(node => { window.boundaryResponse = node; });
+			await page.getByRole('button', { name: /Show Earlier Messages/ }).click(); await frames(page);
+			assert.equal(await response(boundary).evaluate(node => node === window.boundaryResponse), true, 'An overlapping assistant keeps its mounted controls');
+			assert.equal(await response(boundary - 4).count(), 1);
+			await response(boundary).getByRole('button', { name: 'Reuse Prompt', exact: true }).click();
+			assert.equal(await page.locator('#messageInput').inputValue(), `Original prompt ${boundary}`, 'Mounting the preceding user must not change an existing response action');
+		}
+	}
+	assert.equal(await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').length), 0);
+});
+
+test('an assistant without any preceding user cannot reuse a later incomplete request', async t => {
+	const page = await openSurface(t, 'chat', 420);
+	const messages = Array.from({ length: 220 }, (_, index) => ({ role: index < 20 ? 'system' : 'assistant', content: `Message ${index}` }));
+	messages[219] = { role: 'user', content: 'Later incomplete request' };
+	await post(page, { type: 'loadConversation', conversationId: 'orphan-assistant', messages }); await frames(page);
+	const orphan = page.locator('.msg[data-conversation-index="20"]');
+	assert.equal(await orphan.getByRole('button', { name: 'Reuse Prompt', exact: true }).count(), 0);
+	await page.getByRole('button', { name: /Show Earlier Messages/ }).click(); await frames(page);
+	assert.equal(await orphan.getByRole('button', { name: 'Reuse Prompt', exact: true }).count(), 0);
+	assert.equal(await page.locator('#messageInput').inputValue(), '');
+});
+
+test('response actions wait for persisted identities and ignore visual offsets and stale terminal events', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const conversationId = 'action-identities';
+	await post(page, { type: 'loadConversation', conversationId, messages: [] });
+	async function send(text, turnId) {
+		await page.locator('#messageInput').fill(text); await page.locator('#sendBtn').click();
+		const request = await page.evaluate(() => sentMessages.findLast(message => message.type === 'sendMessage'));
+		const identity = { conversationId, requestId: request.requestId, turnId };
+		await post(page, { type: 'turnAccepted', ...identity });
+		return identity;
+	}
+	const rejected = await send('/help', 'local-command');
+	await post(page, { type: 'systemMessage', conversationId, persistedIndex: 0, content: 'Local command help' });
+	await post(page, { type: 'requestSettled', ...rejected, cancelled: false });
+	const provisional = page.locator('.msg-assistant').first();
+	assert.equal(await provisional.getByRole('button', { name: 'Branch Here', exact: true }).count(), 0);
+	assert.equal(await provisional.getByRole('button', { name: 'Mark Response as Helpful', exact: true }).count(), 0);
+	assert.equal(await provisional.getByRole('button', { name: 'Reuse Prompt', exact: true }).count(), 1);
+	const first = await send('First saved question', 'first-saved');
+	await post(page, { type: 'checkpointCaptured', ...first, checkpointId: 'first-checkpoint', turnIndex: 1, capturedAt: Date.now() });
+	await post(page, { type: 'messagePersisted', ...first, role: 'user', messageIndex: 1 });
+	const user = page.locator('.msg-user[data-persisted-index="1"]');
+	assert.equal(await user.getAttribute('data-conversation-index'), '3');
+	assert.equal(await user.evaluate(node => node.nextElementSibling?.dataset.checkpointId), 'first-checkpoint');
+	await post(page, { type: 'streamToken', ...first, token: '**First saved answer**' });
+	await post(page, { type: 'systemMessage', conversationId, persistedIndex: 2, content: 'Settings changed while streaming' });
+	await post(page, { type: 'messageComplete', ...first });
+	const firstResponse = page.locator('.msg-assistant[data-request-id="' + first.requestId + '"]');
+	assert.equal(await firstResponse.getByRole('button', { name: 'Mark Response as Helpful', exact: true }).count(), 0);
+	await firstResponse.getByRole('button', { name: 'Copy Message', exact: true }).click();
+	assert.equal(await page.evaluate(() => sentMessages.at(-1).text), '**First saved answer**');
+	const second = await send('Second saved question', 'second-saved');
+	await post(page, { type: 'messagePersisted', ...second, role: 'user', messageIndex: 4 });
+	await post(page, { type: 'messagePersisted', ...first, role: 'assistant', messageIndex: 3, responseId: 'first-response-reference' });
+	await post(page, { type: 'messageMetrics', ...first, model: 'haiku', inputTokens: 17, outputTokens: 8 });
+	await post(page, { type: 'streamError', ...first, error: 'Late stale error' });
+	await post(page, { type: 'requestSettled', ...first });
+	assert.equal(await page.locator('#sendBtn').getAttribute('aria-label'), 'Stop generating');
+	assert.equal(await page.locator('.msg').filter({ hasText: 'Late stale error' }).count(), 0);
+	assert.equal(await firstResponse.getAttribute('data-input-tokens'), '17');
+	assert.equal(await firstResponse.getAttribute('data-persisted-index'), '3');
+	await post(page, { type: 'streamToken', ...second, token: 'Second saved answer' });
+	await post(page, { type: 'messageComplete', ...second });
+	await post(page, { type: 'messagePersisted', ...second, role: 'assistant', messageIndex: 5, responseId: 'second-response-reference' });
+	await post(page, { type: 'requestSettled', ...second });
+	await firstResponse.getByRole('button', { name: 'Mark Response as Helpful', exact: true }).click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'feedback', conversationId, messageIndex: 3, responseId: 'first-response-reference', value: 'up' });
+	await firstResponse.getByRole('button', { name: 'Branch Here', exact: true }).click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'branchResponse', conversationId, messageIndex: 3, responseId: 'first-response-reference' });
+	await firstResponse.getByRole('button', { name: 'Reuse Prompt', exact: true }).click();
+	assert.equal(await page.locator('#messageInput').inputValue(), 'First saved question');
+	assert.equal(await provisional.getByRole('button', { name: 'Mark Response as Helpful', exact: true }).count(), 0);
+	await firstResponse.evaluate(node => { window.staleBranch = node.querySelector('.msg-action-branch'); });
+	await post(page, { type: 'loadConversation', conversationId: 'different', messages: [] });
+	const before = await page.evaluate(() => sentMessages.length);
+	await page.evaluate(() => window.staleBranch.click());
+	await post(page, { type: 'messagePersisted', ...first, role: 'assistant', messageIndex: 0, responseId: 'stale' });
+	assert.equal(await page.evaluate(() => sentMessages.length), before);
+	assert.equal(await page.locator('.msg').count(), 0);
+});
+
+test('queued retries retain distinct response identities across bounded timeline eviction', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const conversationId = 'retry-history';
+	await post(page, { type: 'loadConversation', conversationId, messages: Array.from({ length: 600 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `Saved ${index}`, responseId: index % 2 ? `history-${index}` : undefined })) });
+	async function dispatch(requestId, turnId) {
+		const identity = { conversationId, requestId, turnId };
+		await post(page, { type: 'dispatchQueuedDraft', conversationId, draft: { text: 'Retry this question', requestId, includeWorkspaceContext: false } });
+		await post(page, { type: 'turnAccepted', ...identity });
+		return identity;
+	}
+	const failed = await dispatch('queue-failed-attempt', 'failed-turn');
+	await post(page, { type: 'streamError', ...failed, error: 'Context unavailable' });
+	await post(page, { type: 'requestSettled', ...failed });
+	const retry = await dispatch('queue-successful-attempt', 'retry-turn');
+	await post(page, { type: 'messagePersisted', ...retry, role: 'user', messageIndex: 600 });
+	await post(page, { type: 'streamToken', ...retry, token: '## Saved retry answer' });
+	for (let i = 0; i < 4; i++) { await page.getByRole('button', { name: /Show Earlier Messages/ }).click(); await frames(page); }
+	await post(page, { type: 'messageComplete', ...retry }); await frames(page);
+	assert.equal(await page.locator('.msg-assistant[data-request-id="queue-successful-attempt"]').count(), 0);
+	await post(page, { type: 'messagePersisted', ...retry, role: 'assistant', messageIndex: 601, responseId: 'saved-retry-reference' });
+	await post(page, { type: 'requestSettled', ...retry });
+	await page.getByRole('button', { name: 'Jump to Latest Messages', exact: true }).click(); await frames(page);
+	const response = page.locator('.msg-assistant[data-request-id="queue-successful-attempt"]');
+	const rejected = page.locator('.msg-assistant[data-request-id="queue-failed-attempt"]');
+	assert.equal(await response.getAttribute('data-conversation-index'), '603');
+	assert.equal(await response.getAttribute('data-persisted-index'), '601');
+	assert.equal(await rejected.getAttribute('data-conversation-index'), '601');
+	assert.equal(await rejected.getAttribute('data-persisted-index'), null);
+	assert.equal(await rejected.getByRole('button', { name: 'Mark Response as Helpful', exact: true }).count(), 0);
+	assert.equal(await rejected.getByRole('button', { name: 'Reuse Prompt', exact: true }).count(), 1);
+	await response.getByRole('button', { name: 'Mark Response as Helpful', exact: true }).click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'feedback', conversationId, messageIndex: 601, responseId: 'saved-retry-reference', value: 'up' });
+	await response.getByRole('button', { name: 'Copy Message', exact: true }).click();
+	assert.equal(await page.evaluate(() => sentMessages.at(-1).text), '## Saved retry answer');
+	assert.ok(await page.locator('.msg').count() <= 300);
+	await assertNoPageOverflow(page);
+});
+
+test('active turn reload rebinds saved rows and stale host acceptance cannot replace a newer send', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const identity = { conversationId: 'reloaded-turn', requestId: 'original-request', turnId: 'original-turn' };
+	const user = { role: 'user', content: 'Reload question', timestamp: 1 };
+	await post(page, { type: 'loadConversation', conversationId: identity.conversationId, messages: [user] });
+	await post(page, { type: 'turnResumed', ...identity, userMessageIndex: 0, partialText: 'Before reload. ', draft: { text: user.content } });
+	await post(page, { type: 'streamToken', ...identity, token: 'After reload.' });
+	await post(page, { type: 'messageComplete', ...identity });
+	await post(page, { type: 'messagePersisted', ...identity, role: 'assistant', messageIndex: 1, responseId: 'resumed-reference' });
+	await post(page, { type: 'requestSettled', ...identity });
+	assert.equal(await page.locator('.msg-user').count(), 1);
+	assert.equal(await page.locator('.msg-assistant').count(), 1);
+	assert.match(await page.locator('.msg-assistant').innerText(), /Before reload\. After reload\./);
+	await page.getByRole('button', { name: 'Branch Here', exact: true }).click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'branchResponse', conversationId: identity.conversationId, messageIndex: 1, responseId: 'resumed-reference' });
+	const saved = { role: 'assistant', content: 'Already saved at reload', timestamp: 2, responseId: 'loaded-reference' };
+	await post(page, { type: 'loadConversation', conversationId: identity.conversationId, messages: [user, saved] });
+	await post(page, { type: 'turnResumed', ...identity, userMessageIndex: 0, assistantMessageIndex: 1, partialText: saved.content });
+	assert.equal(await page.getByRole('button', { name: 'Branch Here', exact: true }).isDisabled(), true, 'branch must wait for host settlement even when the response was saved');
+	await post(page, { type: 'requestSettled', ...identity });
+	assert.equal(await page.getByRole('button', { name: 'Branch Here', exact: true }).isDisabled(), false);
+	assert.equal(await page.locator('.msg').count(), 2, 'reload after saving must not duplicate the saved response');
+	assert.equal(await page.getByRole('button', { name: 'Branch Here', exact: true }).count(), 1);
+	await page.locator('#messageInput').fill('New local request'); await page.locator('#sendBtn').click();
+	const local = await page.evaluate(() => sentMessages.findLast(message => message.type === 'sendMessage'));
+	await post(page, { type: 'turnAccepted', conversationId: identity.conversationId, requestId: 'old-ui-block-request', turnId: 'old-ui-block-turn', draft: { text: 'Older synthetic question' } });
+	const current = { conversationId: identity.conversationId, requestId: local.requestId, turnId: 'new-local-turn' };
+	await post(page, { type: 'turnAccepted', ...current });
+	await post(page, { type: 'streamToken', ...current, token: 'New local answer' });
+	await post(page, { type: 'messageComplete', ...current });
+	await post(page, { type: 'messagePersisted', ...current, role: 'assistant', messageIndex: 3, responseId: 'local-reference' });
+	assert.equal(await page.locator('.msg').filter({ hasText: 'Older synthetic question' }).count(), 0);
+	assert.match(await page.locator('.msg-assistant').last().innerText(), /New local answer/);
+	await page.locator('.msg-assistant').last().getByRole('button', { name: 'Mark Response as Helpful', exact: true }).click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'feedback', conversationId: identity.conversationId, messageIndex: 3, responseId: 'local-reference', value: 'up' });
+});
+
+test('checkpoint snapshots clear unavailable controls and ignore resets from other conversations', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	await post(page, { type: 'loadConversation', conversationId: 'checkpoint-current', messages: [{ role: 'user', content: 'Keep this history', timestamp: 1 }] });
+	const checkpoint = { checkpointId: 'retained-checkpoint', turnIndex: 0, capturedAt: Date.now(), summary: 'Before change' };
+	await post(page, { type: 'checkpointsLoaded', conversationId: 'checkpoint-current', reset: true, checkpoints: [checkpoint] });
+	assert.equal(await page.locator('.checkpoint-stripe').count(), 1);
+	await page.locator('.checkpoint-stripe-label').click(); assert.equal(await page.locator('.checkpoint-stripe-popover').isVisible(), true);
+	await post(page, { type: 'checkpointsLoaded', conversationId: 'old-conversation', reset: true, checkpoints: [] });
+	await post(page, { type: 'checkpointsLoaded', reset: true, checkpoints: [] });
+	assert.equal(await page.locator('.checkpoint-stripe').count(), 1);
+	await post(page, { type: 'checkpointsLoaded', conversationId: 'checkpoint-current', reset: true, checkpoints: [] });
+	assert.equal(await page.locator('.checkpoint-stripe').count(), 0); assert.equal(await page.locator('.checkpoint-stripe-popover').isVisible(), false);
+	assert.match(await page.locator('.msg-user').innerText(), /Keep this history/);
+	await post(page, { type: 'checkpointsLoaded', conversationId: 'checkpoint-current', reset: true, checkpoints: [checkpoint] });
+	await page.locator('.checkpoint-stripe-label').click(); await page.locator('.checkpoint-stripe-popover [data-action="restoreWorkspace"]').click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'checkpointRestoreWorkspace', checkpointId: checkpoint.checkpointId });
+	await assertNoPageOverflow(page);
 });

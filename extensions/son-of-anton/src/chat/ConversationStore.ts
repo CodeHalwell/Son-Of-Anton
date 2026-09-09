@@ -3,24 +3,17 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import * as vscode from 'vscode';
+import * as path from 'node:path';
+import { createHash } from 'node:crypto';
+import { ConversationDeletedError, ConversationStorage, type ConversationRecoveryIssue } from './ConversationStorage';
+import { attachConversationWriteToken, type ConversationWriteToken } from './ConversationWriteToken';
+export type { ConversationWriteToken } from './ConversationWriteToken';
+import { watchConversationLifecycle } from './ConversationLifecycleWatcher';
+import { conversationTextChunks, MAX_HISTORY_QUERY_LENGTH } from './ConversationSearchIndex';
 import { ChatMessage } from './ChatPanel';
 import { AgentHandle } from 'son-of-anton-core/agents/types';
 import { ChatMode } from 'son-of-anton-core/agents/agentEvents';
 import type { ModelId } from 'son-of-anton-core/llm/LlmClient';
-
-/**
- * Maximum number of conversations retained in the store. Once exceeded the
- * oldest entry (by `updatedAt`) is pruned. Bounded to keep `globalState`
- * footprint reasonable on long-running installs.
- */
-const MAX_CONVERSATIONS = 50;
-
-/**
- * Maximum number of messages retained per conversation. Excess messages are
- * dropped from the head (oldest first) so a long debugging session doesn't
- * grow unbounded inside a single conversation.
- */
-const MAX_MESSAGES_PER_CONVERSATION = 500;
 
 /**
  * Maximum length of an auto-derived conversation title. Titles are derived
@@ -78,6 +71,10 @@ export interface ConversationSummary {
 	/** Absent on older conversations whose original workspace is unknown. */
 	readonly workspaceId?: string;
 	readonly workspaceName?: string;
+	readonly pinned?: boolean;
+	readonly archived?: boolean;
+	readonly deletedAt?: number;
+	readonly branch?: { readonly parentId: string; readonly throughMessageIndex: number; readonly checkpointId?: string; readonly workspaceState: 'checkpoint-available' | 'unlinked' };
 }
 
 /**
@@ -85,9 +82,13 @@ export interface ConversationSummary {
  * scrollback. Returned by `load()` when the host wants to restore a session.
  */
 export interface ConversationRecord {
+	readonly writeToken?: ConversationWriteToken;
 	readonly summary: ConversationSummary;
 	readonly messages: ChatMessage[];
 }
+
+export interface ConversationSearchOptions { query?: string; scope?: 'active' | 'archived' | 'trash' | 'all'; workspaceOnly?: boolean; offset?: number; limit?: number }
+export interface ConversationSearchResult { items: ConversationSummary[]; total: number; nextOffset?: number }
 
 /**
  * Generate a v4-shape UUID without pulling in the `crypto` library — works
@@ -144,10 +145,10 @@ function recordKey(id: string): string {
 }
 
 /**
- * Persists a list of chat conversations in `ExtensionContext.globalState` and
- * exposes a thin CRUD surface for the chat sidebar's history view. Stores the
- * summary index under one key and each conversation's messages under
- * `sota.conversations.<id>` so listing is cheap and loading is targeted.
+ * Persists conversation manifests and immutable message pages in extension storage.
+ * Listing reads only metadata; bodies are loaded on demand, and writes are
+ * serialized without imposing retention limits. Memento storage is retained
+ * for migration and hosts without a local storage URI.
  *
  * Includes a one-shot migration from the legacy single-conversation key
  * (`sota.chatHistory`, workspaceState) so users upgrading don't lose their
@@ -160,67 +161,233 @@ export class ConversationStore implements vscode.Disposable {
 	readonly onDidDelete: vscode.Event<string> = this._onDidDelete.event;
 	private readonly _onDidChangeActive = new vscode.EventEmitter<string>();
 	readonly onDidChangeActive: vscode.Event<string> = this._onDidChangeActive.event;
+	private readonly _onDidEncounterRecoveryIssue = new vscode.EventEmitter<ConversationRecoveryIssue>();
+	readonly onDidEncounterRecoveryIssue = this._onDidEncounterRecoveryIssue.event;
+	private readonly encounteredRecoveryIssues = new Map<string, ConversationRecoveryIssue>();
+	/** Initial scan issues are retained because the host subscribes after construction. */
+	get recoveryIssues(): ReadonlyArray<ConversationRecoveryIssue> { return [...this.encounteredRecoveryIssues.values()]; }
+
+	private readonly disk: ConversationStorage | undefined;
+	private readonly searchLifetime = new AbortController();
+	private readonly pendingRecords = new Map<string, ConversationRecord | null>();
+	private readonly pendingTokenForks = new WeakMap<ConversationRecord, Set<ConversationWriteToken>>();
+	private pendingWrite: Promise<void> = Promise.resolve();
+	private writeFailure: Error | undefined;
+	private readonly failedWrites = new Map<string, Error>();
+	readonly ready: Promise<void>;
+	private readonly _onDidPermanentlyDelete = new vscode.EventEmitter<string>();
+	readonly onDidPermanentlyDelete = this._onDidPermanentlyDelete.event;
+	private permanentDeleteCleanup?: (id: string) => Promise<void>;
+	private lifecycleWatcher?: vscode.Disposable;
+	private disposed = false;
+	private scanQueued = false;
+	private scanRequested = false;
+	private readonly observedDeletions = new Set<string>();
+	private readonly deletionNotifications = new Set<string>();
+	private readonly cleanupScheduled = new Set<string>();
+	private readonly failedDeletionCleanups = new Set<string>();
 
 	constructor(
 		private readonly context: vscode.ExtensionContext,
 		private readonly workspaceId = vscode.workspace.workspaceFile?.toString() ?? JSON.stringify((vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.toString()).sort()),
 		private readonly workspaceName = vscode.workspace.name ?? vscode.l10n.t('Empty Window'),
 	) {
-		this.migrateLegacyConversation();
+		this.disk = context.globalStorageUri?.scheme === 'file' ? new ConversationStorage(path.join(context.globalStorageUri.fsPath, 'conversations-v2'), issue => this.reportRecoveryIssue(issue)) : undefined;
+		if (this.disk && typeof vscode.workspace.createFileSystemWatcher === 'function' && typeof vscode.RelativePattern === 'function') {
+			this.lifecycleWatcher = watchConversationLifecycle(path.join(context.globalStorageUri.fsPath, 'conversations-v2'), () => this.scanDeletions());
+		}
+		this.scanDeletions();
+		const oldIndex = context.globalState.get<ConversationSummary[]>(INDEX_KEY) ?? [];
+		const retainedLegacyIds = new Set<string>();
+		if (this.disk) {
+			this.disk.list(); // Scan for recoverable damage without preventing activation.
+			for (const summary of oldIndex) {
+				try {
+					if (!this.disk.isPermanentlyDeleted(summary.id) && this.disk.isHidden(summary.id)) { retainedLegacyIds.add(summary.id); continue; }
+					if (!this.disk.isPermanentlyDeleted(summary.id) && !this.disk.load(summary.id)) {
+						const messages = context.globalState.get<ChatMessage[]>(recordKey(summary.id)) ?? [];
+						this.persist({ summary: { ...summary, messageCount: messages.length }, messages });
+					}
+				} catch { retainedLegacyIds.add(summary.id); } // Never overwrite damage or discard its original migration source.
+			}
+		}
+		const legacy = !context.workspaceState.get<boolean>(MIGRATION_FLAG_KEY) ? context.workspaceState.get<ChatMessage[]>(LEGACY_CONVERSATION_KEY) : undefined;
+		let retainWorkspaceLegacy = false;
+		if (Array.isArray(legacy) && legacy.length) {
+			// A stable import ID makes retrying a failed migration idempotent.
+			const id = createHash('sha256').update(this.workspaceId).update(JSON.stringify(legacy)).digest('hex');
+			try {
+				if (!this.disk?.isPermanentlyDeleted(id) && this.isHidden(id)) { retainWorkspaceLegacy = true; }
+				else if (!this.disk?.isPermanentlyDeleted(id) && !this.load(id, true)) {
+					const now = Date.now();
+					this.persist({ summary: { id, title: deriveTitle(legacy) ?? 'Imported conversation', createdAt: now, updatedAt: now, messageCount: legacy.length, workspaceId: this.workspaceId, workspaceName: this.workspaceName }, messages: [...legacy] });
+				}
+			} catch { retainWorkspaceLegacy = true; }
+		}
+		this.ready = this.flush().then(async () => {
+			try {
+				await this.disk?.cleanupDeleted();
+				// Source records are cleared only after every destination manifest is durable.
+				if (this.disk) {
+					for (const summary of oldIndex) { if (!retainedLegacyIds.has(summary.id)) { await context.globalState.update(recordKey(summary.id), undefined); } }
+					await context.globalState.update(INDEX_KEY, retainedLegacyIds.size ? oldIndex.filter(summary => retainedLegacyIds.has(summary.id)) : undefined);
+				}
+				if (!retainWorkspaceLegacy) {
+					await context.workspaceState.update(LEGACY_CONVERSATION_KEY, undefined);
+					await context.workspaceState.update(MIGRATION_FLAG_KEY, true);
+				}
+			} catch (error) {
+				// Finalization is not part of the retryable write queue. Preserve its
+				// failure until restart, while queue failures clear when their retry succeeds.
+				this.writeFailure = error instanceof Error ? error : new Error(String(error));
+				throw error;
+			}
+		});
+		const refreshAfterMigration = (): void => {
+			if (!this.disposed) {
+				try { this._onDidChange.fire(); } catch { /* Notification failures must not change migration's result. */ }
+			}
+		};
+		void this.ready.then(refreshAfterMigration, refreshAfterMigration);
 	}
 
-	/**
-	 * If a legacy `sota.chatHistory` entry exists in workspaceState, import it
-	 * as a single conversation in the new store and clear the legacy key. Runs
-	 * once per workspace, gated by a workspaceState flag so subsequent
-	 * activations don't re-import a key the user may have intentionally
-	 * cleared from the new store.
-	 */
-	private migrateLegacyConversation(): void {
-		const alreadyMigrated = this.context.workspaceState.get<boolean>(MIGRATION_FLAG_KEY);
-		if (alreadyMigrated) {
-			return;
+	private reportRecoveryIssue(issue: ConversationRecoveryIssue): void {
+		if (!this.encounteredRecoveryIssues.has(issue.path)) {
+			this.encounteredRecoveryIssues.set(issue.path, issue);
+			this._onDidEncounterRecoveryIssue.fire(issue);
 		}
-		const legacy = this.context.workspaceState.get<ChatMessage[]>(LEGACY_CONVERSATION_KEY);
-		if (Array.isArray(legacy) && legacy.length > 0) {
-			const id = generateId();
-			const now = Date.now();
-			const messages = this.trimMessages(legacy);
-			const summary: ConversationSummary = {
-				id,
-				title: deriveTitle(messages) ?? 'Imported conversation',
-				createdAt: now,
-				updatedAt: now,
-				messageCount: messages.length,
-				workspaceId: this.workspaceId,
-				workspaceName: this.workspaceName,
-			};
-			const index = [summary, ...this.readIndex()];
-			void this.context.globalState.update(recordKey(id), messages);
-			void this.context.globalState.update(INDEX_KEY, this.pruneIndex(index));
+	}
+
+	/** Await pending writes and deletion cleanup, including after UI disposal. */
+	async flush(): Promise<void> {
+		// Retry prior auxiliary failures once per explicit drain, never in the same failed attempt.
+		for (const id of this.failedDeletionCleanups) { this.scheduleDeletionCleanup(id); }
+		let tail: Promise<void>;
+		do { tail = this.pendingWrite; await tail; } while (tail !== this.pendingWrite);
+		const failure = this.writeFailure ?? this.failedWrites.values().next().value;
+		if (failure) { throw failure; }
+	}
+
+	/** Register host cleanup that survives UI disposal and runs only after durable deletion. */
+	setPermanentDeleteCleanup(cleanup: (id: string) => Promise<void>): void {
+		this.permanentDeleteCleanup = cleanup;
+		for (const id of this.observedDeletions) { this.scheduleDeletionCleanup(id); }
+		this.scanDeletions();
+	}
+
+	private scanDeletions(): void {
+		if (!this.disk || this.disposed) { return; }
+		this.scanRequested = true;
+		if (this.scanQueued) { return; }
+		this.scanQueued = true;
+		// Observation must not wait behind a slow save: cancelling active turns
+		// precedes their final writes and the independently queued host cleanup.
+		const scan = (async () => {
+			try {
+				do {
+					this.scanRequested = false;
+					for (const id of await this.disk!.listDeletedIds()) { this.observeDeletion(id); }
+				} while (this.scanRequested && !this.disposed);
+			} finally { this.scanQueued = false; }
+			this._onDidChange.fire();
+		})();
+		void scan.catch(() => {}); // The write queue reports failures, even if an older save is still pending.
+		this.enqueue('lifecycle-scan', () => scan);
+	}
+
+	/** Observe once per window before cleanup so active turns lose ownership immediately. */
+	private observeDeletion(id: string): void {
+		this.pendingRecords.delete(id); this.failedWrites.delete(id);
+		if (!this.observedDeletions.has(id)) {
+			this.observedDeletions.add(id);
+			this._onDidDelete.fire(id); this._onDidChange.fire();
 		}
-		// Clear the legacy key regardless so we don't keep a stale copy around.
-		void this.context.workspaceState.update(LEGACY_CONVERSATION_KEY, undefined);
-		void this.context.workspaceState.update(MIGRATION_FLAG_KEY, true);
+		this.scheduleDeletionCleanup(id);
+	}
+
+	private notifyPermanentDeletion(id: string): void {
+		if (!this.deletionNotifications.has(id)) {
+			this.deletionNotifications.add(id); this._onDidPermanentlyDelete.fire(id); this._onDidChange.fire();
+		}
+	}
+
+	private scheduleDeletionCleanup(id: string): void {
+		const cleanup = this.permanentDeleteCleanup;
+		if (!cleanup) { this.notifyPermanentDeletion(id); return; }
+		if (this.cleanupScheduled.has(id)) { return; }
+		this.cleanupScheduled.add(id);
+		this.enqueue(id, async () => {
+			try { await cleanup(id); this.failedDeletionCleanups.delete(id); this.notifyPermanentDeletion(id); }
+			catch (error) { this.cleanupScheduled.delete(id); this.failedDeletionCleanups.add(id); throw error; }
+		});
+	}
+
+	private isHidden(id: string): boolean {
+		if (this.observedDeletions.has(id)) { return true; }
+		if (this.disk?.isPermanentlyDeleted(id)) { this.observeDeletion(id); return true; }
+		return this.disk?.isHidden(id) ?? false;
+	}
+
+	/** Damaged lifecycle metadata isolates one record without discarding its pending recovery copy. */
+	private isVisibleInList(id: string): boolean {
+		try { return !this.isHidden(id); }
+		catch { return false; } // Storage already reports the preserved marker through the recovery channel.
+	}
+
+	private persist(record: ConversationRecord): void {
+		const snapshot = attachConversationWriteToken(structuredClone(record), record.writeToken ?? { revision: null }); this.pendingRecords.set(record.summary.id, snapshot);
+		this.enqueue(snapshot.summary.id, async () => {
+			if (this.disk) {
+				try { await this.disk.save(snapshot); }
+				catch (error) { if (error instanceof ConversationDeletedError || this.disk.isPermanentlyDeleted(snapshot.summary.id)) { this.observeDeletion(snapshot.summary.id); return; } throw error; }
+				finally {
+					// A fork depends on this snapshot settling, including its known base
+					// after a failed write. A conflict never advances that stale base.
+					for (const fork of this.pendingTokenForks.get(snapshot) ?? []) { fork.revision = snapshot.writeToken.revision; }
+					this.pendingTokenForks.delete(snapshot);
+				}
+			}
+			else {
+				await this.context.globalState.update(recordKey(snapshot.summary.id), snapshot.messages);
+				const index = this.mementoIndex().filter(summary => summary.id !== snapshot.summary.id);
+				await this.context.globalState.update(INDEX_KEY, [...index, snapshot.summary]);
+			}
+			if (this.pendingRecords.get(snapshot.summary.id) === snapshot) { this.pendingRecords.delete(snapshot.summary.id); }
+		});
+	}
+
+	private enqueue(id: string, operation: () => Promise<void>): void {
+		this.pendingWrite = this.pendingWrite.then(async () => {
+			await operation(); this.failedWrites.delete(id);
+		}).catch(error => {
+			const failure = error instanceof Error ? error : new Error(String(error)); this.failedWrites.set(id, failure);
+			if (!this.disposed) {
+				try { void Promise.resolve(vscode.window.showErrorMessage(vscode.l10n.t('Conversation history could not be saved: {0}', failure.message))).catch(() => {}); }
+				catch { /* Preserve the write failure even if the closing host cannot report it. */ }
+			}
+		});
 	}
 
 	/** Returns the conversation summaries, newest-first by `updatedAt`. */
 	list(): ReadonlyArray<ConversationSummary> {
-		return [...this.readIndex()].sort((a, b) => b.updatedAt - a.updatedAt);
+		return this.search({ limit: Number.MAX_SAFE_INTEGER }).items;
 	}
 
 	/** Conversations created in this workspace; older history remains in list(). */
 	listForWorkspace(): ReadonlyArray<ConversationSummary> {
-		return this.list().filter(summary => summary.workspaceId === this.workspaceId);
+		return this.list().filter(summary => this.isInCurrentWorkspace(summary));
 	}
+
+	isInCurrentWorkspace(summary: ConversationSummary): boolean { return summary.workspaceId === this.workspaceId; }
 
 	/** Resume a conversation explicitly selected here; otherwise restore only this workspace’s history. */
 	getInitialConversation(): ConversationRecord | undefined {
 		const active = this.context.workspaceState.get<string>(ACTIVE_KEY);
-		const record = active ? this.load(active) : undefined;
-		if (record) { return record; }
-		const recent = this.listForWorkspace()[0];
-		return recent ? this.load(recent.id) : undefined;
+		for (const id of new Set([...(active ? [active] : []), ...this.listForWorkspace().map(summary => summary.id)])) {
+			try { const record = this.load(id); if (record && !record.summary.archived) { return record; } }
+			catch { /* A damaged active transcript must not prevent opening a healthy conversation. */ }
+		}
+		return undefined;
 	}
 
 	/** Remember explicit history selections in this workspace without reassigning their original ownership. */
@@ -232,13 +399,23 @@ export class ConversationStore implements vscode.Disposable {
 	}
 
 	/** Returns the full record for a conversation, or `undefined` if missing. */
-	load(id: string): ConversationRecord | undefined {
-		const summary = this.readIndex().find(s => s.id === id);
-		if (!summary) {
-			return undefined;
+	load(id: string, includeDeleted = false): ConversationRecord | undefined {
+		if (this.isHidden(id)) { return undefined; }
+		if (this.pendingRecords.has(id)) {
+			const pending = this.pendingRecords.get(id);
+			if (!pending || (!includeDeleted && pending.summary.deletedAt)) { return undefined; }
+			const token = { revision: pending.writeToken?.revision ?? null };
+			const forks = this.pendingTokenForks.get(pending) ?? new Set<ConversationWriteToken>();
+			forks.add(token); this.pendingTokenForks.set(pending, forks);
+			return attachConversationWriteToken(structuredClone(pending), token);
 		}
-		const messages = this.context.globalState.get<ChatMessage[]>(recordKey(id)) ?? [];
-		return { summary, messages };
+		if (this.disk) {
+			const record = this.disk.load(id);
+			return record && (includeDeleted || !record.summary.deletedAt) ? record : undefined;
+		}
+		const summary = this.readIndex().find(s => s.id === id);
+		if (!summary || (summary.deletedAt && !includeDeleted)) { return undefined; }
+		return { summary, messages: this.context.globalState.get<ChatMessage[]>(recordKey(id)) ?? [] };
 	}
 
 	/**
@@ -250,7 +427,7 @@ export class ConversationStore implements vscode.Disposable {
 	create(initialMessages?: ChatMessage[]): ConversationRecord {
 		const id = generateId();
 		const now = Date.now();
-		const messages = this.trimMessages(initialMessages ?? []);
+		const messages = [...(initialMessages ?? [])];
 		const derived = deriveTitle(messages);
 		const summary: ConversationSummary = {
 			id,
@@ -261,11 +438,10 @@ export class ConversationStore implements vscode.Disposable {
 			workspaceId: this.workspaceId,
 			workspaceName: this.workspaceName,
 		};
-		const index = [summary, ...this.readIndex()];
-		void this.context.globalState.update(recordKey(id), messages);
-		void this.context.globalState.update(INDEX_KEY, this.pruneIndex(index));
+		const record = attachConversationWriteToken({ summary, messages }, { revision: null });
+		this.persist(record);
 		this._onDidChange.fire();
-		return { summary, messages };
+		return record;
 	}
 
 	/**
@@ -282,14 +458,16 @@ export class ConversationStore implements vscode.Disposable {
 		lastMode?: ChatMode,
 		lastTab?: ChatTab,
 		lastModel?: ModelId,
+		writeToken?: ConversationWriteToken,
 	): void {
 		const index = this.readIndex();
 		const existing = index.find(s => s.id === id);
 		if (!existing) {
 			return;
 		}
-		const trimmed = this.trimMessages(messages);
+		const trimmed = [...messages];
 		const next: ConversationSummary = {
+			...existing,
 			id: existing.id,
 			title: this.shouldRederiveTitle(existing.title)
 				? deriveTitle(trimmed) ?? existing.title
@@ -304,9 +482,8 @@ export class ConversationStore implements vscode.Disposable {
 			workspaceId: existing.workspaceId,
 			workspaceName: existing.workspaceName,
 		};
-		const updatedIndex = index.map(s => (s.id === id ? next : s));
-		void this.context.globalState.update(recordKey(id), trimmed);
-		void this.context.globalState.update(INDEX_KEY, this.pruneIndex(updatedIndex));
+		const token = writeToken ?? this.load(id, true)?.writeToken ?? { revision: null };
+		this.persist(attachConversationWriteToken({ summary: next, messages: trimmed }, token));
 		this._onDidChange.fire();
 	}
 
@@ -315,76 +492,174 @@ export class ConversationStore implements vscode.Disposable {
 	 * length so a malformed input box payload can't poison the index.
 	 */
 	rename(id: string, newTitle: string): void {
-		const index = this.readIndex();
-		const existing = index.find(s => s.id === id);
-		if (!existing) {
-			return;
-		}
-		const cleaned = newTitle.trim().slice(0, MAX_TITLE_LENGTH);
-		if (!cleaned) {
-			return;
-		}
-		const next: ConversationSummary = {
-			...existing,
-			title: cleaned,
-			updatedAt: Date.now(),
-		};
-		const updatedIndex = index.map(s => (s.id === id ? next : s));
-		void this.context.globalState.update(INDEX_KEY, updatedIndex);
+		const record = this.load(id, true); if (!record) { return; }
+		const cleaned = newTitle.trim().slice(0, MAX_TITLE_LENGTH); if (!cleaned) { return; }
+		const next: ConversationSummary = { ...record.summary, title: cleaned, updatedAt: Date.now() };
+		this.persist(attachConversationWriteToken({ summary: next, messages: record.messages }, record.writeToken ?? { revision: null }));
 		this._onDidChange.fire();
 	}
 
-	/** Delete a conversation and its message body. */
+	/** Move to Trash; body and checkpoint association remain recoverable. */
 	delete(id: string): void {
-		const index = this.readIndex();
-		if (!index.some(s => s.id === id)) {
-			return;
-		}
-		const updatedIndex = index.filter(s => s.id !== id);
-		void this.context.globalState.update(recordKey(id), undefined);
-		void this.context.globalState.update(INDEX_KEY, updatedIndex);
-		this._onDidDelete.fire(id);
+		const record = this.load(id); if (!record) { return; }
+		this.persist(attachConversationWriteToken({ ...record, summary: { ...record.summary, deletedAt: Date.now() } }, record.writeToken ?? { revision: null }));
+		this._onDidDelete.fire(id); this._onDidChange.fire();
+	}
+
+	restore(id: string): void { this.changeSummary(id, { deletedAt: undefined, archived: false }); }
+	setPinned(id: string, pinned: boolean): void { this.changeSummary(id, { pinned }); }
+	archive(id: string, archived = true): void { this.changeSummary(id, { archived }); }
+
+	private changeSummary(id: string, change: Partial<ConversationSummary>): void {
+		const record = this.load(id, true); if (!record) { return; }
+		this.persist(attachConversationWriteToken({ ...record, summary: { ...record.summary, ...change } }, record.writeToken ?? { revision: null })); this._onDidChange.fire();
+	}
+
+	/** Permanently remove only an already trashed record, after host confirmation. */
+	permanentDelete(id: string): void {
+		const record = this.load(id, true); if (!record?.summary.deletedAt) { return; }
+		this.pendingRecords.set(id, null);
+		this.enqueue(id, async () => {
+			try {
+				if (this.disk) { await this.disk.delete(id); }
+				else { await this.deleteFromMemento(record); }
+			} catch (error) {
+				if (this.disk?.isPermanentlyDeleted(id)) { this.observeDeletion(id); return; }
+				// Remove only this pending tombstone. Keep the complete Trash record
+				// available for recovery/retry even if the backing deletion was partial.
+				if (this.pendingRecords.get(id) === null) { this.pendingRecords.set(id, record); }
+				this._onDidChange.fire(); throw error;
+			}
+			// Cleanup stays in the draining write queue even after UI disposal.
+			this.observeDeletion(id);
+		});
 		this._onDidChange.fire();
+	}
+
+	private async deleteFromMemento(record: ConversationRecord): Promise<void> {
+		const id = record.summary.id; let bodyAttempted = false;
+		try {
+			await this.context.globalState.update(INDEX_KEY, this.mementoIndex().filter(summary => summary.id !== id));
+			bodyAttempted = true; await this.context.globalState.update(recordKey(id), undefined);
+		} catch (error) {
+			// Memento has no multi-key transaction. Restore the index if removing the
+			// body fails, including hosts that update their cache before rejecting.
+			try {
+				if (bodyAttempted) { await this.context.globalState.update(recordKey(id), record.messages); }
+				const index = this.mementoIndex().filter(summary => summary.id !== id);
+				await this.context.globalState.update(INDEX_KEY, [...index, record.summary]);
+			} catch (recoveryError) { throw new AggregateError([error, recoveryError], 'Conversation deletion failed and its stored Trash record could not be restored. The transcript remains available in this window.'); }
+			throw error;
+		}
+	}
+
+	/** Fork through an inclusive message boundary. Selecting the fork never modifies files. */
+	branch(id: string, throughMessageIndex: number, options: { checkpointId?: string; workspaceState: 'checkpoint-available' | 'unlinked' } = { workspaceState: 'unlinked' }): ConversationRecord | undefined {
+		const source = this.load(id); if (!source || !Number.isInteger(throughMessageIndex) || throughMessageIndex < 0 || throughMessageIndex >= source.messages.length) { return undefined; }
+		const now = Date.now(); const branchId = generateId();
+		const messages = structuredClone(source.messages.slice(0, throughMessageIndex + 1));
+		const record: ConversationRecord = { messages, summary: { ...source.summary, id: branchId, title: vscode.l10n.t('Branch: {0}', source.summary.title).slice(0, MAX_TITLE_LENGTH), createdAt: now, updatedAt: now, messageCount: messages.length, pinned: false, archived: false, deletedAt: undefined, workspaceId: this.workspaceId, workspaceName: this.workspaceName, branch: { parentId: id, throughMessageIndex, checkpointId: options.checkpointId, workspaceState: options.checkpointId ? options.workspaceState : 'unlinked' } } };
+		attachConversationWriteToken(record, { revision: null }); this.persist(record); this._onDidChange.fire(); return record;
+	}
+
+	/** Synchronous metadata-only listing. Body queries must use searchAsync to avoid blocking the host. */
+	search(options: ConversationSearchOptions = {}): ConversationSearchResult {
+		const query = this.normaliseQuery(options.query);
+		return this.searchPage(this.readIndex().filter(summary => this.inSearchScope(summary, options) && this.matchesMetadata(summary, query)), options);
+	}
+
+	/** Exact body search reads text-only indexes in cancellable bounded chunks; it never loads transcripts. */
+	async searchAsync(options: ConversationSearchOptions = {}, cancellation?: AbortSignal): Promise<ConversationSearchResult> {
+		const signal = cancellation ? AbortSignal.any([cancellation, this.searchLifetime.signal]) : this.searchLifetime.signal;
+		signal.throwIfAborted(); const query = this.normaliseQuery(options.query);
+		const summaries = this.disk ? await this.disk.listAsync(signal) : this.readIndex();
+		const index = new Map(summaries.map(summary => [summary.id, summary]));
+		for (const [id, record] of this.pendingRecords) { if (record && this.isVisibleInList(id)) { index.set(id, record.summary); } else { index.delete(id); } }
+		const matches: ConversationSummary[] = [];
+		for (const summary of index.values()) {
+			signal.throwIfAborted();
+			if (!this.inSearchScope(summary, options)) { continue; }
+			if (this.matchesMetadata(summary, query)) { matches.push(summary); continue; }
+			try {
+				const pending = this.pendingRecords.get(summary.id);
+				if (this.disk && !pending) {
+					if (await this.disk.matches(summary.id, query, signal)) { matches.push(summary); }
+				} else {
+					const messages = pending?.messages ?? this.context.globalState.get<ChatMessage[]>(recordKey(summary.id)) ?? [];
+					for (const text of conversationTextChunks(messages)) {
+						signal.throwIfAborted();
+						if (text.includes(query)) { matches.push(summary); break; }
+						await new Promise<void>(resolve => setImmediate(resolve));
+					}
+				}
+			} catch { signal.throwIfAborted(); /* Damaged histories retain their visible metadata and recovery notice. */ }
+		}
+		signal.throwIfAborted(); return this.searchPage(matches.filter(summary => this.isVisibleInList(summary.id)), options);
+	}
+
+	private normaliseQuery(query?: string): string {
+		if ((query?.length ?? 0) > MAX_HISTORY_QUERY_LENGTH) { throw new Error(vscode.l10n.t('Search text is too long. Use {0} characters or fewer.', MAX_HISTORY_QUERY_LENGTH)); }
+		return query?.trim().toLowerCase() ?? '';
+	}
+
+	private inSearchScope(summary: ConversationSummary, options: ConversationSearchOptions): boolean {
+		if (options.workspaceOnly && summary.workspaceId !== this.workspaceId) { return false; }
+		const scope = options.scope ?? 'active';
+		return !(scope === 'trash' ? !summary.deletedAt : scope === 'archived' ? summary.deletedAt || !summary.archived : scope === 'active' ? summary.deletedAt || summary.archived : false);
+	}
+
+	private matchesMetadata(summary: ConversationSummary, query: string): boolean {
+		return !query || [summary.title, summary.workspaceName, summary.lastSpecialist].some(value => value?.toLowerCase().includes(query));
+	}
+
+	private searchPage(matches: ConversationSummary[], options: ConversationSearchOptions): ConversationSearchResult {
+		matches.sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
+		const offset = Math.max(0, Math.floor(options.offset ?? 0)); const limit = Math.max(1, Math.floor(options.limit ?? 50));
+		return { items: matches.slice(offset, offset + limit), total: matches.length, nextOffset: offset + limit < matches.length ? offset + limit : undefined };
+	}
+
+	/** Remove an unavailable checkpoint link without suggesting the files match the branch. */
+	unlinkBranchCheckpoint(id: string): void {
+		const record = this.load(id); if (record?.summary.branch) { this.changeSummary(id, { branch: { ...record.summary.branch, checkpointId: undefined, workspaceState: 'unlinked' } }); }
+	}
+
+	/** Read one saved response from its page, excluding Trash and pending or committed deletion. */
+	loadMessage(id: string, index: number): ChatMessage | undefined {
+		if (!Number.isSafeInteger(index) || index < 0 || this.isHidden(id)) { return undefined; }
+		if (this.pendingRecords.has(id)) {
+			const pending = this.pendingRecords.get(id);
+			return pending && !pending.summary.deletedAt ? pending.messages[index] : undefined;
+		}
+		if (this.disk) {
+			const record = this.disk.load(id, index, 1);
+			return record && !record.summary.deletedAt ? record.messages[0] : undefined;
+		}
+		return this.load(id)?.messages[index];
+	}
+
+	/** Read a bounded message page without loading the complete stored transcript. */
+	loadMessages(id: string, offset: number, limit = 100): ChatMessage[] {
+		if (this.isHidden(id)) { return []; }
+		const pending = this.pendingRecords.get(id);
+		if (this.pendingRecords.has(id)) { return pending?.messages.slice(offset, offset + limit) ?? []; }
+		if (this.disk) { return this.disk.load(id, offset, limit)?.messages ?? []; }
+		return (pending ?? this.load(id))?.messages.slice(offset, offset + limit) ?? [];
 	}
 
 	dispose(): void {
-		this._onDidChange.dispose();
-		this._onDidDelete.dispose();
-		this._onDidChangeActive.dispose();
+		this.disposed = true; this.lifecycleWatcher?.dispose(); this.searchLifetime.abort();
+		this._onDidChange.dispose(); this._onDidDelete.dispose(); this._onDidChangeActive.dispose(); this._onDidPermanentlyDelete.dispose(); this._onDidEncounterRecoveryIssue.dispose();
 	}
 
 	private readIndex(): ConversationSummary[] {
-		const raw = this.context.globalState.get<ConversationSummary[]>(INDEX_KEY);
-		return Array.isArray(raw) ? raw : [];
+		const summaries = this.disk ? this.disk.list() : this.mementoIndex();
+		const index = new Map(summaries.map(summary => [summary.id, summary]));
+		for (const [id, record] of this.pendingRecords) { if (record && this.isVisibleInList(id)) { index.set(id, record.summary); } else { index.delete(id); } }
+		return [...index.values()];
 	}
 
-	/**
-	 * Cap the index at {@link MAX_CONVERSATIONS} entries by dropping the
-	 * oldest (lowest `updatedAt`). The corresponding message bodies are also
-	 * cleared so we don't leak orphaned globalState keys.
-	 */
-	private pruneIndex(index: ConversationSummary[]): ConversationSummary[] {
-		if (index.length <= MAX_CONVERSATIONS) {
-			return index;
-		}
-		const sorted = [...index].sort((a, b) => b.updatedAt - a.updatedAt);
-		const kept = sorted.slice(0, MAX_CONVERSATIONS);
-		const dropped = sorted.slice(MAX_CONVERSATIONS);
-		for (const summary of dropped) {
-			void this.context.globalState.update(recordKey(summary.id), undefined);
-		}
-		return kept;
-	}
-
-	/**
-	 * Cap message count per conversation at
-	 * {@link MAX_MESSAGES_PER_CONVERSATION}, dropping the oldest entries.
-	 */
-	private trimMessages(messages: ReadonlyArray<ChatMessage>): ChatMessage[] {
-		if (messages.length <= MAX_MESSAGES_PER_CONVERSATION) {
-			return [...messages];
-		}
-		return messages.slice(messages.length - MAX_MESSAGES_PER_CONVERSATION);
+	private mementoIndex(): ConversationSummary[] {
+		const raw = this.context.globalState.get<ConversationSummary[]>(INDEX_KEY); return Array.isArray(raw) ? raw : [];
 	}
 
 	/**

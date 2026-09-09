@@ -4,7 +4,7 @@
 import { readFile, watch } from 'fs/promises';
 import path from 'path';
 import { EventEmitter } from 'events';
-import { validateAgent, object } from '../../_shared/acp/dist/protocol';
+import { validateAgent, object } from '../../_shared/acp/dist/acp/protocol';
 import type {
 	AgentRegistryConfig,
 	AgentRegistryEntry,

@@ -15,6 +15,7 @@
  */
 
 import * as vscode from 'vscode';
+import * as path from 'node:path';
 import { randomBytes } from 'crypto';
 
 export interface ImpactNode {
@@ -22,6 +23,7 @@ export interface ImpactNode {
 	label: string;
 	filePath: string;
 	symbolName?: string;
+	line?: number;
 	type: 'direct' | 'transitive' | 'test' | 'documentation';
 	depth: number;
 	signature?: string;
@@ -36,6 +38,8 @@ export interface ImpactEdge {
 export interface ImpactAnalysisData {
 	/** Embedded graph returns file dependencies without caller depth or test coverage. */
 	fileBased?: boolean;
+	evidence?: string;
+	truncated?: boolean;
 	/** The symbol being analyzed */
 	target: {
 		name: string;
@@ -55,6 +59,7 @@ export interface ImpactAnalysisData {
 export class ImpactAnalysisPanel {
 	private static currentPanel: ImpactAnalysisPanel | undefined;
 	private readonly panel: vscode.WebviewPanel;
+	private navigation = new Map<string, { filePath: string; line?: number }>();
 	private disposables: vscode.Disposable[] = [];
 
 	private constructor(
@@ -102,17 +107,35 @@ export class ImpactAnalysisPanel {
 	 * Update the panel with new impact analysis data.
 	 */
 	update(data: ImpactAnalysisData): void {
-		this.panel.webview.html = this.getHtml(data);
+		const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		const generation = getNonce();
+		const navigation = new Map<string, { filePath: string; line?: number }>();
+		const navigationIds: Array<string | undefined> = [];
+		const nodes = data.nodes.map((node, index) => {
+			const filePath = path.isAbsolute(node.filePath) ? node.filePath : root ? path.resolve(root, node.filePath) : '';
+			const navigationId = filePath ? `${generation}:${index}` : undefined;
+			if (navigationId) {
+				navigation.set(navigationId, { filePath, line: typeof node.line === 'number' && Number.isSafeInteger(node.line) && node.line > 0 ? node.line : undefined });
+			}
+			navigationIds.push(navigationId);
+			return { ...node, filePath };
+		});
+		this.navigation = navigation;
+		this.panel.webview.html = this.getHtml({ ...data, nodes }, navigationIds);
 	}
 
-	private handleMessage(message: { command: string; filePath?: string; line?: number }): void {
-		switch (message.command) {
+	private handleMessage(message: unknown): void {
+		if (!message || typeof message !== 'object') { return; }
+		const request = message as { command?: unknown; navigationId?: unknown };
+		if ('filePath' in request || 'line' in request) { return; }
+		switch (request.command) {
 			case 'navigateToFile':
-				if (message.filePath) {
-					const uri = vscode.Uri.file(message.filePath);
+				const target = typeof request.navigationId === 'string' ? this.navigation.get(request.navigationId) : undefined;
+				if (target) {
+					const uri = vscode.Uri.file(target.filePath);
 					const options: vscode.TextDocumentShowOptions = {};
-					if (message.line) {
-						options.selection = new vscode.Range(message.line - 1, 0, message.line - 1, 0);
+					if (target.line !== undefined) {
+						options.selection = new vscode.Range(target.line - 1, 0, target.line - 1, 0);
 					}
 					vscode.window.showTextDocument(uri, options);
 				}
@@ -120,7 +143,7 @@ export class ImpactAnalysisPanel {
 		}
 	}
 
-	private getHtml(data: ImpactAnalysisData): string {
+	private getHtml(data: ImpactAnalysisData, navigationIds: readonly (string | undefined)[]): string {
 		const nodeColors: Record<string, string> = {
 			direct: '#e74c3c',       // Red
 			transitive: '#f39c12',   // Amber
@@ -133,12 +156,13 @@ export class ImpactAnalysisPanel {
 		// `<` round-trips back to `<` when the webview parses the literal.
 		const embed = (value: unknown): string => JSON.stringify(value).replace(/</g, '\\u003c');
 
-		const nodesJson = embed(data.nodes.map(n => ({
+		const nodesJson = embed(data.nodes.map((n, index) => ({
 			id: n.id,
 			label: n.label,
 			color: nodeColors[n.type] ?? '#95a5a6',
 			type: n.type,
 			filePath: n.filePath,
+			navigationId: navigationIds[index],
 			symbolName: n.symbolName,
 			signature: n.signature,
 			depth: n.depth,
@@ -279,7 +303,8 @@ export class ImpactAnalysisPanel {
 		<h2>Impact Analysis</h2>
 		<div class="target">${escapeHtml(data.target.name)} — ${escapeHtml(data.target.filePath)}</div>
 	</div>
-	${data.fileBased ? `<p>${escapeHtml(vscode.l10n.t('File dependencies within three levels. Caller depth, test coverage, and documentation links are not supplied by this backend.'))}</p>` : ''}
+	${data.evidence ? `<p>${escapeHtml(data.evidence)}</p>` : data.fileBased ? `<p>${escapeHtml(vscode.l10n.t('File dependencies within three levels. Caller depth, test coverage, and documentation links are not supplied by this backend.'))}</p>` : ''}
+	${data.truncated ? `<p>${escapeHtml(vscode.l10n.t('Results reached the traversal or time limit; additional callers may exist.'))}</p>` : ''}
 	<div class="summary">
 		<div class="summary-item">
 			<div class="summary-dot" style="background: #e74c3c"></div>
@@ -320,9 +345,9 @@ export class ImpactAnalysisPanel {
 
 			container.innerHTML = filtered.map(node => {
 				const indent = Math.max(0, Math.min(3, node.depth)) * 16;
-				// filePath is carried on a data-* attribute and read back via the
-				// delegated click handler below, so no code is built into markup.
-				return '<button type="button" class="node-item" data-filepath="' + escapeAttr(node.filePath) + '" ' +
+				// Only the host-issued identity selects a navigation destination.
+				return '<button type="button" class="node-item" data-navigation-id="' + escapeAttr(node.navigationId) + '" ' +
+					(node.navigationId ? '' : 'disabled ') +
 					'title="' + escapeAttr(node.signature || node.label) + '\\n' + escapeAttr(node.filePath) + '">' +
 					'<div class="depth-indent" style="width: ' + indent + 'px"></div>' +
 					'<div class="node-dot" style="background: ' + escapeAttr(node.color) + '"></div>' +
@@ -354,8 +379,8 @@ export class ImpactAnalysisPanel {
 		});
 		document.getElementById('nodeList').addEventListener('click', (e) => {
 			const item = e.target.closest('.node-item');
-			if (item && item.dataset.filepath) {
-				vscode.postMessage({ command: 'navigateToFile', filePath: item.dataset.filepath });
+			if (item && item.dataset.navigationId) {
+				vscode.postMessage({ command: 'navigateToFile', navigationId: item.dataset.navigationId });
 			}
 		});
 
@@ -367,6 +392,7 @@ export class ImpactAnalysisPanel {
 
 	private dispose(): void {
 		ImpactAnalysisPanel.currentPanel = undefined;
+		this.navigation.clear();
 		this.panel.dispose();
 		while (this.disposables.length) {
 			const x = this.disposables.pop();

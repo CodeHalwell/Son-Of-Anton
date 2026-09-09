@@ -31,6 +31,8 @@ export interface SecretStore {
 export interface ConfigStore {
 	get<T>(key: string): T | undefined;
 	get<T>(key: string, defaultValue: T): T;
+	/** Scoped hosts expose user/default values separately from workspace-effective settings. */
+	inspect?<T>(key: string): { globalValue?: T; defaultValue?: T } | undefined;
 	update?(key: string, value: unknown): Thenable<void> | Promise<void>;
 	onDidChange?(listener: (event: ConfigChangeEvent) => void): Disposable;
 }
@@ -72,6 +74,8 @@ export interface Disposable {
  * file under `~/.son-of-anton/data/`).
  */
 export interface MementoStore {
+	/** Optional enumeration of legacy storage keys for cross-workspace migration. */
+	keys?(): readonly string[];
 	get<T>(key: string): T | undefined;
 	get<T>(key: string, defaultValue: T): T;
 	update(key: string, value: unknown): Thenable<void> | Promise<void>;

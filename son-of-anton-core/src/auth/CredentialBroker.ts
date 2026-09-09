@@ -6,7 +6,7 @@ import * as crypto from 'crypto';
 import * as http from 'http';
 import * as url from 'url';
 import type { Thenable } from '../host';
-import type { TokenRecord, ProviderStatus, ProviderConfig, SecretStore } from './types';
+import { MissingCredentialError, type TokenRecord, type ProviderStatus, type ProviderConfig, type SecretStore } from './types';
 
 const STORAGE_KEY_PREFIX = 'son-of-anton.broker.token.';
 
@@ -54,7 +54,7 @@ export class CredentialBroker {
 		}
 
 		if (!record) {
-			throw new Error(`No credentials stored for provider: ${providerId}`);
+			throw new MissingCredentialError(providerId);
 		}
 
 		if (this.isNearExpiry(record)) {
@@ -82,7 +82,7 @@ export class CredentialBroker {
 	async refresh(providerId: string): Promise<void> {
 		const record = this.cache.get(providerId) ?? await this.loadFromStorage(providerId);
 		if (!record) {
-			throw new Error(`No credentials stored for provider: ${providerId}`);
+			throw new MissingCredentialError(providerId);
 		}
 		const refreshed = await this.performRefresh(providerId, record);
 		this.cache.set(providerId, refreshed);
@@ -132,14 +132,15 @@ export class CredentialBroker {
 
 	private async loadFromStorage(providerId: string): Promise<TokenRecord | undefined> {
 		const raw = await this.secrets.get(`${STORAGE_KEY_PREFIX}${providerId}`);
-		if (!raw) {
-			return undefined;
-		}
+		if (raw === undefined) { return undefined; }
 		try {
-			return JSON.parse(raw) as TokenRecord;
-		} catch {
-			return undefined;
-		}
+			const record = JSON.parse(raw) as Partial<TokenRecord> | null;
+			if (!record || typeof record !== 'object' || Array.isArray(record) || typeof record.token !== 'string' || !record.token.trim()
+				|| typeof record.expiresAt !== 'number' || !Number.isFinite(record.expiresAt)
+				|| (record.refreshToken !== undefined && typeof record.refreshToken !== 'string')
+				|| (record.headers !== undefined && (!record.headers || typeof record.headers !== 'object' || Array.isArray(record.headers) || Object.values(record.headers).some(value => typeof value !== 'string')))) { throw new Error('Invalid token record'); }
+			return record as TokenRecord;
+		} catch { throw new Error(`Stored credentials are invalid for provider: ${providerId}`); }
 	}
 
 	private async saveToStorage(providerId: string, record: TokenRecord): Promise<void> {
@@ -171,9 +172,13 @@ export class CredentialBroker {
 		});
 
 		if (!response.ok) {
-			this.cache.delete(providerId);
-			await this.secrets.delete(`${STORAGE_KEY_PREFIX}${providerId}`);
-			this.fireDisconnect(providerId);
+			// Only invalid_grant establishes that the refresh token is unusable.
+			// Rate limits, outages and client configuration errors must remain retryable.
+			if (await isInvalidGrant(response)) {
+				this.cache.delete(providerId);
+				await this.secrets.delete(`${STORAGE_KEY_PREFIX}${providerId}`);
+				this.fireDisconnect(providerId);
+			}
 			throw new Error(`Token refresh failed for ${providerId}: HTTP ${response.status}`);
 		}
 
@@ -304,4 +309,23 @@ export class CredentialBroker {
 			}
 		}
 	}
+}
+
+/** OAuth error bodies are untrusted and must never turn an uncertain failure into token removal. */
+async function isInvalidGrant(response: Response): Promise<boolean> {
+	if (response.status !== 400) { void response.body?.cancel().catch(() => {}); return false; }
+	const reader = response.body?.getReader(); if (!reader) { return false; }
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const deadline = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('OAuth error response timed out')), 2000); });
+	const chunks: Uint8Array[] = []; let bytes = 0;
+	try {
+		while (true) {
+			const next = await Promise.race([reader.read(), deadline]); if (next.done) { break; }
+			bytes += next.value.byteLength; if (bytes > 16 * 1024) { return false; }
+			chunks.push(next.value);
+		}
+		const body: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+		return !!body && typeof body === 'object' && !Array.isArray(body) && 'error' in body && body.error === 'invalid_grant';
+	} catch { return false; }
+	finally { if (timer) { clearTimeout(timer); } void reader.cancel().catch(() => {}); reader.releaseLock(); }
 }

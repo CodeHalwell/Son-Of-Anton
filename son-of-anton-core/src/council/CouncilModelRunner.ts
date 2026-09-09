@@ -18,7 +18,9 @@ export class CouncilModelRunner implements CouncilRunner {
 			turn.signal.addEventListener('abort', abort, { once: true });
 			try {
 			if (turn.signal.aborted) { abort(); }
-			const result = await this.acp.run({ agent: definition, cwd: turn.workspace, conversationId: turn.conversationId, text: turn.prompt, modeId: turn.member.readOnlyMode, mcpServers: [], signal: controller.signal, timeoutMs: turn.timeoutMs, onPermission: async () => cancelledPermission(), onUpdate: update => {
+			// Each stage is one-shot; CouncilStore owns its durable report. Do not
+			// accumulate separate recovery transcripts for these never-reused IDs.
+			const result = await this.acp.run({ agent: definition, cwd: turn.workspace, conversationId: turn.conversationId, persistRecovery: false, text: turn.prompt, modeId: turn.member.readOnlyMode, mcpServers: [], signal: controller.signal, timeoutMs: turn.timeoutMs, onPermission: async () => cancelledPermission(), onUpdate: update => {
 				if (update.sessionUpdate === 'current_mode_update' && update.modeId !== turn.member.readOnlyMode) { controller.abort(new Error('ACP agent left the required read-only mode')); return; }
 				if (update.sessionUpdate === 'agent_message_chunk' && object(update.content) && typeof update.content.text === 'string') { turn.onText(update.content.text); }
 			} });

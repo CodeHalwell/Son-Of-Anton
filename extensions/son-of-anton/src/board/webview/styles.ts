@@ -4,6 +4,22 @@
  *--------------------------------------------------------------------------------------------*/
 /** Theme-aware layout shared by the board and its assistant. */
 export const boardStyles = `
+.dependency-editor { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(280px, 1fr); overflow: auto; gap: 24px; border: 1px solid var(--sota-border); border-radius: 10px; padding: 20px; }
+.dependency-controls, .dependency-preview { min-width: 0; overflow-wrap: anywhere; }
+.dependency-editor h2, .dependency-editor h3 { margin-top: 0; }
+.dependency-editor p, .dependency-editor small { color: var(--sota-muted); }
+.dependency-controls > label { display: grid; gap: 6px; margin-bottom: 16px; }
+.dependency-controls fieldset { border: 1px solid var(--sota-border); border-radius: 6px; margin: 0 0 16px; }
+.dependency-options { max-height: 300px; overflow: auto; }
+.dependency-options label { display: flex; align-items: flex-start; gap: 8px; padding: 8px 0; }
+.dependency-editor small { display: block; font-size: 11px; overflow-wrap: anywhere; }
+.dependency-wave { border-left: 2px solid var(--sota-accent); padding-left: 12px; margin-bottom: 16px; }
+.dependency-wave ul { padding: 0; list-style: none; }
+.dependency-wave button { text-align: left; width: 100%; border: 1px solid var(--sota-border); margin-bottom: 6px; }
+.dependency-wave button[aria-pressed="true"] { border-color: var(--sota-accent); }
+.dependency-error { color: var(--vscode-errorForeground) !important; }
+@media (max-width: 760px) { .dependency-editor { grid-template-columns: 1fr; } }
+
 :root {
 	--sota-surface: var(--vscode-editor-background, #16191e);
 	--sota-raised: var(--vscode-editorWidget-background, #21252c);
@@ -91,6 +107,7 @@ select { padding: 7px 24px 7px 10px; border: 1px solid var(--sota-border); borde
 .task-detail-body { font-size: 11px; color: var(--sota-muted); border-top: 1px solid var(--sota-border); margin-top: 10px; }
 .task-detail-body ul { padding-left: 16px; }
 .task-detail-body code { font-family: var(--vscode-editor-font-family, monospace); }
+.tile-assignee select { min-width: 0; max-width: 100%; flex: 1; background: var(--vscode-dropdown-background); color: var(--vscode-foreground); border: 1px solid var(--vscode-panel-border); border-radius: 4px; padding: 3px; }
 .tile-assignee { display: flex; align-items: center; gap: 7px; margin: 13px 0 8px; }
 .avatar { display: grid; place-items: center; width: 23px; height: 23px; border-radius: 6px; background: var(--sota-raised); font-size: 10px; font-weight: 600; }
 .tile-name { color: var(--sota-muted); font-size: 11px; }

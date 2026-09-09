@@ -36,6 +36,9 @@ export interface CouncilFinding {
 	severity: 'high' | 'medium' | 'low';
 	file: string;
 	line: number;
+	side?: 'old' | 'new';
+	/** Host-verified citation only; this does not verify reasoning or execute tests. */
+	evidenceVerified?: boolean;
 	evidence: string;
 	detail: string;
 }

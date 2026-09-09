@@ -13,7 +13,14 @@ import type { DragEvent } from 'react';
 import { postToHost } from './vscode';
 import type { BoardTaskView, PersonaView } from './protocol';
 
+export interface AssignmentView {
+	readonly conversationId: string;
+	readonly expectedRevision: string;
+	readonly personas: readonly PersonaView[];
+}
+
 interface KanbanCardProps {
+	readonly assignment?: AssignmentView;
 	readonly task: BoardTaskView;
 	readonly persona: PersonaView | undefined;
 }
@@ -25,7 +32,7 @@ const FALLBACK_PERSONA: PersonaView = {
 	tagline: '',
 };
 
-export function KanbanCard({ task, persona }: KanbanCardProps): JSX.Element {
+export function KanbanCard({ task, persona, assignment }: KanbanCardProps): JSX.Element {
 	const p = persona ?? FALLBACK_PERSONA;
 	const idShort = task.id.split('-').slice(-2).join('-');
 
@@ -78,6 +85,14 @@ export function KanbanCard({ task, persona }: KanbanCardProps): JSX.Element {
 			<div className="tile-assignee">
 				<span className="avatar" style={{ color: p.accent }} aria-hidden="true">{p.monogram}</span>
 				<span className="tile-name">@{task.assignee}</span>
+				{assignment && <select aria-label={`Assign task ${idShort} to agent`} value={task.assignee} onChange={event => {
+					const newAssignee = event.currentTarget.value;
+					postToHost({ type: 'reassign', conversationId: assignment.conversationId, expectedRevision: assignment.expectedRevision, taskId: task.id, newAssignee });
+					event.currentTarget.value = task.assignee;
+				}}>
+					{!assignment.personas.some(persona => persona.id === task.assignee) && <option value={task.assignee}>@{task.assignee}</option>}
+					{assignment.personas.map(persona => <option key={persona.id} value={persona.id}>@{persona.id}</option>)}
+				</select>}
 			</div>
 			{task.scopeFiles.length > 0 && (
 				<div className="chips">

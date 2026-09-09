@@ -5,6 +5,7 @@
 
 import { createHash } from 'node:crypto';
 import type { ConfigStore, MementoStore, ProjectContextProvider } from '../host';
+import { getDiscoveredModel } from '../llm/DiscoveredModels';
 import { LlmClient, type ModelId } from '../llm/LlmClient';
 import { ModelRouter } from '../llm/ModelRouter';
 import { PromptCacheOptimizer } from '../llm/PromptCacheOptimizer';
@@ -14,6 +15,7 @@ import { AgentManager } from './AgentManager';
 import { AcpAgent } from './AcpAgent';
 import { RoutedAgent } from './RoutedAgent';
 import { AcpRuntime } from '../acp/AcpRuntime';
+import { AcpSessionStore } from '../acp/AcpSessionStore';
 import { validateAgent, type AcpAgentDefinition, type AcpPermissionHandler } from '../acp/protocol';
 import { BaseAgent } from './BaseAgent';
 import { CiRetryAgent } from './CiRetryAgent';
@@ -307,19 +309,21 @@ export function createAgentStack(deps: {
 		// back to the AgentConfig default. Validation happens at the
 		// LlmClient boundary — an unknown ModelId errors at request time
 		// rather than silently downgrading at activation.
-		const override = configStore?.get<string>(`sota.agents.${handle}.model`);
-		if (typeof override === 'string' && override.trim().length > 0) {
-			// `userPinnedModel: true` tells `BaseAgent.resolveModel` to
-			// honour this exact id even when the orchestrator's per-turn
-			// model hint would otherwise re-route the specialist to a
-			// subscription family for auth-sharing.
-			return { ...config, defaultModel: override.trim() as ModelId, userPinnedModel: true };
-		}
-		return config;
+		const override = (): ModelId | undefined => {
+			const value = configStore?.get<string>(`sota.agents.${handle}.model`);
+			return typeof value === 'string' && value.trim() ? value.trim() as ModelId : undefined;
+		};
+		// Read the host/profile override at use time: switching a saved profile must not need a window reload.
+		return {
+			...config,
+			get defaultModel() { return override() ?? config.defaultModel; },
+			get userPinnedModel() { return override() !== undefined || config.userPinnedModel; },
+		};
 	};
 
 
 	const acpRuntime = deps.acpRuntime ?? new AcpRuntime({
+		sessionStore: new AcpSessionStore(globalState),
 		maxProcesses: configStore?.get<number>('sota.acp.maxProcesses'),
 		maxQueue: configStore?.get<number>('sota.acp.maxQueue'),
 	});
@@ -330,7 +334,10 @@ export function createAgentStack(deps: {
 		return new RoutedAgent(agent, model => {
 			const explicit = configStore?.get<string>(`sota.agents.${agent.handle}.acpAgent`)?.trim();
 			const claudeModel = model.startsWith('claude-code-') ? model.slice('claude-code-'.length) : undefined;
-			const id = explicit || (claudeModel ? 'claude-acp' : undefined);
+			const discovered = getDiscoveredModel(model);
+			// A catalog selection names an exact provider route; a saved specialist adapter must not silently replace it.
+			if (discovered && discovered.provider !== 'acp') { return undefined; }
+			const id = discovered?.acpAdapterId || explicit || (claudeModel ? 'claude-acp' : undefined);
 			if (!id) { return undefined; }
 			const definitions = configStore?.get<AcpAgentDefinition[]>('sota.acp.agents') ?? [];
 			const definition = Array.isArray(definitions) ? definitions.find(entry => entry.id === id) : undefined;
@@ -340,7 +347,7 @@ export function createAgentStack(deps: {
 			validateAgent(definition);
 			// The registry's Claude adapter supports ANTHROPIC_MODEL. Custom explicit
 			// adapters retain their own model configuration and execution semantics.
-			const configured = id === 'claude-acp' && claudeModel ? { ...definition, env: { ...definition.env, ANTHROPIC_MODEL: claudeModel } } : definition;
+			const configured = discovered?.acpAdapterId ? { ...definition, modelId: discovered.model } : id === 'claude-acp' && claudeModel ? { ...definition, env: { ...definition.env, ANTHROPIC_MODEL: claudeModel } } : definition;
 			const key = createHash('sha256').update(JSON.stringify(configured)).digest('hex');
 			if (cached?.key !== key) {
 				cached = { key, agent: new AcpAgent(acpRuntime, configured, workspaceRoot ?? '', () => {

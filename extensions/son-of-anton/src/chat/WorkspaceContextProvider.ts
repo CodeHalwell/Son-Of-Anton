@@ -184,13 +184,16 @@ export class WorkspaceContextProvider implements vscode.Disposable {
 
 		const includeSelection = opts?.includeActiveSelection !== false;
 
+		// Capture the editor synchronously before metadata/file reads yield. A tab
+		// switch while collecting context must not change which buffer is sent.
+		const activeFull = this.getActiveEditorContext(includeSelection, SMALL_FILE_LINE_LIMIT);
+		const activeShort = this.getActiveEditorContext(includeSelection, SHRUNK_FILE_LINE_LIMIT);
 		const projectContext = await this.agentsMdLoader.load();
 		const hasProjectContext = projectContext.source !== 'none' && projectContext.contents.trim().length > 0;
 		const readmeLineLimit = hasProjectContext ? SHRUNK_README_LINE_LIMIT : README_LINE_LIMIT;
-		const activeFileLineLimit = hasProjectContext ? SHRUNK_FILE_LINE_LIMIT : SMALL_FILE_LINE_LIMIT;
 
 		const meta = await this.getWorkspaceMeta();
-		const active = await this.getActiveEditorContext(includeSelection, activeFileLineLimit);
+		const active = await (hasProjectContext ? activeShort : activeFull);
 		const readme = await this.getReadmeOverview(readmeLineLimit);
 		const recent = this.getRecentFiles();
 

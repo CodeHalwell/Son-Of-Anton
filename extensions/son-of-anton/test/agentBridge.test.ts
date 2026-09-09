@@ -112,6 +112,22 @@ function makeStack(specialists: ReadonlyMap<AgentHandle, FakeAgent>, orchestrato
 // ── AgentBridge unit tests ────────────────────────────────────────────────────
 
 suite('AgentBridge', () => {
+	test('a structured orchestration failure suppresses final and duplicate thrown errors', async () => {
+		const orchestrator = makeOrchestrator();
+		orchestrator.handleChatRequest = async (_request, _context, _stream, _token, emit) => { emit?.({ type: 'error', message: 'Reported failure' }); throw new Error('Duplicate failure'); };
+		const bridge = new AgentBridge(makeStack(new Map(), orchestrator)); const events: AgentEvent[] = [];
+		await bridge.runOrchestrator('Plan', event => events.push(event), token());
+		assert.deepStrictEqual(events, [{ type: 'error', message: 'Reported failure' }]); bridge.dispose();
+	});
+
+	test('board approval forwards the owning conversation and observes structured failure', async () => {
+		const orchestrator = makeOrchestrator(); let owner: string | undefined;
+		orchestrator.handleChatRequest = async (request, _context, _stream, _token, emit) => { owner = (request as typeof request & { conversationId?: string }).conversationId; emit?.({ type: 'error', message: 'Approval failed' }); };
+		const bridge = new AgentBridge(makeStack(new Map(), orchestrator)); const events: AgentEvent[] = [];
+		await bridge.approveActivePlan('owner', event => events.push(event), token());
+		assert.deepStrictEqual({ owner, events }, { owner: 'owner', events: [{ type: 'error', message: 'Approval failed' }] }); bridge.dispose();
+	});
+
 	test('hasAgent returns true for "anton" (orchestrator handle is special)', () => {
 		const bridge = new AgentBridge(makeStack(new Map(), makeOrchestrator()));
 		assert.strictEqual(bridge.hasAgent('anton'), true);
