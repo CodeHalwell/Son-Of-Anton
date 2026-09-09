@@ -1442,6 +1442,73 @@ test('context source exclusions are scoped to the draft and stale preview respon
 	assert.deepEqual(await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').at(-1).excludedContext), []);
 });
 
+test('mention exclusions survive chip removal and late preview acknowledgements in the composer', async t => {
+	const page = await openSurface(t, 'chat', 400, { conversationDrafts: [['initial-conversation', { text: 'Review sources', mentions: [{ kind: 'file', path: 'A.ts', label: 'A.ts' }, { kind: 'file', path: 'B.ts', label: 'B.ts' }], attachments: [], excludedContext: [], includeContext: false }]] });
+	await page.locator('#workspaceContextDetails summary').click();
+	await page.waitForFunction(() => sentMessages.some(message => message.type === 'previewWorkspaceContext'));
+	const ids = await page.evaluate(() => ['A.ts', 'B.ts'].map(path => SotaWorkflows.mentionSourceId({ kind: 'file', path })));
+	const request = await page.evaluate(() => sentMessages.filter(message => message.type === 'previewWorkspaceContext').at(-1));
+	const sections = ids.map((id, index) => ({ id, label: index ? 'B.ts' : 'A.ts', markdown: index ? 'PRIVATE BODY' : 'Public body', estimatedTokens: 3, excluded: false }));
+	await post(page, { type: 'workspaceContextPreview', conversationId: 'initial-conversation', requestId: request.id, id: 'both', sections, excludedContext: [] });
+	await page.getByRole('checkbox', { name: 'Include B.ts', exact: true }).click();
+	const excluded = await page.evaluate(() => sentMessages.filter(message => message.type === 'previewWorkspaceContext').at(-1));
+	await post(page, { type: 'workspaceContextPreview', conversationId: 'initial-conversation', requestId: excluded.id, id: 'excluded', sections: sections.map(section => ({ ...section, excluded: section.id === ids[1], markdown: '' })), excludedContext: [ids[1]] });
+	await page.getByRole('button', { name: 'Remove mention A.ts', exact: true }).click();
+	await page.waitForFunction(old => sentMessages.filter(message => message.type === 'previewWorkspaceContext').at(-1)?.id !== old, excluded.id);
+	const remaining = await page.evaluate(() => sentMessages.filter(message => message.type === 'previewWorkspaceContext').at(-1));
+	await post(page, { type: 'workspaceContextPreview', conversationId: 'initial-conversation', requestId: excluded.id, id: 'stale', sections, excludedContext: [], markdown: 'STALE BODY' });
+	assert.doesNotMatch(await page.locator('#workspaceContextPreview').innerText(), /STALE/);
+	await post(page, { type: 'workspaceContextPreview', conversationId: 'initial-conversation', requestId: remaining.id, id: 'remaining', sections: [{ ...sections[1], excluded: true, markdown: '' }], excludedContext: [ids[1]] });
+	assert.equal(await page.getByRole('checkbox', { name: 'Include B.ts', exact: true }).isChecked(), false);
+	await page.locator('#sendBtn').click();
+	const sent = await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').at(-1));
+	assert.deepEqual({ mentions: sent.mentionsKinded, excluded: sent.excludedContext, snapshot: sent.contextSnapshotId }, { mentions: [{ kind: 'file', path: 'B.ts' }], excluded: [ids[1]], snapshot: 'remaining' });
+});
+
+test('saved and reused legacy mention exclusions conservatively cover every chip and deferred URL', async t => {
+	const draft = { text: 'Review @url https://example.com/private', mentions: [{ kind: 'file', path: 'B.ts', label: 'B.ts' }, { kind: 'file', path: 'C.ts', label: 'C.ts' }], attachments: [], excludedContext: ['mention:1'], includeContext: false };
+	const page = await openSurface(t, 'chat', 400, { conversationDrafts: [['initial-conversation', draft]] });
+	assert.equal(await page.locator('#contextMigrationNotice').isVisible(), true);
+	await page.locator('#workspaceContextDetails summary').click();
+	await page.waitForFunction(() => sentMessages.some(message => message.type === 'previewWorkspaceContext'));
+	const verify = async () => {
+		const preview = await page.evaluate(() => sentMessages.filter(message => message.type === 'previewWorkspaceContext').at(-1));
+		const expected = await page.evaluate(() => SotaWorkflows.contextMentions({ mentions: ['B.ts', 'C.ts'], text: 'Review @url https://example.com/private' }).map(SotaWorkflows.mentionSourceId));
+		assert.deepEqual(preview.excludedContext, expected);
+		assert.equal(preview.mentionsKinded.length, 3);
+		await page.locator('#sendBtn').click();
+		const sent = await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').at(-1));
+		assert.deepEqual(sent.excludedContext, expected);
+		assert.equal(sent.mentionsKinded.length, 3);
+		await post(page, { type: 'requestSettled', cancelled: false });
+	};
+	await verify();
+	await post(page, { type: 'loadConversation', conversationId: 'old-group', messages: [{ role: 'user', content: 'Old prompt', request: { text: draft.text, mentions: ['B.ts', 'C.ts'], excludedContext: ['mentions'], includeWorkspaceContext: false } }, { role: 'assistant', content: 'Old reply' }] });
+	await page.getByRole('button', { name: 'Reuse Prompt', exact: true }).click();
+	assert.equal(await page.locator('#contextMigrationNotice').isVisible(), true);
+	await verify();
+});
+
+test('empty legacy draft exclusions stay conservative when deferred URLs change during preview', async t => {
+	const page = await openSurface(t, 'chat', 400, { conversationDrafts: [['initial-conversation', { text: '', mentions: [], attachments: [], excludedContext: ['mention:1'], includeContext: false }]] });
+	await page.locator('#workspaceContextDetails summary').click();
+	await page.locator('#messageInput').fill('Review @url https://example.com/first');
+	await page.waitForFunction(() => sentMessages.filter(message => message.type === 'previewWorkspaceContext').at(-1)?.mentionsKinded.length === 1);
+	const before = await page.evaluate(() => sentMessages.filter(message => message.type === 'previewWorkspaceContext').at(-1));
+	const ids = await page.evaluate(() => ['first', 'second'].map(name => SotaWorkflows.mentionSourceId({ kind: 'url', url: 'https://example.com/' + name })));
+	await post(page, { type: 'prefillComposer', text: 'Review @url https://example.com/first @url https://example.com/second' });
+	await post(page, { type: 'workspaceContextPreview', conversationId: 'initial-conversation', requestId: before.id, id: 'stale-empty', sections: [], excludedContext: [ids[0]] });
+	await page.waitForFunction(() => sentMessages.filter(message => message.type === 'previewWorkspaceContext').at(-1)?.mentionsKinded.length === 2);
+	const current = await page.evaluate(() => sentMessages.filter(message => message.type === 'previewWorkspaceContext').at(-1));
+	assert.deepEqual(current.excludedContext, ['mention:v1:all']);
+	await post(page, { type: 'workspaceContextPreview', conversationId: 'initial-conversation', requestId: current.id, id: 'review-both', excludedContext: ids, sections: ids.map((id, index) => ({ id, label: index ? 'Second URL' : 'First URL', markdown: '', excluded: true, estimatedTokens: 0 })) });
+	await page.getByRole('checkbox', { name: 'Include Second URL', exact: true }).click();
+	await page.locator('#sendBtn').click();
+	const sent = await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').at(-1));
+	assert.deepEqual(sent.excludedContext, [ids[0]], 'Only explicit inclusion clears the conservative exclusion');
+	assert.equal(sent.mentionsKinded.length, 2);
+});
+
 test('assistant-first history windows restore off-window prompts across system messages and incomplete turns', async t => {
 	const page = await openSurface(t, 'chat', 420);
 	const messages = Array.from({ length: 601 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `Message ${index}` }));

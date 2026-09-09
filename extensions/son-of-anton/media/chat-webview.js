@@ -501,6 +501,31 @@
 		let excludedContext = [];
 		let contextSnapshotId;
 		let contextPreviewRequestId;
+		let contextPreviewFingerprint;
+		let contextPreviewTimer;
+		const contextMigrationNotice = document.createElement('p');
+		contextMigrationNotice.id = 'contextMigrationNotice';
+		contextMigrationNotice.hidden = true;
+		contextMigrationNotice.textContent = uiText('contextExclusionsMigrated');
+		contextDetails.before(contextMigrationNotice);
+		function currentContextMentions() {
+			return SotaWorkflows.contextMentions({ mentionsKinded: mentions.map(({ kind, path, url }) => ({ kind: kind || 'file', path, url })), text: messageInput.value });
+		}
+		function composerContextFingerprint() {
+			return JSON.stringify([activeConversationId, includeContext.checked, attachments, currentContextMentions().map(SotaWorkflows.mentionSourceId), excludedContext]);
+		}
+		function restoreContextExclusions(draft) {
+			const restored = SotaWorkflows.migrateMentionExclusions(draft?.excludedContext || [], currentContextMentions());
+			excludedContext = restored.excludedContext;
+			contextMigrationNotice.hidden = !restored.migrated;
+		}
+		function contextSourcesChanged() {
+			if (contextPreviewFingerprint === composerContextFingerprint()) return;
+			contextSnapshotId = undefined;
+			contextPreviewRequestId = undefined;
+			clearTimeout(contextPreviewTimer);
+			contextPreviewTimer = setTimeout(updateContextPreview, 0);
+		}
 		function captureComposerDraft() {
 			return { text: messageInput.value, attachments: [...attachments], mentions: mentions.map(mention => ({ ...mention })), images: [...imageAttachments], model: currentModel, agent: currentAgent, mode: currentMode, includeContext: includeContext.checked, excludedContext: [...excludedContext] };
 		}
@@ -509,11 +534,11 @@
 		let latestConnectionStatus;
 		function composerMessage() {
 			return { type: 'sendMessage', conversationId: activeConversationId, text: messageInput.value.trim(), model: currentModel,
-				attachments: [...attachments], mentionsKinded: mentions.map(({ kind, path, url }) => ({ kind: kind || 'file', path, url })),
+				attachments: [...attachments], mentionsKinded: currentContextMentions(),
 				images: imageAttachments.map(({ mime, base64, name }) => ({ mime, base64, name })), specialistId: currentAgent, chatMode: currentMode, includeWorkspaceContext: includeContext.checked, excludedContext: [...excludedContext], contextSnapshotId };
 		}
 		function draftFromWire(draft) {
-			return { text: draft.text, attachments: draft.attachments || [], mentions: (draft.mentionsKinded || []).map(mention => ({ ...mention, label: mention.path || mention.url || '@' + mention.kind })), images: (draft.images || []).map((image, index) => ({ ...image, id: 'queued-' + index })), model: draft.model, agent: draft.specialistId, mode: draft.chatMode, includeContext: draft.includeWorkspaceContext, excludedContext: draft.excludedContext || [] };
+			return { text: draft.text, attachments: draft.attachments || [], mentions: SotaWorkflows.contextMentions(draft).map(mention => ({ ...mention, label: mention.path || mention.url || '@' + mention.kind })), images: (draft.images || []).map((image, index) => ({ ...image, id: 'queued-' + index })), model: draft.model, agent: draft.specialistId, mode: draft.chatMode, includeContext: draft.includeWorkspaceContext, excludedContext: draft.excludedContext || [] };
 		}
 		for (const [id, type] of [['queueMessageBtn', 'queueMessage'], ['redirectMessageBtn', 'redirectMessage']]) {
 			document.getElementById(id).addEventListener('click', () => {
@@ -531,7 +556,7 @@
 			mentions = (draft.mentions || []).map(mention => ({ ...mention }));
 			imageAttachments = [...(draft.images || [])];
 			includeContext.checked = draft.includeContext !== false;
-			excludedContext = [...(draft.excludedContext || [])];
+			restoreContextExclusions(draft);
 			contextSnapshotId = undefined;
 			if (isSavedModel(draft.model)) currentModel = draft.model;
 			if (SPECIALISTS.some(specialist => specialist.id === draft.agent)) currentAgent = draft.agent;
@@ -596,9 +621,9 @@
 			excludedContext = []; contextSnapshotId = undefined;
 			const draft = drafts.get(id);
 			messageInput.value = draft?.text || '';
-			excludedContext = [...(draft?.excludedContext || [])];
 			attachments = Array.isArray(draft?.attachments) ? [...draft.attachments] : [];
 			mentions = Array.isArray(draft?.mentions) ? [...draft.mentions] : [];
+			restoreContextExclusions(draft);
 			imageAttachments = Array.isArray(draft?.images) ? [...draft.images] : [];
 			includeContext.checked = draft?.includeContext !== false;
 			currentModel = [savedModel, draft?.model, document.body.dataset.defaultModel, 'sonnet'].find(isSavedModel);
@@ -613,6 +638,8 @@
 			updateContextPreview();
 		}
 		function updateContextPreview() {
+			clearTimeout(contextPreviewTimer);
+			contextPreviewFingerprint = composerContextFingerprint();
 			contextSummary.textContent = uiText(includeContext.checked ? 'on' : 'off');
 			refreshContext.disabled = false;
 			contextPreview.textContent = uiText(includeContext.checked ? 'contextLoading' : 'contextOff');
@@ -623,7 +650,7 @@
 		contextDetails.addEventListener('toggle', updateContextPreview);
 		includeContext.addEventListener('change', () => { persistDraft(); updateContextPreview(); });
 		refreshContext.addEventListener('click', updateContextPreview);
-		window.addEventListener('pagehide', persistDraft);
+		window.addEventListener('pagehide', () => { persistDraft(); clearTimeout(contextPreviewTimer); contextPreviewRequestId = undefined; });
 
 
 		function persistCommandHistory() {
@@ -2754,23 +2781,13 @@
 		// follows '@url ' but isn't a valid URL is left in the text untouched
 		// so the user sees their typo and can correct it.
 		function extractInlineUrlMentions(text) {
-			if (typeof text !== 'string' || text.indexOf('@url') < 0) return text;
-			const re = /(^|\s)@url\s+(https?:\/\/[^\s]+)/g;
-			let cleaned = text;
-			let m;
-			const found = [];
-			while ((m = re.exec(text)) !== null) {
-				found.push({ full: m[0], lead: m[1], url: m[2] });
+			const parsed = SotaWorkflows.inlineUrlMentions(text);
+			for (const mention of parsed.mentions) {
+				const candidate = { ...mention, label: '@url ' + mention.url };
+				if (!mentionAlreadyAdded(candidate)) mentions.push(candidate);
 			}
-			for (const entry of found) {
-				const candidate = { kind: 'url', url: entry.url, label: '@url ' + entry.url };
-				if (!mentionAlreadyAdded(candidate)) {
-					mentions.push(candidate);
-				}
-				cleaned = cleaned.replace(entry.full, entry.lead);
-			}
-			if (found.length > 0) renderContextChips();
-			return cleaned.replace(/\s{2,}/g, ' ').trim();
+			if (parsed.mentions.length) renderContextChips();
+			return parsed.text;
 		}
 
 		function sendMessage(renderOnly = false, requestId) {
@@ -3059,6 +3076,7 @@
 		}
 
 		function renderContextChips() {
+			contextSourcesChanged();
 			persistDraft();
 			updateSendAffordance();
 			contextChips.textContent = '';
@@ -3826,6 +3844,7 @@
 		});
 
 		messageInput.addEventListener('input', (e) => {
+			contextSourcesChanged();
 			persistDraft();
 			messageInput.style.height = 'auto';
 			// The CSS sets a 64px min-height (3 rows) and 240px max-height
@@ -4502,8 +4521,9 @@
 					}
 					break;
 				case 'workspaceContextPreview':
-					if (message.conversationId === activeConversationId && (message.requestId ? message.requestId === contextPreviewRequestId : includeContext.checked)) {
+					if (message.conversationId === activeConversationId && contextPreviewFingerprint === composerContextFingerprint() && (message.requestId ? message.requestId === contextPreviewRequestId : includeContext.checked)) {
 						contextSnapshotId = message.id;
+						if (Array.isArray(message.excludedContext)) { excludedContext = [...message.excludedContext]; contextPreviewFingerprint = composerContextFingerprint(); persistDraft(); }
 						if (message.sections) SotaWorkflows.renderContext(contextPreview, message.sections, (id, included) => { excludedContext = included ? excludedContext.filter(value => value !== id) : [...new Set([...excludedContext, id])]; persistDraft(); updateContextPreview(); }, uiText);
 						else contextPreview.textContent = message.error || message.markdown || uiText('contextEmpty');
 						contextSummary.textContent = message.markdown ? uiText('contextTokens', Number(message.estimatedTokens || 0).toLocaleString()) : uiText(includeContext.checked ? 'on' : 'off');
@@ -4768,6 +4788,7 @@
 					// user submits when ready.
 					if (messageInput && typeof message.text === 'string') {
 						messageInput.value = message.text;
+						messageInput.dispatchEvent(new Event('input'));
 						messageInput.style.height = 'auto';
 						messageInput.style.height = Math.min(messageInput.scrollHeight, 200) + 'px';
 						try { messageInput.focus(); } catch (e) { /* noop */ }

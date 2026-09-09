@@ -7,6 +7,7 @@ import { getChatUiStrings } from './chatUiStrings';
 import { ChatTurnQueue } from './ChatTurnQueue';
 import { resolveChatSpecialist } from './ChatModelRouting';
 import { assembleTurnContext, type TurnContext } from './TurnContext';
+import { contextMentions, expandMentionExclusions, hasLegacyMentionExclusions, mentionSourceId, type ContextMention as KindedMention } from './ContextSources';
 import type { ProviderFinder } from '../providers/ProviderFinder';
 import { globalScopedConfig } from './globalScopedConfig';
 import { LlmClient, LlmContentPart, LlmMessage, ModelId, modelSupportsImages, supportsAgenticToolLoop, ToolDefinition as LlmToolDefinition } from 'son-of-anton-core/llm/LlmClient';
@@ -80,18 +81,6 @@ interface ImageAttachmentPayload {
 	name?: string;
 }
 
-/**
- * Discriminated mention payload posted from the webview alongside the legacy
- * `mentions: string[]`. Each variant tells the host how to resolve the chip
- * into a markdown block at send time.
- */
-type KindedMention =
-	| { kind: 'workspace' }
-	| { kind: 'file'; path?: string }
-	| { kind: 'folder'; path?: string }
-	| { kind: 'problems' }
-	| { kind: 'terminal' }
-	| { kind: 'url'; url?: string };
 
 interface ChatTurn {
 	readonly turnId: string;
@@ -2983,6 +2972,7 @@ export class ChatSession {
 			} else {
 				if (JSON.stringify(message).length > 12 * 1024 * 1024) { throw new Error(vscode.l10n.t('Queued message is too large. Use fewer image attachments.')); }
 				if (!message.text?.trim() && !message.attachments?.length && !message.mentions?.length && !message.mentionsKinded?.length && !message.images?.length) { return; }
+				this.validateContextExclusions(message);
 				const model = message.model ?? this.currentModel;
 				const specialistId = resolveChatSpecialist(model, message.specialistId ?? this.currentSpecialistId, this.agentBridge);
 				this.followupQueue.add(this.currentConversationId, { ...message, model, specialistId, type: 'sendMessage' }, message.type === 'redirectMessage');
@@ -3033,6 +3023,7 @@ export class ChatSession {
 	}
 
 	private async runChatTurn(message: WebviewMessage, owner: ChatTurn): Promise<void> {
+		this.validateContextExclusions(message);
 		const controller = owner.controller;
 		const current = () => this.ownsTurn(owner) && !controller.signal.aborted;
 		const post = (payload: Record<string, unknown>) => { if (payload.type === 'streamError' || payload.type === 'spendCapBlocked') { owner.failed = true; } if (this.ownsTurn(owner)) { void this.webview.postMessage({ ...payload, conversationId: owner.conversationId, requestId: owner.requestId, turnId: owner.turnId }); } };
@@ -3219,7 +3210,7 @@ export class ChatSession {
 			model,
 			specialistId,
 			request: {
-				excludedContext: message.excludedContext,
+				excludedContext: message.excludedContext === undefined && !turnContext.excludedContext.length ? undefined : turnContext.excludedContext,
 				text: rawText,
 				attachments: message.attachments ? [...message.attachments] : undefined,
 				mentions: message.mentions ? [...message.mentions] : undefined,
@@ -4165,11 +4156,19 @@ export class ChatSession {
 		return parts;
 	}
 
+	private validateContextExclusions(message: WebviewMessage): void {
+		if (hasLegacyMentionExclusions(message.excludedContext)) {
+			throw new Error(vscode.l10n.t('This draft uses older context exclusions that cannot be safely matched. Start a new chat and reselect the context sources, or reuse the saved prompt to review its excluded sources. No context was read.'));
+		}
+	}
+
 	private contextKey(message: WebviewMessage): string {
-		return JSON.stringify([this.currentConversationId, message.includeWorkspaceContext !== false, message.attachments ?? [], message.mentionsKinded ?? message.mentions ?? [], message.excludedContext ?? []]);
+		const mentions = contextMentions(message);
+		return JSON.stringify([this.currentConversationId, message.includeWorkspaceContext !== false, message.attachments ?? [], mentions.map(mentionSourceId), expandMentionExclusions(message.excludedContext ?? [], mentions)]);
 	}
 
 	private collectTurnContext(message: WebviewMessage): Promise<TurnContext> {
+		this.validateContextExclusions(message);
 		const sources: Array<{ id: string; label: string; resolve: () => Promise<string> }> = [];
 		if (message.includeWorkspaceContext !== false && this.workspaceContext) {
 			sources.push({ id: 'workspace', label: vscode.l10n.t('Workspace, Instructions and Active Editor'), resolve: async () => (await this.workspaceContext!.collect()).markdown });
@@ -4177,12 +4176,11 @@ export class ChatSession {
 		for (const id of [...new Set(message.attachments ?? [])]) {
 			sources.push({ id: `attachment:${id}`, label: id, resolve: () => this.buildUserPrompt('', [id]) });
 		}
-		if (message.mentionsKinded?.length) {
-			message.mentionsKinded.forEach((mention, index) => sources.push({ id: `mention:${index}`, label: mention.kind === 'url' ? mention.url ?? 'URL' : mention.kind === 'file' || mention.kind === 'folder' ? mention.path ?? mention.kind : mention.kind, resolve: () => this.resolveKindedMentions([mention]) }));
-		} else if (message.mentions?.length) {
-			sources.push({ id: 'mentions', label: vscode.l10n.t('Referenced Paths'), resolve: async () => this.buildMentionBlock(message.mentions!) });
+		const mentions = contextMentions(message);
+		for (const mention of mentions) {
+			sources.push({ id: mentionSourceId(mention), label: mention.kind === 'url' ? mention.url ?? 'URL' : mention.kind === 'file' || mention.kind === 'folder' ? mention.path ?? mention.kind : mention.kind, resolve: () => this.resolveKindedMentions([mention]) });
 		}
-		return assembleTurnContext(sources, message.excludedContext);
+		return assembleTurnContext(sources, expandMentionExclusions(message.excludedContext ?? [], mentions));
 	}
 
 	private async buildUserPrompt(text: string, attachments?: string[], mentions?: string[], mentionsKinded?: KindedMention[]): Promise<string> {

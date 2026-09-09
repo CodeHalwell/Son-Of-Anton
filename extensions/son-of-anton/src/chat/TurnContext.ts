@@ -9,6 +9,7 @@ export interface TurnContext {
 	id: string;
 	createdAt: number;
 	sections: ContextSection[];
+	excludedContext: string[];
 	workspaceMarkdown: string;
 	attachmentMarkdown: string;
 	estimatedTokens: number;
@@ -40,7 +41,7 @@ export async function assembleTurnContext(sources: Array<{ id: string; label: st
 		section.estimatedTokens = Math.ceil(section.markdown.length / 4);
 	}
 	return {
-		id: randomUUID(), createdAt: Date.now(), sections,
+		id: randomUUID(), createdAt: Date.now(), sections, excludedContext: [...excluded],
 		workspaceMarkdown: sections.find(section => section.id === 'workspace')?.markdown ?? '',
 		attachmentMarkdown: sections.filter(section => section.id !== 'workspace' && section.markdown).map(section => section.markdown).join('\n\n'),
 		estimatedTokens: sections.reduce((total, section) => total + section.estimatedTokens, 0),

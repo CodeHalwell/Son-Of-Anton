@@ -81,6 +81,7 @@ export function getChatUiStrings(): Record<string, string> {
 		includeWorkspaceContext: vscode.l10n.t('Include Workspace Context'),
 		contextExplanation: vscode.l10n.t('Inspect and exclude workspace context, attachments and mentions. A preview snapshot is reused for up to five minutes when its sources stay unchanged. Images travel separately; agent instructions, hooks and later tool results are managed by the runtime.'),
 		refreshPreview: vscode.l10n.t('Refresh Preview'),
+		contextExclusionsMigrated: vscode.l10n.t('Older context choices were restored with all mentioned sources excluded. Review Context before including any source.'),
 		contextLoading: vscode.l10n.t('Reading workspace…'),
 		contextEmpty: vscode.l10n.t('No automatic context available. Check the workspace context setting or open a source file.'),
 		contextOff: vscode.l10n.t('Automatic context is off for this conversation.'),

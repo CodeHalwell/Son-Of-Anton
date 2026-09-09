@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 import { strict as assert } from 'node:assert';
 import * as vscode from 'vscode';
+import { mentionSourceId, type ContextMention } from '../src/chat/ContextSources';
 import { ChatTurnQueue } from '../src/chat/ChatTurnQueue';
 import { ChatSession, type ChatMessage } from '../src/chat/ChatPanel';
 import { LlmClient, type LlmStreamEvent, type ModelId, type ToolDefinition } from 'son-of-anton-core/llm/LlmClient';
@@ -33,7 +34,7 @@ interface TestSession {
 	currentSpecialistId: string;
 	currentMode: string;
 	handleConversationDeleted(id: string): void;
-	handleSendMessage(message: { text: string; requestId?: string; conversationId?: string; specialistId?: string; includeWorkspaceContext?: boolean; mentionsKinded?: NonNullable<ChatMessage['request']>['mentionsKinded']; attachments?: string[]; model?: ModelId; chatMode?: 'plan' | 'act'; images?: Array<{ mime: string; base64: string }> }): Promise<void>;
+	handleSendMessage(message: { text: string; excludedContext?: string[]; contextSnapshotId?: string; requestId?: string; conversationId?: string; specialistId?: string; includeWorkspaceContext?: boolean; mentionsKinded?: NonNullable<ChatMessage['request']>['mentionsKinded']; attachments?: string[]; model?: ModelId; chatMode?: 'plan' | 'act'; images?: Array<{ mime: string; base64: string }> }): Promise<void>;
 	switchConversation(id: string): void;
 	clearConversation(): void;
 	abortInFlight(): void;
@@ -45,7 +46,7 @@ interface TestSession {
 function createSession() {
 	const messages: Array<{ type: string; [key: string]: unknown }> = [];
 	const models = new Map<string, ModelId>();
-	let receive: (message: { type: string; conversationId?: string; model?: ModelId; id?: string; specialistId?: string; chatMode?: string; messageIndex?: number; responseId?: string; value?: string; text?: string; queueAction?: string }) => Promise<void>;
+	let receive: (message: { type: string; mentionsKinded?: ContextMention[]; excludedContext?: string[]; includeWorkspaceContext?: boolean; conversationId?: string; model?: ModelId; id?: string; specialistId?: string; chatMode?: string; messageIndex?: number; responseId?: string; value?: string; text?: string; queueAction?: string }) => Promise<void>;
 	const conversations = new Map<string, ChatMessage[]>([['first', []], ['second', []]]);
 	const started = new Map<string, ReturnType<typeof deferred>>();
 	const releases = new Map<string, ReturnType<typeof deferred>>();
@@ -367,6 +368,23 @@ suite('Chat turn ownership', () => {
 				assert.equal(f.messages.filter(message => message.type === 'messagePersisted' && message.role === 'assistant').length, outcome === 'completed' ? 1 : 0);
 			});
 		}
+	});
+
+	test('preview exclusions follow a URL after an earlier chip is removed from the actual native request', async () => {
+		await withCatalogNativeSession({ tools: false, specialistFallback: true }, async f => {
+			const reads: string[] = [];
+			Object.assign(f.session, { resolveKindedMentions: async (mentions: ContextMention[]) => { const id = mentionSourceId(mentions[0]); reads.push(id); return id === privateId ? 'PRIVATE_SOURCE_BODY' : 'PUBLIC_SOURCE_BODY'; } });
+			const publicMention: ContextMention = { kind: 'url', url: 'https://example.com/public' };
+			const privateMention: ContextMention = { kind: 'url', url: 'https://example.com/private' };
+			const privateId = mentionSourceId(privateMention);
+			await f.receive({ type: 'previewWorkspaceContext', conversationId: 'first', id: 'both', includeWorkspaceContext: false, mentionsKinded: [publicMention, privateMention] });
+			reads.length = 0;
+			await f.receive({ type: 'previewWorkspaceContext', conversationId: 'first', id: 'exclude-private', includeWorkspaceContext: false, mentionsKinded: [publicMention, privateMention], excludedContext: [privateId] });
+			const preview = f.messages.at(-1)!;
+			await f.session.handleSendMessage({ text: 'Explain the selected sources', conversationId: 'first', includeWorkspaceContext: false, mentionsKinded: [privateMention], excludedContext: [privateId], contextSnapshotId: String(preview.id) });
+			assert.deepEqual({ reads, requests: f.bodies.length, prompt: f.bodies[0]?.messages.find(message => message.role === 'user')?.content, excluded: f.conversations.get('first')?.[0].request?.excludedContext }, { reads: [mentionSourceId(publicMention)], requests: 1, prompt: 'Explain the selected sources', excluded: [privateId] });
+			assert.ok(!JSON.stringify(f.bodies).includes('PRIVATE_SOURCE_BODY'));
+		});
 	});
 
 	test('direct chat sends tools only for confirmed capability, while text and vision still work', async () => {

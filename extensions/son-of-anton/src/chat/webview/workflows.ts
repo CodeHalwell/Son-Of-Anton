@@ -3,6 +3,8 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+export { contextMentions, inlineUrlMentions, mentionSourceId, migrateMentionExclusions } from '../ContextSources';
+
 type Text = (key: string, ...args: Array<string | number>) => string;
 type QueueAction = 'remove' | 'edit' | 'up' | 'down' | 'resume' | 'pause';
 

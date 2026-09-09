@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 import { strict as assert } from 'node:assert';
 import * as vscode from 'vscode';
+import { ALL_MENTIONS_EXCLUDED, contextMentions, mentionSourceId, migrateMentionExclusions, type ContextMention } from '../src/chat/ContextSources';
 import { ChatTurnQueue } from '../src/chat/ChatTurnQueue';
 import { assembleTurnContext, type TurnContext } from '../src/chat/TurnContext';
 import { ChatSession, type ChatMessage } from '../src/chat/ChatPanel';
@@ -12,7 +13,7 @@ import type { ConversationStore } from '../src/chat/ConversationStore';
 import type { AgentEvent } from '../src/chat/agentEvents';
 import type { ModelId } from 'son-of-anton-core/llm/LlmClient';
 
-type Draft = { images?: Array<{ mime: string; base64: string }>; type: string; id?: string; text?: string; conversationId?: string; contextSnapshotId?: string; attachments?: string[]; excludedContext?: string[]; queueAction?: 'pause' | 'resume' | 'edit' | 'remove' | 'up' | 'down'; messageIndex?: number; responseId?: string; value?: string };
+type Draft = { mentionsKinded?: ContextMention[]; mentions?: string[]; includeWorkspaceContext?: boolean; images?: Array<{ mime: string; base64: string }>; type: string; id?: string; text?: string; conversationId?: string; contextSnapshotId?: string; attachments?: string[]; excludedContext?: string[]; queueAction?: 'pause' | 'resume' | 'edit' | 'remove' | 'up' | 'down'; messageIndex?: number; responseId?: string; value?: string };
 type Output = { type: string; [key: string]: unknown };
 function deferred<T = void>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
 const tick = () => new Promise<void>(resolve => setImmediate(resolve));
@@ -27,6 +28,7 @@ interface SessionHarness {
 	followupQueue: ChatTurnQueue<Draft>;
 	previewedContext?: { key: string; value: TurnContext };
 	workspaceContext: { collect(): Promise<{ markdown: string; estimatedTokens: number }> };
+	resolveKindedMentions(mentions: ContextMention[]): Promise<string>;
 	buildUserPrompt(text: string, attachments?: string[]): Promise<string>;
 }
 function fixture() {
@@ -79,6 +81,71 @@ suite('Chat workflow upgrades', () => {
 			{ id: 'secret', label: 'Excluded', resolve: async () => { excludedRead = true; return 'secret'; } },
 		], ['secret']);
 		assert.deepEqual({ workspace: context.workspaceMarkdown, attached: context.attachmentMarkdown, excludedRead, omitted: context.sections[2].excluded }, { workspace: 'current file', attached: 'command failed', excludedRead: false, omitted: true });
+	});
+
+	test('source identities distinguish full paths and unify duplicate aliases without reading them', () => {
+		const paths: ContextMention[] = [{ kind: 'file', path: 'src/./private.ts' }, { kind: 'file', path: 'src/sub/../private.ts' }, { kind: 'folder', path: 'src\\private.ts' }];
+		const url: ContextMention = { kind: 'url', url: 'HTTPS://EXAMPLE.COM:443/private#one' };
+		assert.deepEqual(paths.map(mentionSourceId), Array(3).fill(mentionSourceId(paths[0])));
+		assert.notEqual(mentionSourceId(paths[0]), mentionSourceId({ kind: 'file', path: 'other/private.ts' }));
+		assert.equal(mentionSourceId(url), mentionSourceId({ kind: 'url', url: 'https://example.com/private#two' }));
+		assert.notEqual(mentionSourceId(url), mentionSourceId({ kind: 'url', url: 'https://example.com/private?different=1' }));
+		assert.deepEqual(contextMentions({ mentions: ['src/private.ts'], text: '@url https://example.com/private#one @url https://example.com/private#two' }).map(mentionSourceId), [mentionSourceId(paths[0]), mentionSourceId(url)]);
+		assert.equal(mentionSourceId({ kind: 'file', path: '[workspace]' }), mentionSourceId({ kind: 'workspace' }));
+		assert.ok(!['workspace', 'attachment:terminal-output'].includes(mentionSourceId({ kind: 'workspace' })));
+	});
+
+	test('legacy restore excludes all sources including deferred URLs instead of trusting stale positions', () => {
+		const mentions = contextMentions({ mentions: ['private.ts', 'new.ts'], text: 'Review @url https://example.com/private' });
+		for (const old of ['mention:0', 'mention:1', 'mention:99', 'mentions']) {
+			assert.deepEqual(migrateMentionExclusions(['workspace', old], mentions), { migrated: true, excludedContext: ['workspace', ...mentions.map(mentionSourceId)] });
+		}
+		const empty = migrateMentionExclusions(['mention:1']);
+		assert.deepEqual(empty, { migrated: true, excludedContext: [ALL_MENTIONS_EXCLUDED] });
+		assert.deepEqual(migrateMentionExclusions(empty.excludedContext, mentions), { migrated: false, excludedContext: mentions.map(mentionSourceId) });
+	});
+
+	test('excluded source remains unread through reordering, aliases, queued snapshots and saved request reuse', async () => {
+		const f = fixture(); const reads: string[] = [];
+		f.session.resolveKindedMentions = async mentions => { const id = mentionSourceId(mentions[0]); reads.push(id); return `resolved:${id}`; };
+		const first: ContextMention = { kind: 'file', path: 'src/public.ts' };
+		const privateFile: ContextMention = { kind: 'file', path: 'src/private.ts' };
+		const other: ContextMention = { kind: 'file', path: 'other/private.ts' };
+		await f.receive({ type: 'previewWorkspaceContext', conversationId: 'first', id: 'both', mentionsKinded: [first, privateFile], includeWorkspaceContext: false });
+		reads.length = 0;
+		const exclusion = mentionSourceId(privateFile);
+		await f.receive({ type: 'previewWorkspaceContext', conversationId: 'first', id: 'excluded', mentionsKinded: [first, privateFile], excludedContext: [exclusion], includeWorkspaceContext: false });
+		const preview = f.outputs.at(-1)!;
+		const draft: Draft = { type: 'queueMessage', conversationId: 'first', text: 'Only public references', mentionsKinded: [{ kind: 'file', path: './src/private.ts' }, other, privateFile], excludedContext: [exclusion], includeWorkspaceContext: false, contextSnapshotId: preview.id as string };
+		f.session.followupQueue.pause('first'); await f.receive(draft);
+		draft.mentionsKinded!.splice(0); draft.excludedContext!.splice(0);
+		f.session.followupQueue.pause('first', false);
+		const queued = f.session.followupQueue.take('first')!;
+		await f.session.handleSendMessage(queued, true);
+		const saved = f.conversations.get('first')![0].request!;
+		await f.session.handleSendMessage({ ...saved, type: 'sendMessage', conversationId: 'first', mentionsKinded: [other, privateFile, first] });
+		assert.deepEqual({ privateReads: reads.filter(id => id === exclusion), stored: saved.excludedContext, requests: f.sent.map(turn => turn.prompt) }, { privateReads: [], stored: [exclusion], requests: [`Only public references\n\nresolved:${mentionSourceId(other)}`, `Only public references\n\nresolved:${mentionSourceId(other)}\n\nresolved:${mentionSourceId(first)}`] });
+	});
+
+	test('raw legacy exclusions reject preview, send and redirect before reads or persistent effects', async () => {
+		for (const excludedContext of [['mention:1'], ['mentions']]) {
+			const f = fixture(); const reads: string[] = [];
+			f.session.workspaceContext.collect = async () => { reads.push('workspace'); return { markdown: '', estimatedTokens: 0 }; };
+			f.session.resolveKindedMentions = async () => { reads.push('mention'); return 'private'; };
+			const draft = { conversationId: 'first', text: 'Private request', mentionsKinded: [{ kind: 'terminal' } as const], excludedContext };
+			await f.receive({ ...draft, type: 'previewWorkspaceContext', id: 'legacy-preview' });
+			await f.session.handleSendMessage({ ...draft, type: 'sendMessage' });
+			await f.receive({ ...draft, type: 'redirectMessage', id: 'legacy-redirect' });
+			assert.deepEqual({ reads, saved: f.conversations.get('first'), sent: f.sent, queued: f.session.followupQueue.snapshot('first').entries, settled: f.outputs.some(message => message.type === 'requestSettled'), queueError: f.outputs.find(message => message.type === 'queueError')?.id }, { reads: [], saved: [], sent: [], queued: [], settled: true, queueError: 'legacy-redirect' });
+			assert.match(String(f.outputs.find(message => message.type === 'streamError')?.error), /older context exclusions/);
+		}
+	});
+
+	test('conservative empty-draft marker expands over deferred and explicit mentions without resolving them', async () => {
+		const f = fixture(); let reads = 0; f.session.resolveKindedMentions = async () => { reads++; return 'private'; };
+		const message: Draft = { type: 'previewWorkspaceContext', conversationId: 'first', id: 'safe', includeWorkspaceContext: false, mentionsKinded: [{ kind: 'terminal' }], text: 'Inspect @url https://example.com/private', excludedContext: [ALL_MENTIONS_EXCLUDED] };
+		await f.receive(message);
+		assert.deepEqual({ reads, excluded: f.outputs.at(-1)?.excludedContext, markdown: f.outputs.at(-1)?.markdown }, { reads: 0, excluded: contextMentions(message).map(mentionSourceId), markdown: '' });
 	});
 
 	test('context assembly stays within its combined character budget', async () => {
