@@ -9,7 +9,8 @@ import * as path from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { ConversationStorage } from '../src/chat/ConversationStorage';
+import { ConversationConflictError, ConversationStorage } from '../src/chat/ConversationStorage';
+import { attachConversationWriteToken } from '../src/chat/ConversationWriteToken';
 import type { ConversationRecord } from '../src/chat/ConversationStore';
 
 function record(text: string, count = 1): ConversationRecord {
@@ -18,8 +19,11 @@ function record(text: string, count = 1): ConversationRecord {
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; }
 function pages(folder: string): string[] { return fs.readdirSync(folder).filter(name => /^[a-f0-9]{64}\.json$/.test(name)).sort(); }
 function saveInOtherProcess(directory: string, next: ConversationRecord): void {
-	const script = 'const { ConversationStorage } = require(process.argv[1]); new ConversationStorage(process.argv[2]).save(JSON.parse(process.argv[3])).catch(error => { console.error(error); process.exitCode = 1; });';
-	execFileSync(process.execPath, ['--require', 'tsx/cjs', '-e', script, path.resolve('src/chat/ConversationStorage.ts'), directory, JSON.stringify(next)], { timeout: 5000 });
+	execFileSync(process.execPath, ['--require', 'tsx/cjs', path.resolve('test/fixtures/conversationStorageWriter.ts'), directory, JSON.stringify({ mode: 'replace', record: next })], { timeout: 5000 });
+}
+async function saveNext(storage: ConversationStorage, next: ConversationRecord): Promise<void> {
+	const previous = storage.load(next.summary.id);
+	await storage.save(attachConversationWriteToken(next, previous?.writeToken ?? { revision: null }));
 }
 async function withStorage(run: (storage: ConversationStorage, directory: string, folder: string) => Promise<void>): Promise<void> {
 	const directory = await fsp.mkdtemp(path.join(tmpdir(), 'sota-page-gc-'));
@@ -32,7 +36,7 @@ suite('Conversation immutable page collection', () => {
 	test('reclaims obsolete hashes after a committed append while retaining the full transcript', async () => {
 		await withStorage(async (storage, _directory, folder) => {
 			for (const count of [1, 2, 99, 100, 101, 102, 201]) {
-				const next = record('message', count); await storage.save(next);
+				const next = record('message', count); await saveNext(storage, next);
 				assert.deepEqual({ pageCount: pages(folder).length, loaded: storage.load(next.summary.id) }, { pageCount: Math.ceil(count / 100), loaded: next });
 			}
 			assert.equal(fs.readdirSync(folder).filter(name => /^\.(reader|writer|gc)-/.test(name)).length, 0);
@@ -46,20 +50,23 @@ suite('Conversation immutable page collection', () => {
 			const internal = otherWindow as unknown as { withLifecycleLock<T>(id: string, operation: () => Promise<T>): Promise<T> };
 			const lock = internal.withLifecycleLock; const paused = deferred(); const release = deferred(); let calls = 0;
 			internal.withLifecycleLock = async (id, operation) => { if (++calls === 2) { paused.resolve(); await release.promise; } return lock.call(otherWindow, id, operation) as ReturnType<typeof operation>; };
-			const pending = otherWindow.save(original); await paused.promise;
+			const stale = otherWindow.load('conversation')!; const pending = otherWindow.save(stale);
+			const rejected = assert.rejects(pending, ConversationConflictError); await paused.promise;
 			try {
-				await storage.save(record('replacement'));
-				assert.ok(originalPages.every(page => fs.existsSync(path.join(folder, page)) && fs.existsSync(path.join(folder, `${page}.search`))), 'A future committed manifest still needs the staged writer hashes');
-			} finally { release.resolve(); await pending; }
-			assert.deepEqual({ loaded: storage.load('conversation'), pages: pages(folder) }, { loaded: original, pages: originalPages });
+				await saveNext(storage, record('replacement'));
+				assert.ok(originalPages.every(page => fs.existsSync(path.join(folder, page)) && fs.existsSync(path.join(folder, `${page}.search`))), 'A staged writer still retains its hashes until it finishes');
+			} finally { release.resolve(); await rejected; }
+			assert.equal(storage.load('conversation')?.messages[0].content, 'replacement-0');
+			assert.equal(pages(folder).length, 1, 'rejected writer pages are collected without removing the winning history');
 		});
 	});
 
 	test('a new writer waits for an existing collector before reusing or creating pages', async () => {
 		await withStorage(async (storage, _directory, folder) => {
 			await storage.save(record('original')); const originalPages = pages(folder);
+			const next = attachConversationWriteToken(record('next'), storage.load('conversation')!.writeToken!);
 			const marker = path.join(folder, `.gc-${(process as NodeJS.Process).pid}-${randomUUID()}`); fs.writeFileSync(marker, '');
-			const pending = storage.save(record('next')); await new Promise<void>(resolve => setTimeout(resolve, 30));
+			const pending = storage.save(next); await new Promise<void>(resolve => setTimeout(resolve, 30));
 			try { assert.deepEqual(pages(folder), originalPages); }
 			finally { fs.rmSync(marker, { force: true }); await pending; }
 			assert.equal(storage.load('conversation')?.messages[0].content, 'next-0');
@@ -78,7 +85,7 @@ suite('Conversation immutable page collection', () => {
 			};
 			try { assert.deepEqual({ loaded: storage.load('conversation'), retainedDuringRead }, { loaded: original, retainedDuringRead: 2 }); }
 			finally { internal.readPages = read; }
-			await storage.save(record('final'));
+			await saveNext(storage, record('final'));
 			assert.deepEqual({ content: storage.load('conversation')?.messages[0].content, remaining: pages(folder).length }, { content: 'final-0', remaining: 1 });
 		});
 	});
@@ -110,7 +117,7 @@ suite('Conversation immutable page collection', () => {
 			await storage.save(record('original'));
 			const exitedPid = execFileSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' });
 			const marker = path.join(folder, `.gc-${exitedPid}-${randomUUID()}`); fs.writeFileSync(marker, '');
-			await storage.save(record('after restart'));
+			await saveNext(storage, record('after restart'));
 			assert.deepEqual({ content: storage.load('conversation')?.messages[0].content, staleMarker: fs.existsSync(marker) }, { content: 'after restart-0', staleMarker: false });
 		});
 	});

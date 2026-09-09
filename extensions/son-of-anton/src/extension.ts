@@ -979,7 +979,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	}));
 
 	// Conversation actions share validation and confirmation across every surface.
-	const conversationActions = new ConversationActions(conversationStore, (id, count) => checkpointManager.list(id).find(checkpoint => checkpoint.turnIndex === count)?.id, (id, branchId) => checkpointManager.attachToBranch(id, branchId));
+	const conversationActions = new ConversationActions(
+		conversationStore,
+		(id, count) => checkpointManager.list(id).find(checkpoint => checkpoint.turnIndex === count)?.id,
+		(id, branchId) => checkpointManager.attachToBranch(id, branchId),
+		branchId => checkpointManager.deleteFor(branchId),
+	);
 	context.subscriptions.push(
 		vscode.commands.registerCommand('sota.openConversation', async (id: string) => {
 			if (typeof id !== 'string' || !id) {

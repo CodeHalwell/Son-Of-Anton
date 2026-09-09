@@ -10,8 +10,83 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { CheckpointManager } from './CheckpointManager';
+import { CheckpointManager, type Checkpoint } from './CheckpointManager';
+import { FileSnapshotStore, type FileSnapshot } from './FileSnapshotStore';
 import type { ConfigStore, MementoStore } from '../host';
+
+function snapshotDirectory(snapshot: FileSnapshot): string {
+	return join(snapshot.storageRoot, createHash('sha256').update(snapshot.workspaceRoot).digest('hex'), snapshot.id);
+}
+
+async function captureFailureFixture(t: import('node:test').TestContext) {
+	const directory = await fs.mkdtemp(join(tmpdir(), 'sota-checkpoint-index-failure-'));
+	t.after(() => fs.rm(directory, { recursive: true, force: true }));
+	const root = join(directory, 'workspace'); await fs.mkdir(root); await fs.writeFile(join(root, 'file'), Buffer.alloc(1024 * 1024, 42));
+	const values = new Map<string, unknown>();
+	const faults: { beforeWrite?: (checkpoints: Checkpoint[]) => Promise<void>; warn?: (message: string) => void } = {};
+	const warnings: string[] = [];
+	const state: MementoStore = { get: <T>(key: string, fallback?: T) => (values.get(key) ?? fallback) as T, update: async (key, value) => { await faults.beforeWrite?.(value as Checkpoint[]); values.set(key, value); } };
+	const config: ConfigStore = { get: <T>(key: string, fallback?: T) => (key === 'checkpoints.maxCount' ? 1 : fallback) as T };
+	const manager = new CheckpointManager({ load: () => ({ messages: [], summary: {} }), update() {} }, state, {
+		storageRoot: join(directory, 'storage'), getWorkspaceRoot: () => root, config, confirmRestore: async () => true,
+		notifier: { info() {}, warn: message => { warnings.push(message); faults.warn?.(message); }, error: message => assert.fail(message) },
+	});
+	t.after(() => manager.dispose());
+	return { manager, faults, warnings, root };
+}
+
+test('failed checkpoint indexing removes only the new file payload and repeated failures do not accumulate snapshots', async t => {
+	const { manager, faults, warnings, root } = await captureFailureFixture(t);
+	const shared = await manager.capture('parent', 0, 'shared'); assert.ok(shared?.fileSnapshot);
+	await manager.attachToBranch(shared.id, 'branch');
+	const existing = await manager.capture('other', 0, 'existing'); assert.ok(existing?.fileSnapshot);
+	const indexError = Object.assign(new Error('Index persistence failed'), { code: 'ENOSPC' });
+	const newlyCaptured: FileSnapshot[] = [];
+	faults.beforeWrite = async checkpoints => {
+		const snapshot = checkpoints.find(checkpoint => checkpoint.id !== shared.id && checkpoint.id !== existing.id)!.fileSnapshot!;
+		// This is a real complete payload: failure occurs only when the host
+		// attempts to index it, after capture has written its manifest and bytes.
+		const manifest = JSON.parse(await fs.readFile(join(snapshotDirectory(snapshot), 'manifest.json'), 'utf8')) as { files: { digest: string }[] };
+		assert.equal((await fs.stat(join(snapshotDirectory(snapshot), manifest.files[0].digest))).size, 1024 * 1024);
+		newlyCaptured.push(snapshot); throw indexError;
+	};
+	let changes = 0; const listener = manager.onDidChange(() => { changes++; }); t.after(() => listener.dispose());
+	for (let attempt = 0; attempt < 3; attempt++) { await assert.rejects(manager.capture('failing', attempt, 'fail'), error => error === indexError); }
+	for (const snapshot of newlyCaptured) { await assert.rejects(fs.access(snapshotDirectory(snapshot)), { code: 'ENOENT' }); }
+	const directory = dirname(snapshotDirectory(shared.fileSnapshot));
+	assert.deepEqual({ snapshots: (await fs.readdir(directory)).sort(), indexed: manager.listAll().map(checkpoint => checkpoint.id).sort(), branch: manager.list('branch').map(checkpoint => checkpoint.id), changes, warnings, fileSize: (await fs.stat(join(root, 'file'))).size }, {
+		snapshots: [shared.fileSnapshot.id, existing.fileSnapshot.id].sort(), indexed: [shared.id, existing.id].sort(), branch: [shared.id], changes: 0, warnings: [], fileSize: 1024 * 1024,
+	});
+	faults.beforeWrite = undefined;
+	const recovered = await manager.capture('later', 0, 'recovered'); assert.ok(recovered?.fileSnapshot);
+	assert.deepEqual((await fs.readdir(directory)).sort(), [shared.fileSnapshot.id, recovered.fileSnapshot.id].sort());
+});
+
+test('failed orphan cleanup warns without replacing the original checkpoint index error', async t => {
+	const { manager, faults, warnings } = await captureFailureFixture(t);
+	const indexError = new Error('Original index failure'); const cleanupError = new Error('Snapshot cleanup denied');
+	let captured: FileSnapshot | undefined;
+	faults.beforeWrite = async checkpoints => { captured = checkpoints[0].fileSnapshot; throw indexError; };
+	t.mock.method(FileSnapshotStore.prototype, 'release', async () => { throw cleanupError; });
+	await assert.rejects(manager.capture('failing', 0, 'fail'), error => error === indexError);
+	assert.ok(captured); await fs.access(snapshotDirectory(captured));
+	assert.deepEqual({ indexed: manager.listAll(), warnings }, { indexed: [], warnings: ['Could not release an unindexed file checkpoint: Error: Snapshot cleanup denied'] });
+	faults.warn = () => { throw new Error('Notifier failure'); };
+	await assert.rejects(manager.capture('failing', 1, 'fail again'), error => error === indexError);
+});
+
+test('post-commit pruning failure cannot delete the newly indexed file checkpoint', async t => {
+	const { manager, faults } = await captureFailureFixture(t);
+	const old = await manager.capture('parent', 0, 'old'); assert.ok(old?.fileSnapshot);
+	let candidate: FileSnapshot | undefined;
+	faults.beforeWrite = async checkpoints => { candidate = checkpoints[0].fileSnapshot; };
+	const released: string[] = [];
+	t.mock.method(FileSnapshotStore.prototype, 'release', async (snapshot: FileSnapshot) => { released.push(snapshot.id); throw new Error('Pruning cleanup failed'); });
+	const notificationError = new Error('Pruning warning failed'); faults.warn = () => { throw notificationError; };
+	await assert.rejects(manager.capture('parent', 1, 'new'), error => error === notificationError);
+	assert.ok(candidate); await fs.access(snapshotDirectory(candidate));
+	assert.deepEqual({ released, indexed: manager.listAll().map(checkpoint => checkpoint.fileSnapshot?.id) }, { released: [old.fileSnapshot.id], indexed: [candidate.id] });
+});
 
 for (const kind of ['fs', 'git'] as const) {
 	test(`${kind} checkpoint releases its retained snapshot after the deleted parent's final branch is removed`, async t => {

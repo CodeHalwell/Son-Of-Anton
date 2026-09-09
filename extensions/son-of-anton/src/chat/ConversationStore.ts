@@ -6,6 +6,8 @@ import * as vscode from 'vscode';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { ConversationDeletedError, ConversationStorage, type ConversationRecoveryIssue } from './ConversationStorage';
+import { attachConversationWriteToken, type ConversationWriteToken } from './ConversationWriteToken';
+export type { ConversationWriteToken } from './ConversationWriteToken';
 import { watchConversationLifecycle } from './ConversationLifecycleWatcher';
 import { conversationTextChunks, MAX_HISTORY_QUERY_LENGTH } from './ConversationSearchIndex';
 import { ChatMessage } from './ChatPanel';
@@ -80,6 +82,7 @@ export interface ConversationSummary {
  * scrollback. Returned by `load()` when the host wants to restore a session.
  */
 export interface ConversationRecord {
+	readonly writeToken?: ConversationWriteToken;
 	readonly summary: ConversationSummary;
 	readonly messages: ChatMessage[];
 }
@@ -167,6 +170,7 @@ export class ConversationStore implements vscode.Disposable {
 	private readonly disk: ConversationStorage | undefined;
 	private readonly searchLifetime = new AbortController();
 	private readonly pendingRecords = new Map<string, ConversationRecord | null>();
+	private readonly pendingTokenForks = new WeakMap<ConversationRecord, Set<ConversationWriteToken>>();
 	private pendingWrite: Promise<void> = Promise.resolve();
 	private writeFailure: Error | undefined;
 	private readonly failedWrites = new Map<string, Error>();
@@ -319,11 +323,17 @@ export class ConversationStore implements vscode.Disposable {
 	}
 
 	private persist(record: ConversationRecord): void {
-		const snapshot = structuredClone(record); this.pendingRecords.set(record.summary.id, snapshot);
+		const snapshot = attachConversationWriteToken(structuredClone(record), record.writeToken ?? { revision: null }); this.pendingRecords.set(record.summary.id, snapshot);
 		this.enqueue(snapshot.summary.id, async () => {
 			if (this.disk) {
 				try { await this.disk.save(snapshot); }
 				catch (error) { if (error instanceof ConversationDeletedError || this.disk.isPermanentlyDeleted(snapshot.summary.id)) { this.observeDeletion(snapshot.summary.id); return; } throw error; }
+				finally {
+					// A fork depends on this snapshot settling, including its known base
+					// after a failed write. A conflict never advances that stale base.
+					for (const fork of this.pendingTokenForks.get(snapshot) ?? []) { fork.revision = snapshot.writeToken.revision; }
+					this.pendingTokenForks.delete(snapshot);
+				}
 			}
 			else {
 				await this.context.globalState.update(recordKey(snapshot.summary.id), snapshot.messages);
@@ -376,8 +386,16 @@ export class ConversationStore implements vscode.Disposable {
 	/** Returns the full record for a conversation, or `undefined` if missing. */
 	load(id: string, includeDeleted = false): ConversationRecord | undefined {
 		if (this.isHidden(id)) { return undefined; }
-		if (this.pendingRecords.has(id) || this.disk) {
-			const record = this.pendingRecords.has(id) ? this.pendingRecords.get(id) : this.disk?.load(id);
+		if (this.pendingRecords.has(id)) {
+			const pending = this.pendingRecords.get(id);
+			if (!pending || (!includeDeleted && pending.summary.deletedAt)) { return undefined; }
+			const token = { revision: pending.writeToken?.revision ?? null };
+			const forks = this.pendingTokenForks.get(pending) ?? new Set<ConversationWriteToken>();
+			forks.add(token); this.pendingTokenForks.set(pending, forks);
+			return attachConversationWriteToken(structuredClone(pending), token);
+		}
+		if (this.disk) {
+			const record = this.disk.load(id);
 			return record && (includeDeleted || !record.summary.deletedAt) ? record : undefined;
 		}
 		const summary = this.readIndex().find(s => s.id === id);
@@ -405,9 +423,10 @@ export class ConversationStore implements vscode.Disposable {
 			workspaceId: this.workspaceId,
 			workspaceName: this.workspaceName,
 		};
-		this.persist({ summary, messages });
+		const record = attachConversationWriteToken({ summary, messages }, { revision: null });
+		this.persist(record);
 		this._onDidChange.fire();
-		return { summary, messages };
+		return record;
 	}
 
 	/**
@@ -424,6 +443,7 @@ export class ConversationStore implements vscode.Disposable {
 		lastMode?: ChatMode,
 		lastTab?: ChatTab,
 		lastModel?: ModelId,
+		writeToken?: ConversationWriteToken,
 	): void {
 		const index = this.readIndex();
 		const existing = index.find(s => s.id === id);
@@ -447,7 +467,8 @@ export class ConversationStore implements vscode.Disposable {
 			workspaceId: existing.workspaceId,
 			workspaceName: existing.workspaceName,
 		};
-		this.persist({ summary: next, messages: trimmed });
+		const token = writeToken ?? this.load(id, true)?.writeToken ?? { revision: null };
+		this.persist(attachConversationWriteToken({ summary: next, messages: trimmed }, token));
 		this._onDidChange.fire();
 	}
 
@@ -456,28 +477,17 @@ export class ConversationStore implements vscode.Disposable {
 	 * length so a malformed input box payload can't poison the index.
 	 */
 	rename(id: string, newTitle: string): void {
-		const index = this.readIndex();
-		const existing = index.find(s => s.id === id);
-		if (!existing) {
-			return;
-		}
-		const cleaned = newTitle.trim().slice(0, MAX_TITLE_LENGTH);
-		if (!cleaned) {
-			return;
-		}
-		const next: ConversationSummary = {
-			...existing,
-			title: cleaned,
-			updatedAt: Date.now(),
-		};
-		this.persist({ summary: next, messages: this.load(id, true)?.messages ?? [] });
+		const record = this.load(id, true); if (!record) { return; }
+		const cleaned = newTitle.trim().slice(0, MAX_TITLE_LENGTH); if (!cleaned) { return; }
+		const next: ConversationSummary = { ...record.summary, title: cleaned, updatedAt: Date.now() };
+		this.persist(attachConversationWriteToken({ summary: next, messages: record.messages }, record.writeToken ?? { revision: null }));
 		this._onDidChange.fire();
 	}
 
 	/** Move to Trash; body and checkpoint association remain recoverable. */
 	delete(id: string): void {
 		const record = this.load(id); if (!record) { return; }
-		this.persist({ ...record, summary: { ...record.summary, deletedAt: Date.now() } });
+		this.persist(attachConversationWriteToken({ ...record, summary: { ...record.summary, deletedAt: Date.now() } }, record.writeToken ?? { revision: null }));
 		this._onDidDelete.fire(id); this._onDidChange.fire();
 	}
 
@@ -487,7 +497,7 @@ export class ConversationStore implements vscode.Disposable {
 
 	private changeSummary(id: string, change: Partial<ConversationSummary>): void {
 		const record = this.load(id, true); if (!record) { return; }
-		this.persist({ ...record, summary: { ...record.summary, ...change } }); this._onDidChange.fire();
+		this.persist(attachConversationWriteToken({ ...record, summary: { ...record.summary, ...change } }, record.writeToken ?? { revision: null })); this._onDidChange.fire();
 	}
 
 	/** Permanently remove only an already trashed record, after host confirmation. */
@@ -534,7 +544,7 @@ export class ConversationStore implements vscode.Disposable {
 		const now = Date.now(); const branchId = generateId();
 		const messages = structuredClone(source.messages.slice(0, throughMessageIndex + 1));
 		const record: ConversationRecord = { messages, summary: { ...source.summary, id: branchId, title: vscode.l10n.t('Branch: {0}', source.summary.title).slice(0, MAX_TITLE_LENGTH), createdAt: now, updatedAt: now, messageCount: messages.length, pinned: false, archived: false, deletedAt: undefined, workspaceId: this.workspaceId, workspaceName: this.workspaceName, branch: { parentId: id, throughMessageIndex, checkpointId: options.checkpointId, workspaceState: options.checkpointId ? options.workspaceState : 'unlinked' } } };
-		this.persist(record); this._onDidChange.fire(); return record;
+		attachConversationWriteToken(record, { revision: null }); this.persist(record); this._onDidChange.fire(); return record;
 	}
 
 	/** Synchronous metadata-only listing. Body queries must use searchAsync to avoid blocking the host. */

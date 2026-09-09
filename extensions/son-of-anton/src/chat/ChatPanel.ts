@@ -24,7 +24,7 @@ import { parseAndDispatch, SlashCommandContext, getCommandList } from './ChatSla
 import { WorkspaceContextProvider, isSensitivePath } from './WorkspaceContextProvider';
 import { CostReporter } from '../monitoring/CostReporter';
 import { SpendGuard, readSpendLimits } from '../monitoring/SpendGuard';
-import { ConversationStore, ChatTab } from './ConversationStore';
+import { ConversationStore, ChatTab, type ConversationRecord, type ConversationWriteToken } from './ConversationStore';
 import { loadCliConversation } from './CliConversationReader';
 import { CheckpointManager } from 'son-of-anton-core/checkpoint/CheckpointManager';
 import { CredentialBroker } from 'son-of-anton-core/auth/CredentialBroker';
@@ -360,6 +360,7 @@ const APPROVAL_PREVIEW_LINES = 30;
 export class ChatSession {
 	private conversation: ChatMessage[] = [];
 	private currentConversationId: string;
+	private conversationWriteToken?: ConversationWriteToken;
 	private abortController: AbortController | undefined;
 	private activeTurn?: ChatTurn;
 	private readonly disposables: vscode.Disposable[] = [];
@@ -506,6 +507,7 @@ export class ChatSession {
 		const resolved = this.resolveInitialConversation(initialConversationId);
 		this.currentConversationId = resolved.summary.id;
 		this.conversation = [...resolved.messages];
+		this.conversationWriteToken = resolved.writeToken;
 		this.currentSpecialistId = resolved.summary.lastSpecialist ?? 'anton';
 		this.currentModel = this.resolveChatModel(resolved.summary.lastModel);
 		this.conversationStore.rememberActive(this.currentConversationId);
@@ -1278,6 +1280,7 @@ export class ChatSession {
 		this.currentConversationId = fresh.summary.id;
 		this.conversationStore.rememberActive(this.currentConversationId);
 		this.conversation = [...fresh.messages];
+		this.conversationWriteToken = fresh.writeToken;
 		// Fresh conversation starts on the Chat tab so the user sees the
 		// composer immediately rather than landing on whichever pane was
 		// active in the previous conversation.
@@ -1337,6 +1340,7 @@ export class ChatSession {
 		this.pendingUiBlockResponses.clear();
 		this.currentConversationId = record.summary.id;
 		this.conversation = [...record.messages];
+		this.conversationWriteToken = record.writeToken;
 		this.currentSpecialistId = record.summary.lastSpecialist ?? 'anton';
 		this.currentModel = this.resolveChatModel(record.summary.lastModel);
 		this.conversationStore.rememberActive(this.currentConversationId);
@@ -1406,6 +1410,7 @@ export class ChatSession {
 			return;
 		}
 		this.conversation = [...record.messages];
+		this.conversationWriteToken = record.writeToken;
 		this.webview.postMessage({
 			type: 'loadConversation',
 			conversationId: this.currentConversationId,
@@ -1601,20 +1606,16 @@ export class ChatSession {
 	 * explicit caller-supplied id, then restores this workspace’s active
 	 * conversation, and finally creates a new one.
 	 */
-	private resolveInitialConversation(initialConversationId: string | undefined): {
-		summary: { id: string; lastSpecialist?: AgentHandle | 'anton'; lastMode?: ChatMode; lastTab?: ChatTab; lastModel?: ModelId };
-		messages: ChatMessage[];
-	} {
+	private resolveInitialConversation(initialConversationId: string | undefined): ConversationRecord {
 		if (initialConversationId) {
 			const record = this.conversationStore.load(initialConversationId);
 			if (record) {
-				return { summary: record.summary, messages: record.messages };
+				return record;
 			}
 		}
 		const current = this.conversationStore.getInitialConversation();
 		if (current) { return current; }
-		const fresh = this.conversationStore.create();
-		return { summary: fresh.summary, messages: fresh.messages };
+		return this.conversationStore.create();
 	}
 
 	private resolveChatModel(saved?: ModelId): ModelId {
@@ -1632,6 +1633,7 @@ export class ChatSession {
 			this.currentMode,
 			this.currentTab,
 			this.currentModel,
+			this.conversationWriteToken,
 		);
 	}
 
@@ -2914,6 +2916,7 @@ export class ChatSession {
 			const record = this.conversationStore.load(this.currentConversationId);
 			if (record) {
 				this.conversation = [...record.messages];
+				this.conversationWriteToken = record.writeToken;
 				this.webview.postMessage({
 					type: 'loadConversation',
 					conversationId: this.currentConversationId,

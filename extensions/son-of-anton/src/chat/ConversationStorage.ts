@@ -8,12 +8,16 @@ import * as path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import type { ConversationRecord, ConversationSummary } from './ConversationStore';
 import type { ChatMessage } from './ChatPanel';
+import { attachConversationWriteToken } from './ConversationWriteToken';
 import { buildLegacySearchIndex, searchIndexMatches, writeSearchIndex } from './ConversationSearchIndex';
 
-interface Manifest { version: 1; summary: ConversationSummary; pages: string[] }
+interface Manifest { version: 1; summary: ConversationSummary; pages: string[]; contentHash?: string }
 interface DeletionState { version: 1; id: string; state: 'pending' | 'deleted'; owner: string; deletedAt: number }
 export class ConversationDeletedError extends Error {
 	constructor() { super('This conversation was permanently deleted in another window. Start a new conversation to continue.'); }
+}
+export class ConversationConflictError extends Error {
+	constructor() { super('Another window saved newer conversation history. Your local changes remain unsaved; the newer stored history was preserved.'); }
 }
 const PAGE_SIZE = 100;
 const PAGE_NAME = /^[a-f0-9]{64}\.json$/;
@@ -23,7 +27,9 @@ export interface ConversationRecoveryIssue { readonly path: string; readonly mes
 
 /** Immutable message pages with an atomically replaced manifest; no shared index can lose another window's conversation. */
 export class ConversationStorage {
-	constructor(private readonly directory: string, private readonly onRecoveryIssue: (issue: ConversationRecoveryIssue) => void = () => {}) {}
+	constructor(private readonly directory: string, private readonly recoveryListener: (issue: ConversationRecoveryIssue) => void = () => {}) {}
+	/** A reporting subscriber must never change a committed write or mask its primary failure. */
+	private onRecoveryIssue(issue: ConversationRecoveryIssue): void { try { this.recoveryListener(issue); } catch { /* Storage outcomes are independent of diagnostics. */ } }
 	private folder(id: string): string { return path.join(this.directory, createHash('sha256').update(id).digest('hex')); }
 	private lifecycleFolder(id: string): string { return path.join(this.directory, '.lifecycle', path.basename(this.folder(id))); }
 	/** Attribute nested lookup failures to an unavailable parent, avoiding duplicate recovery warnings. */
@@ -59,7 +65,7 @@ export class ConversationStorage {
 			|| (summary.lastTab !== undefined && !['chat', 'tasks', 'history', 'settings', 'roster'].includes(summary.lastTab))
 			|| (summary.branch !== undefined && (!summary.branch || typeof summary.branch.parentId !== 'string' || !Number.isSafeInteger(summary.branch.throughMessageIndex) || summary.branch.throughMessageIndex < 0 || !['checkpoint-available', 'unlinked'].includes(summary.branch.workspaceState) || (summary.branch.checkpointId !== undefined && typeof summary.branch.checkpointId !== 'string')))
 			|| !Array.isArray(value.pages) || value.pages.length !== Math.ceil(summary.messageCount / PAGE_SIZE) || value.pages.some(page => typeof page !== 'string' || !/^[a-f0-9]{64}\.json$/.test(page))) { throw new Error('Invalid conversation manifest.'); }
-		return value;
+		return { ...value, contentHash: createHash('sha256').update(body).digest('hex') };
 	}
 	private manifest(file: string, expectedId?: string): Manifest | undefined {
 		try {
@@ -163,7 +169,10 @@ export class ConversationStorage {
 				// Recheck before opening pages; a changed manifest means retrying its new snapshot.
 				const current = this.manifest(path.join(folder, 'manifest.json'), id);
 				if (!current || JSON.stringify(current.pages) !== JSON.stringify(manifest.pages) || current.summary.messageCount !== manifest.summary.messageCount) { continue; }
-				try { return this.readPages(id, manifest, offset, limit, lease !== undefined); }
+				try {
+					const record = this.readPages(id, manifest, offset, limit, lease !== undefined);
+					return offset === 0 && record.messages.length === manifest.summary.messageCount ? attachConversationWriteToken(record, { revision: manifest.contentHash! }) : record;
+				}
 				catch (error) {
 					if (!lease) {
 						// Read-only storage cannot publish a lease. If collection removes a page
@@ -195,6 +204,8 @@ export class ConversationStorage {
 	}
 	async save(record: ConversationRecord): Promise<void> {
 		const id = record.summary.id; const folder = this.folder(id);
+		const token = record.writeToken ?? { revision: null }; const expectedRevision = token.revision;
+		let conflicted = false; let committed = false;
 		if (this.isPermanentlyDeleted(id)) { throw new ConversationDeletedError(); }
 		const bodies = new Map<string, { body: string; messages: ChatMessage[] }>(); const pages: string[] = [];
 		for (let offset = 0; offset < record.messages.length; offset += PAGE_SIZE) {
@@ -220,14 +231,36 @@ export class ConversationStorage {
 			}
 			await this.withLifecycleLock(id, async () => {
 				this.assertWritable(id);
-				await this.atomicWrite(path.join(folder, 'manifest.json'), JSON.stringify({ version: 1, summary: { ...record.summary, messageCount: record.messages.length }, pages } satisfies Manifest));
+				const file = path.join(folder, 'manifest.json');
+				const currentRevision = this.manifest(file, id)?.contentHash ?? null;
+				if (currentRevision !== expectedRevision) {
+					const conflict = new ConversationConflictError(); this.onRecoveryIssue({ path: file, message: conflict.message }); throw conflict;
+				}
+				const body = JSON.stringify({ version: 1, summary: { ...record.summary, messageCount: record.messages.length }, pages } satisfies Manifest);
+				const committedRevision = createHash('sha256').update(body).digest('hex');
+				try { await this.atomicWrite(file, body); }
+				catch (error) { if (this.manifest(file, id)?.contentHash !== committedRevision) { throw error; } }
+				token.revision = committedRevision;
+				attachConversationWriteToken(record, token); committed = true;
 			});
 			this.collectPages(folder, record.summary.id);
+		} catch (error) {
+			conflicted = error instanceof ConversationConflictError;
+			if (!committed) { throw error; }
+			this.onRecoveryIssue({ path: folder, message: error instanceof Error ? error.message : String(error) });
 		} finally {
 			// Another collector may have read the previous manifest before this commit.
 			// Retain the lease until every overlapping collector has finished its deletions.
-			await this.waitForCollectors(folder);
-			fs.rmSync(lease, { force: true });
+			try {
+				await this.waitForCollectors(folder);
+				fs.rmSync(lease, { force: true });
+				// A rejected writer no longer needs its staged pages. The collector
+				// retains the current manifest and every other live writer/reader.
+				if (conflicted) { this.collectPages(folder, id); }
+			} catch (error) {
+				this.onRecoveryIssue({ path: folder, message: error instanceof Error ? error.message : String(error) });
+				if (!committed && !conflicted) { throw error; }
+			}
 		}
 	}
 

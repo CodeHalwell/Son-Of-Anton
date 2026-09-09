@@ -11,7 +11,7 @@ type ConversationTarget = string | { readonly summary: { readonly id: string } }
 export class ConversationActions {
 	private readonly pendingDeletes = new Set<string>();
 
-	constructor(private readonly store: ConversationStore, private readonly checkpointAt?: (conversationId: string, messageCount: number) => string | undefined, private readonly retainCheckpoint?: (checkpointId: string, branchId: string) => Promise<void>) {}
+	constructor(private readonly store: ConversationStore, private readonly checkpointAt?: (conversationId: string, messageCount: number) => string | undefined, private readonly retainCheckpoint?: (checkpointId: string, branchId: string) => Promise<void>, private readonly dropCheckpoint?: (branchId: string) => Promise<void>) {}
 
 	create(sourceId?: string): ConversationRecord {
 		const source = sourceId ? this.store.load(sourceId) : this.store.getInitialConversation();
@@ -64,12 +64,30 @@ export class ConversationActions {
 			index = (await vscode.window.showQuickPick(choices, { title: vscode.l10n.t('Branch Conversation'), placeHolder: vscode.l10n.t('Choose the last message to include. Files will stay in their current state.') }))?.messageIndex;
 		}
 		if (index === undefined) { return undefined; }
-		const checkpointId = this.checkpointAt?.(record.summary.id, index + 1);
+		const checkpointId = this.retainCheckpoint && this.dropCheckpoint ? this.checkpointAt?.(record.summary.id, index + 1) : undefined;
 		const branch = this.store.branch(record.summary.id, index, { checkpointId, workspaceState: checkpointId ? 'checkpoint-available' : 'unlinked' });
 		if (branch) {
-			try { if (checkpointId) { await this.retainCheckpoint?.(checkpointId, branch.summary.id); } }
-			catch (error) { this.store.unlinkBranchCheckpoint(branch.summary.id); await this.store.flush(); throw error; }
-			await this.store.flush();
+			try {
+				if (checkpointId) { await this.retainCheckpoint!(checkpointId, branch.summary.id); }
+				await this.store.flush();
+			} catch (error) {
+				const recoveryErrors: unknown[] = [];
+				// Preserve the transcript as an explicitly unlinked recovery copy, even
+				// while its disk remains full. Releasing this branch's ownership must
+				// still run if updating that pending metadata throws (and vice versa).
+				for (const recover of [
+					() => this.store.unlinkBranchCheckpoint(branch.summary.id),
+					() => checkpointId ? this.dropCheckpoint!(branch.summary.id) : undefined,
+					() => this.store.flush(),
+				]) {
+					try { await recover(); } catch (recoveryError) { recoveryErrors.push(recoveryError); }
+				}
+				if (recoveryErrors.length) {
+					const describe = (value: unknown) => value instanceof Error ? value.message : String(value);
+					throw new AggregateError([error, ...recoveryErrors], vscode.l10n.t('Branch creation failed: {0}. Recovery also failed: {1}', describe(error), recoveryErrors.map(describe).join('; ')));
+				}
+				throw error;
+			}
 		}
 		return branch;
 	}

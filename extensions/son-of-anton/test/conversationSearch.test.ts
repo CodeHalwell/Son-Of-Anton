@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import * as vscode from 'vscode';
 import { ConversationStore, type ConversationRecord } from '../src/chat/ConversationStore';
+import { attachConversationWriteToken } from '../src/chat/ConversationWriteToken';
 import { ConversationStorage } from '../src/chat/ConversationStorage';
 import { ConversationActions } from '../src/chat/ConversationActions';
 import { buildLegacySearchIndex, conversationTextChunks, searchIndexMatches } from '../src/chat/ConversationSearchIndex';
@@ -157,7 +158,7 @@ suite('Bounded conversation text search', () => {
 	test('obsolete text indexes follow message-page collection after a committed replacement', async () => {
 		await fixture(async (_store, storage, directory) => {
 			await storage.save(imageRecord()); const original = await messagePage(directory);
-			await storage.save(record('conversation', [text('Replacement body')]));
+			await storage.save(attachConversationWriteToken(record('conversation', [text('Replacement body')]), storage.load('conversation')!.writeToken!));
 			const current = await messagePage(directory);
 			assert.deepEqual({ originalPage: fs.existsSync(original), originalIndex: fs.existsSync(`${original}.search`), currentPage: fs.existsSync(current), currentIndex: fs.existsSync(`${current}.search`) }, { originalPage: false, originalIndex: false, currentPage: true, currentIndex: true });
 		});

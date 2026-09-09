@@ -18,8 +18,8 @@ import type { ConfigStore, Disposable, MementoStore, Notifier } from '../host';
  * implement these two methods.
  */
 export interface ConversationStoreLike {
-	load(conversationId: string): { readonly messages: ReadonlyArray<unknown>; readonly summary: { readonly lastSpecialist?: string } } | undefined;
-	update(conversationId: string, messages: ReadonlyArray<unknown>, lastSpecialist?: string): void;
+	load(conversationId: string): { readonly messages: ReadonlyArray<unknown>; readonly summary: { readonly lastSpecialist?: string }; readonly writeToken?: { revision: string | null } } | undefined;
+	update(conversationId: string, messages: ReadonlyArray<unknown>, lastSpecialist?: string, lastMode?: undefined, lastTab?: undefined, lastModel?: undefined, writeToken?: { revision: string | null }): void;
 }
 
 /**
@@ -135,7 +135,23 @@ export class CheckpointManager implements Disposable {
 			return undefined;
 		}
 
-		await this.mutateIndex(index => this.pruneIndex([...index, checkpoint]), checkpoint.snapshot?.workspaceRoot ?? checkpoint.fileSnapshot?.workspaceRoot);
+		let indexed = false;
+		try {
+			await this.mutateIndex(index => this.pruneIndex([...index, checkpoint]), checkpoint.snapshot?.workspaceRoot ?? checkpoint.fileSnapshot?.workspaceRoot, () => { indexed = true; });
+		} catch (error) {
+			// Only this newly captured payload is disposable before the index
+			// commits. A later pruning/notification failure must not remove a
+			// snapshot that history or a branch can already reference.
+			if (!indexed && checkpoint.fileSnapshot) {
+				const snapshot = checkpoint.fileSnapshot;
+				try { await new FileSnapshotStore(snapshot.workspaceRoot, snapshot.storageRoot).release(snapshot); }
+				catch (cleanupError) {
+					try { this.host.notifier.warn(`Could not release an unindexed file checkpoint: ${String(cleanupError)}`); }
+					catch { /* Preserve the index failure even if the host cannot report cleanup. */ }
+				}
+			}
+			throw error;
+		}
 		this._onDidChange.fire();
 		return checkpoint;
 	}
@@ -338,6 +354,7 @@ export class CheckpointManager implements Disposable {
 			conversationId,
 			trimmed,
 			record.summary.lastSpecialist,
+			undefined, undefined, undefined, record.writeToken,
 		);
 	}
 
@@ -356,12 +373,13 @@ export class CheckpointManager implements Disposable {
 		return Array.isArray(raw) ? [...raw] : [];
 	}
 
-	private mutateIndex(update: (index: Checkpoint[]) => Checkpoint[], root = this.getWorkspaceRoot()): Promise<void> {
+	private mutateIndex(update: (index: Checkpoint[]) => Checkpoint[], root = this.getWorkspaceRoot(), onPersisted?: () => void): Promise<void> {
 		const key = this.storageKey(root);
 		const operation = this.pendingWrite.then(async () => {
 			const previous = this.globalState.get<Checkpoint[]>(key) ?? [];
 			const next = update([...previous]);
 			await this.globalState.update(key, next);
+			onPersisted?.();
 			for (const removed of previous.filter(item => !next.some(retained => retained.id === item.id))) {
 				if (removed.fileSnapshot) {
 					await new FileSnapshotStore(removed.fileSnapshot.workspaceRoot, removed.fileSnapshot.storageRoot).release(removed.fileSnapshot).catch(error => {

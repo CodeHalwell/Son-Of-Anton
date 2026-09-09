@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
 import { ConversationDeletedError, ConversationStorage } from '../src/chat/ConversationStorage';
+import { attachConversationWriteToken } from '../src/chat/ConversationWriteToken';
 import type { ConversationRecord } from '../src/chat/ConversationStore';
 
 function record(content = 'retained transcript'): ConversationRecord {
@@ -127,7 +128,7 @@ suite('Permanent conversation tombstones', () => {
 				await writer.done; assert.equal(storage.isPermanentlyDeleted('conversation'), crashState === 'deleted');
 				await storage.cleanupDeleted();
 				assert.equal(fs.existsSync(marker), crashState === 'deleted'); assert.equal(fs.existsSync(folder), crashState === 'pending');
-				if (crashState === 'pending') { assert.deepEqual(storage.load('conversation'), record()); await storage.save(record('new content')); }
+				if (crashState === 'pending') { assert.deepEqual(storage.load('conversation'), record()); await storage.save(attachConversationWriteToken(record('new content'), storage.load('conversation')!.writeToken!)); }
 			});
 		});
 	}
