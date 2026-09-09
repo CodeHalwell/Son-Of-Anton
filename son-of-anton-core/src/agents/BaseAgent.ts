@@ -518,7 +518,9 @@ export abstract class BaseAgent {
 		server: string,
 		tool: string,
 		inputs: Record<string, unknown>,
+		signal?: AbortSignal,
 	): Promise<McpToolResult> {
+		signal?.throwIfAborted();
 		const span = this.agentManager.addSpan({
 			taskId,
 			name: `${server}/${tool}`,
@@ -528,7 +530,7 @@ export abstract class BaseAgent {
 		});
 
 		try {
-			const result = await this.mcpClient.callTool({ server, tool, inputs });
+			const result = await this.mcpClient.callTool({ server, tool, inputs, signal });
 			span.attributes['latencyMs'] = result.latencyMs;
 			span.attributes['isError'] = result.isError;
 			return result;
@@ -808,8 +810,8 @@ export abstract class BaseAgent {
 	/**
 	 * Query the code graph for file summary information.
 	 */
-	protected async queryFileGraph(taskId: string, filePath: string): Promise<string> {
-		const result = await this.callMcpTool(taskId, 'code-graph', 'file_summary', { filePath });
+	protected async queryFileGraph(taskId: string, filePath: string, signal?: AbortSignal): Promise<string> {
+		const result = await this.callMcpTool(taskId, 'code-graph', 'file_summary', { filePath }, signal);
 		return this.graphContentOrEmpty(result);
 	}
 

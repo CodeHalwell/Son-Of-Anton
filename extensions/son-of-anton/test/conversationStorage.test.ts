@@ -43,9 +43,9 @@ suite('Conversation immutable page collection', () => {
 		await withStorage(async (storage, directory, folder) => {
 			const original = record('original'); await storage.save(original); const originalPages = pages(folder);
 			const otherWindow = new ConversationStorage(directory);
-			const internal = otherWindow as unknown as { atomicWrite(destination: string, body: string): Promise<void> };
-			const write = internal.atomicWrite; const paused = deferred(); const release = deferred();
-			internal.atomicWrite = async (destination, body) => { if (path.basename(destination) === 'manifest.json') { paused.resolve(); await release.promise; } await write.call(otherWindow, destination, body); };
+			const internal = otherWindow as unknown as { withLifecycleLock<T>(id: string, operation: () => Promise<T>): Promise<T> };
+			const lock = internal.withLifecycleLock; const paused = deferred(); const release = deferred(); let calls = 0;
+			internal.withLifecycleLock = async (id, operation) => { if (++calls === 2) { paused.resolve(); await release.promise; } return lock.call(otherWindow, id, operation) as ReturnType<typeof operation>; };
 			const pending = otherWindow.save(original); await paused.promise;
 			try {
 				await storage.save(record('replacement'));

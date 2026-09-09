@@ -18,11 +18,26 @@ export class ProviderFinder implements vscode.Disposable {
 	private readonly timer: ReturnType<typeof setInterval>;
 	private disposed = false;
 	constructor(private readonly context: vscode.ExtensionContext, private readonly llmClient: LlmClient) {
+		const userSetting = <T>(key: string, fallback?: T): T => {
+			const setting = vscode.workspace.getConfiguration('sota').inspect<T>(key);
+			return (setting?.globalValue ?? setting?.defaultValue ?? fallback) as T;
+		};
 		this.service = llmClient.createProviderDiscovery(context.globalState, {
 			get: <T>(key: string, fallback?: T): T => {
-				const setting = vscode.workspace.getConfiguration('sota').inspect<T>(key);
-				return (setting?.globalValue ?? setting?.defaultValue ?? fallback) as T;
+				// Match live chat for the window-scoped legacy key and local servers.
+				// Remote endpoints and account credentials remain user/application scoped.
+				return ['apiKey', 'ollamaBaseUrl', 'lmstudioBaseUrl'].includes(key)
+					? vscode.workspace.getConfiguration('sota').get<T>(key, fallback as T)
+					: userSetting(key, fallback);
 			},
+		}, ({ provider, baseUrl, authenticated }) => {
+			if (provider !== 'lmstudio' || !authenticated) { return true; }
+			// A workspace can locate an anonymous server, but cannot receive a key
+			// from SecretStorage, user settings or the environment without matching
+			// the endpoint the user configured outside the workspace.
+			const canonical = (value: string): string => new URL(value.trim().replace(/\/+$/, '')).href.replace(/\/+$/, '');
+			try { return canonical(baseUrl) === canonical(userSetting<string>('lmstudioBaseUrl', '').trim() || 'http://localhost:1234'); }
+			catch { return false; }
 		});
 		this.registerMetadata(this.service.snapshot());
 		this.disposables.push(onDiscoveredModelsChanged(() => {

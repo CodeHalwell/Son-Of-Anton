@@ -10,7 +10,7 @@ import type { ConfigStore, SecretStore } from '../host';
 import type { PromptCacheOptimizer } from './PromptCacheOptimizer';
 import type { ClaudeCodeMessage } from './claudeCodeRunner';
 import { getDiscoveredModel, markDiscoveredToolsVerified, type DiscoveredModelId } from './DiscoveredModels';
-import { ProviderDiscovery } from './ProviderDiscovery';
+import { ProviderDiscovery, type CatalogRequestPolicy } from './ProviderDiscovery';
 import { Semaphore } from '../util/semaphore';
 import { RateLimiter } from '../util/rateLimiter';
 
@@ -937,8 +937,8 @@ export class LlmClient {
 		} finally { if (acquired) { this.requestSemaphore.release(); } }
 	}
 
-	createProviderDiscovery(state?: import('../host').MementoStore, config: ConfigStore = this.config): ProviderDiscovery {
-		return new ProviderDiscovery({ secrets: this.secrets, config, state, credentialResolver: this.credentialResolver });
+	createProviderDiscovery(state?: import('../host').MementoStore, config: ConfigStore = this.config, catalogRequestAllowed?: CatalogRequestPolicy): ProviderDiscovery {
+		return new ProviderDiscovery({ secrets: this.secrets, config, state, credentialResolver: this.credentialResolver, catalogRequestAllowed });
 	}
 
 	/**

@@ -11,6 +11,10 @@ import type { ChatMessage } from './ChatPanel';
 import { buildLegacySearchIndex, searchIndexMatches, writeSearchIndex } from './ConversationSearchIndex';
 
 interface Manifest { version: 1; summary: ConversationSummary; pages: string[] }
+interface DeletionState { version: 1; id: string; state: 'pending' | 'deleted'; owner: string; deletedAt: number }
+export class ConversationDeletedError extends Error {
+	constructor() { super('This conversation was permanently deleted in another window. Start a new conversation to continue.'); }
+}
 const PAGE_SIZE = 100;
 const PAGE_NAME = /^[a-f0-9]{64}\.json$/;
 const OWNER_FILE = /^\.(reader|writer|gc)-(\d+)-[a-f0-9-]+$/;
@@ -21,6 +25,27 @@ export interface ConversationRecoveryIssue { readonly path: string; readonly mes
 export class ConversationStorage {
 	constructor(private readonly directory: string, private readonly onRecoveryIssue: (issue: ConversationRecoveryIssue) => void = () => {}) {}
 	private folder(id: string): string { return path.join(this.directory, createHash('sha256').update(id).digest('hex')); }
+	private lifecycleFolder(id: string): string { return path.join(this.directory, '.lifecycle', path.basename(this.folder(id))); }
+	/** Attribute nested lookup failures to an unavailable parent, avoiding duplicate recovery warnings. */
+	private lifecycleIssuePath(file: string): string {
+		try { fs.readdirSync(this.directory); return file; }
+		catch { return this.directory; }
+	}
+
+	private deletionState(id: string): DeletionState | undefined {
+		const file = path.join(this.lifecycleFolder(id), 'deletion.json');
+		try {
+			const value = JSON.parse(fs.readFileSync(file, 'utf8')) as DeletionState;
+			if (value?.version !== 1 || value.id !== id || !['pending', 'deleted'].includes(value.state) || !Number.isFinite(value.deletedAt) || typeof value.owner !== 'string' || OWNER_FILE.exec(value.owner)?.[1] !== 'writer') { throw new Error('Invalid conversation deletion marker.'); }
+			return value;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return undefined; }
+			this.onRecoveryIssue({ path: this.lifecycleIssuePath(file), message: 'Conversation deletion marker could not be read. It was preserved for recovery.' }); throw error;
+		}
+	}
+	/** Permanent IDs are never reused, including when a stale window recreates their folder. */
+	isPermanentlyDeleted(id: string): boolean { return this.deletionState(id)?.state === 'deleted'; }
+	isHidden(id: string): boolean { const state = this.deletionState(id); return state?.state === 'deleted' || !!(state && this.liveOwner(state.owner)); }
 	private parseManifest(body: string, file: string, expectedId?: string): Manifest {
 		const value = JSON.parse(body) as Manifest;
 		const summary = value?.summary;
@@ -38,7 +63,9 @@ export class ConversationStorage {
 	}
 	private manifest(file: string, expectedId?: string): Manifest | undefined {
 		try {
-			return this.parseManifest(fs.readFileSync(file, 'utf8'), file, expectedId);
+			if (expectedId && this.isHidden(expectedId)) { return undefined; }
+			const manifest = this.parseManifest(fs.readFileSync(file, 'utf8'), file, expectedId);
+			return this.isHidden(manifest.summary.id) ? undefined : manifest;
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return undefined; }
 			this.onRecoveryIssue({ path: file, message: error instanceof Error ? error.message : String(error) });
@@ -46,7 +73,11 @@ export class ConversationStorage {
 		}
 	}
 	private async manifestAsync(file: string, expectedId?: string): Promise<Manifest | undefined> {
-		try { return this.parseManifest(await fsp.readFile(file, 'utf8'), file, expectedId); }
+		try {
+			if (expectedId && this.isHidden(expectedId)) { return undefined; }
+			const manifest = this.parseManifest(await fsp.readFile(file, 'utf8'), file, expectedId);
+			return this.isHidden(manifest.summary.id) ? undefined : manifest;
+		}
 		catch (error) {
 			if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return undefined; }
 			this.onRecoveryIssue({ path: file, message: error instanceof Error ? error.message : String(error) });
@@ -78,7 +109,7 @@ export class ConversationStorage {
 			const manifest = await this.manifestAsync(manifestFile, id); if (!manifest) { return false; }
 			let lease: string | undefined;
 			try { lease = this.createLease(folder, 'reader', manifest.pages); }
-			catch (error) { if (!['EROFS', 'EACCES', 'EPERM', 'ENOSPC', 'EDQUOT'].includes((error as NodeJS.ErrnoException).code ?? '')) { throw error; } }
+			catch (error) { if (this.isHidden(id)) { return false; } if (!['EROFS', 'EACCES', 'EPERM', 'ENOSPC', 'EDQUOT'].includes((error as NodeJS.ErrnoException).code ?? '')) { throw error; } }
 			try {
 				const current = await this.manifestAsync(manifestFile, id);
 				if (!current || JSON.stringify(current.pages) !== JSON.stringify(manifest.pages)) { continue; }
@@ -126,7 +157,7 @@ export class ConversationStorage {
 			const manifest = this.manifest(path.join(folder, 'manifest.json'), id); if (!manifest) { return undefined; }
 			let lease: string | undefined;
 			try { lease = this.createLease(folder, 'reader', manifest.pages); }
-			catch (error) { if (!['EROFS', 'EACCES', 'EPERM', 'ENOSPC', 'EDQUOT'].includes((error as NodeJS.ErrnoException).code ?? '')) { throw error; } }
+			catch (error) { if (this.isHidden(id)) { return undefined; } if (!['EROFS', 'EACCES', 'EPERM', 'ENOSPC', 'EDQUOT'].includes((error as NodeJS.ErrnoException).code ?? '')) { throw error; } }
 			try {
 				// A collector may have taken its root snapshot before this lease appeared.
 				// Recheck before opening pages; a changed manifest means retrying its new snapshot.
@@ -163,14 +194,19 @@ export class ConversationStorage {
 		return { summary: manifest.summary, messages };
 	}
 	async save(record: ConversationRecord): Promise<void> {
-		const folder = this.folder(record.summary.id); await fsp.mkdir(folder, { recursive: true, mode: 0o700 });
+		const id = record.summary.id; const folder = this.folder(id);
+		if (this.isPermanentlyDeleted(id)) { throw new ConversationDeletedError(); }
 		const bodies = new Map<string, { body: string; messages: ChatMessage[] }>(); const pages: string[] = [];
 		for (let offset = 0; offset < record.messages.length; offset += PAGE_SIZE) {
 			const messages = record.messages.slice(offset, offset + PAGE_SIZE); const body = JSON.stringify(messages);
 			const name = `${createHash('sha256').update(body).digest('hex')}.json`; pages.push(name);
 			bodies.set(name, { body, messages });
 		}
-		const lease = this.createLease(folder, 'writer', pages);
+		const lease = await this.withLifecycleLock(id, async () => {
+			this.assertWritable(id);
+			await fsp.mkdir(folder, { recursive: true, mode: 0o700 });
+			return this.createLease(folder, 'writer', pages);
+		});
 		try {
 			// Publish prospective hashes before checking the collection barrier. A collector
 			// either retains this lease or finishes before the writer checks/reuses any pages.
@@ -182,7 +218,10 @@ export class ConversationStorage {
 					catch (error) { this.onRecoveryIssue({ path: path.join(folder, `${name}.search`), message: `Conversation search cache could not be saved: ${error instanceof Error ? error.message : String(error)}` }); }
 				}
 			}
-			await this.atomicWrite(path.join(folder, 'manifest.json'), JSON.stringify({ version: 1, summary: { ...record.summary, messageCount: record.messages.length }, pages } satisfies Manifest));
+			await this.withLifecycleLock(id, async () => {
+				this.assertWritable(id);
+				await this.atomicWrite(path.join(folder, 'manifest.json'), JSON.stringify({ version: 1, summary: { ...record.summary, messageCount: record.messages.length }, pages } satisfies Manifest));
+			});
 			this.collectPages(folder, record.summary.id);
 		} finally {
 			// Another collector may have read the previous manifest before this commit.
@@ -192,10 +231,11 @@ export class ConversationStorage {
 		}
 	}
 
-	private createLease(folder: string, kind: 'reader' | 'writer', pages: readonly string[]): string {
+	private createLease(folder: string, kind: 'reader' | 'writer', pages: readonly string[]): string { return this.createOwnedFile(folder, kind, JSON.stringify(pages)); }
+	private createOwnedFile(folder: string, kind: 'reader' | 'writer', body: string): string {
 		const lease = path.join(folder, `.${kind}-${hostProcess.pid}-${randomUUID()}`);
 		const temporary = `${lease}.tmp`;
-		try { fs.writeFileSync(temporary, JSON.stringify(pages), { flag: 'wx', mode: 0o600 }); fs.renameSync(temporary, lease); }
+		try { fs.writeFileSync(temporary, body, { flag: 'wx', mode: 0o600 }); fs.renameSync(temporary, lease); }
 		finally { fs.rmSync(temporary, { force: true }); }
 		return lease;
 	}
@@ -250,5 +290,115 @@ export class ConversationStorage {
 		} finally { await fsp.rm(temporary, { force: true }); }
 	}
 
-	async delete(id: string): Promise<void> { await fsp.rm(this.folder(id), { recursive: true, force: true }); }
+	/** Ordered process-owned tickets avoid stealing a live lock while reclaiming an exited owner. */
+	private async withLifecycleLock<T>(id: string, operation: () => Promise<T>): Promise<T> {
+		const folder = this.lifecycleFolder(id); await fsp.mkdir(folder, { recursive: true, mode: 0o700 });
+		const lease = this.createOwnedFile(folder, 'writer', '0'); const name = path.basename(lease);
+		const contenders = () => fs.readdirSync(folder).flatMap(entry => {
+			if (entry === name || OWNER_FILE.exec(entry)?.[1] !== 'writer') { return []; }
+			if (!this.liveOwner(entry)) { fs.rmSync(path.join(folder, entry), { force: true }); return []; }
+			try {
+				const ticket: unknown = JSON.parse(fs.readFileSync(path.join(folder, entry), 'utf8'));
+				if (typeof ticket !== 'number' || !Number.isSafeInteger(ticket) || ticket < 0) { throw new Error('Invalid conversation lifecycle lease.'); }
+				return [{ name: entry, ticket }];
+			} catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return []; } throw error; }
+		});
+		try {
+			const ticket = Math.max(0, ...contenders().map(entry => entry.ticket)) + 1;
+			if (!Number.isSafeInteger(ticket)) { throw new Error('Conversation lifecycle lease counter is invalid.'); }
+			await this.atomicWrite(lease, JSON.stringify(ticket));
+			const deadline = Date.now() + 10_000;
+			while (contenders().some(entry => entry.ticket === 0 || entry.ticket < ticket || (entry.ticket === ticket && entry.name < name))) {
+				if (Date.now() >= deadline) { throw new Error('Conversation storage is busy in another window. Please try again.'); }
+				await new Promise<void>(resolve => setTimeout(resolve, 10));
+			}
+			return await operation();
+		} finally { await fsp.rm(lease, { force: true }); }
+	}
+
+	/** Must run under the lifecycle lock; an abandoned pre-commit barrier changed no transcript data. */
+	private assertWritable(id: string): void {
+		const state = this.deletionState(id);
+		if (state?.state === 'deleted') { throw new ConversationDeletedError(); }
+		if (state && this.liveOwner(state.owner)) { throw new Error('This conversation is being deleted in another window. Please try again after deletion finishes.'); }
+		if (state) { fs.rmSync(path.join(this.lifecycleFolder(id), 'deletion.json')); }
+	}
+
+	private activeOwners(folder: string): boolean {
+		try { return fs.readdirSync(folder).some(name => !!this.liveOwner(name)); }
+		catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return false; } throw error; }
+	}
+
+	private async reclaimDeleted(id: string): Promise<void> {
+		const folder = this.folder(id);
+		try {
+			if (this.activeOwners(folder)) { throw new Error('busy'); }
+			await fsp.rm(folder, { recursive: true, force: true });
+		} catch { this.onRecoveryIssue({ path: folder, message: 'The conversation is permanently deleted, but its remaining files could not be removed. Cleanup will be retried when history is opened again.' }); }
+	}
+
+	/** Small durable lifecycle records, independent of payload folders and per-window cleanup state. */
+	async listDeletedIds(): Promise<string[]> {
+		const directory = path.join(this.directory, '.lifecycle'); const ids: string[] = [];
+		let entries: fs.Dirent[];
+		try { entries = await fsp.readdir(directory, { withFileTypes: true }); }
+		catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { this.onRecoveryIssue({ path: this.lifecycleIssuePath(directory), message: 'Conversation deletion records could not be read. They were preserved for recovery.' }); } return ids; }
+		for (const entry of entries) {
+			if (!entry.isDirectory() || !/^[a-f0-9]{64}$/.test(entry.name)) { continue; }
+			try {
+				const record = JSON.parse(await fsp.readFile(path.join(directory, entry.name, 'deletion.json'), 'utf8')) as DeletionState;
+				if (typeof record.id !== 'string' || path.basename(this.folder(record.id)) !== entry.name) { throw new Error('Invalid deletion record'); }
+				if (this.isPermanentlyDeleted(record.id)) { ids.push(record.id); }
+			} catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { this.onRecoveryIssue({ path: this.lifecycleIssuePath(path.join(directory, entry.name, 'deletion.json')), message: 'Conversation deletion record could not be read. It was preserved for recovery.' }); } }
+		}
+		return ids;
+	}
+
+	/** Retry optional reclamation on startup; committed markers themselves are never collected. */
+	async cleanupDeleted(): Promise<void> {
+		const directory = path.join(this.directory, '.lifecycle');
+		let entries: fs.Dirent[];
+		try { entries = await fsp.readdir(directory, { withFileTypes: true }); }
+		catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { this.onRecoveryIssue({ path: this.lifecycleIssuePath(directory), message: 'Conversation cleanup records could not be read. They were preserved for recovery.' }); } return; }
+		for (const entry of entries) {
+			if (!entry.isDirectory() || !/^[a-f0-9]{64}$/.test(entry.name)) { continue; }
+			try {
+				const record = JSON.parse(await fsp.readFile(path.join(directory, entry.name, 'deletion.json'), 'utf8')) as DeletionState;
+				if (typeof record.id !== 'string' || path.basename(this.folder(record.id)) !== entry.name) { throw new Error('Invalid deletion record'); }
+				if (this.isPermanentlyDeleted(record.id)) { await this.reclaimDeleted(record.id); }
+				else if (!this.liveOwner(record.owner)) { await this.withLifecycleLock(record.id, async () => { this.assertWritable(record.id); }); }
+			} catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { this.onRecoveryIssue({ path: this.lifecycleIssuePath(path.join(directory, entry.name, 'deletion.json')), message: 'Conversation cleanup record could not be read. It was preserved for recovery.' }); } }
+		}
+	}
+
+	async delete(id: string): Promise<void> {
+		const file = path.join(this.lifecycleFolder(id), 'deletion.json');
+		const state: DeletionState = { version: 1, id, state: 'pending', owner: `.writer-${hostProcess.pid}-${randomUUID()}`, deletedAt: Date.now() };
+		try {
+			const started = await this.withLifecycleLock(id, async () => {
+				if (this.isPermanentlyDeleted(id)) { return false; }
+				this.assertWritable(id); await this.atomicWrite(file, JSON.stringify(state)); return true;
+			});
+			if (started) {
+				const deadline = Date.now() + 10_000;
+				while (this.activeOwners(this.folder(id))) {
+					if (Date.now() >= deadline) { throw new Error('Conversation is still in use in another window. Please try deleting it again.'); }
+					await new Promise<void>(resolve => setTimeout(resolve, 10));
+				}
+				await this.withLifecycleLock(id, async () => {
+					if (this.deletionState(id)?.owner !== state.owner) { throw new Error('Conversation deletion ownership changed. Please try again.'); }
+					await this.atomicWrite(file, JSON.stringify({ ...state, state: 'deleted' } satisfies DeletionState));
+				});
+			}
+		} catch (error) {
+			// The folder has not been changed: only a committed marker permits reclamation.
+			if (!this.isPermanentlyDeleted(id)) {
+				if (this.deletionState(id)?.owner === state.owner) {
+					await this.withLifecycleLock(id, async () => { if (this.deletionState(id)?.owner === state.owner) { await fsp.rm(file, { force: true }); } });
+				}
+				throw error;
+			}
+		}
+		await this.reclaimDeleted(id);
+	}
 }

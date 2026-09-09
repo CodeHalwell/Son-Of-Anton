@@ -49,6 +49,8 @@ export interface ProviderDiscoverySnapshot {
 	software: DiscoveredSoftware[];
 	providers: DiscoveredProvider[];
 }
+/** Host policy for binding automatic catalog credentials to a trusted endpoint. */
+export type CatalogRequestPolicy = (request: { provider: CatalogProvider; baseUrl: string; authenticated: boolean }) => boolean;
 interface DiscoveryRefresh {
 	includeLocal: boolean;
 	promise: Promise<ProviderDiscoverySnapshot>;
@@ -114,6 +116,7 @@ export class ProviderDiscovery {
 		home?: string;
 		env?: NodeJS.ProcessEnv;
 		request?: typeof fetch;
+		catalogRequestAllowed?: CatalogRequestPolicy;
 	}) {
 		const cached = deps.state?.get<ProviderDiscoverySnapshot>(storageKey);
 		this.value = validSnapshot(cached) ? cached : { version: 1, updatedAt: 0, software: [], providers: [] };
@@ -308,6 +311,7 @@ export class ProviderDiscovery {
 			const url = new URL(`${base}${spec.modelsPath}`);
 			if (url.username || url.password || !['https:', 'http:'].includes(url.protocol)) { throw new Error('invalid-endpoint'); }
 			if (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) { throw new Error('insecure-endpoint'); }
+			if (this.deps.catalogRequestAllowed?.({ provider: spec.id, baseUrl: base, authenticated: !!credential.value }) === false) { throw new Error('untrusted-catalog-endpoint'); }
 			const headers: Record<string, string> = { accept: 'application/json' };
 			if (credential.value) {
 				if (spec.id === 'google') { headers['x-goog-api-key'] = credential.value; }
@@ -350,7 +354,8 @@ export class ProviderDiscovery {
 			result.error = /^HTTP (401|403)$/.test(message) ? 'Catalog authentication was rejected. Check this provider’s sign-in or API key.'
 				: message === 'HTTP 429' ? 'Catalog rate limit reached. Cached models are retained; refresh later.'
 					: message === 'insecure-endpoint' ? 'Catalog endpoints require HTTPS except for localhost.'
-						: 'Could not read the provider catalog. Check the endpoint, credentials, and server availability.';
+						: message === 'untrusted-catalog-endpoint' ? 'Authenticated catalog discovery requires this endpoint in User settings. Configure the provider URL there, then refresh. Cached models are retained.'
+							: 'Could not read the provider catalog. Check the endpoint, credentials, and server availability.';
 			result.models = this.value.providers.find(provider => provider.id === spec.id)?.models ?? [];
 		}
 		return result;

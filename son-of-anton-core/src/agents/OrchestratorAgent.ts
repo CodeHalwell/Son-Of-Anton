@@ -206,7 +206,7 @@ export class OrchestratorAgent extends BaseAgent {
 			return;
 		}
 
-		const graphContext = await this.gatherGraphContext(taskId, request.prompt);
+		const graphContext = await this.gatherGraphContext(taskId, request.prompt, request.signal);
 
 		if (token.isCancellationRequested) {
 			stream.markdown('\n**Cancelled.**\n');
@@ -764,9 +764,10 @@ export class OrchestratorAgent extends BaseAgent {
 			// Build graph context for the subtask's scope
 			let graphContext = '';
 			for (const file of subtask.scopeFiles) {
-				const summary = await this.queryFileGraph(parentTaskId, file);
+				const summary = await this.queryFileGraph(parentTaskId, file, controller.signal);
 				graphContext += `### ${file}\n${summary}\n\n`;
 			}
+			controller.signal.throwIfAborted();
 
 			// `onToken` is omitted when no structured channel is wired (native chat
 			// participant flow), keeping the cheaper non-streaming LLM path.
@@ -990,7 +991,7 @@ export class OrchestratorAgent extends BaseAgent {
 	/**
 	 * Gather graph context for a request by querying the MCP code graph.
 	 */
-	private async gatherGraphContext(taskId: string, request: string): Promise<string> {
+	private async gatherGraphContext(taskId: string, request: string, signal?: AbortSignal): Promise<string> {
 		const sections: string[] = [];
 		const fallback = '## Relevant Files\n(Code graph not available)';
 
@@ -1014,10 +1015,12 @@ export class OrchestratorAgent extends BaseAgent {
 				'code-graph',
 				'semantic_search',
 				{ query: request, limit: 5, maxResults: 5, agentRole: this.config.handle },
+				signal,
 			);
 			const text = this.mcpContentOrEmpty(searchResult);
 			sections.push(text.length > 0 ? '## Relevant Files\n' + text : fallback);
 		} catch {
+			signal?.throwIfAborted();
 			sections.push(fallback);
 		}
 

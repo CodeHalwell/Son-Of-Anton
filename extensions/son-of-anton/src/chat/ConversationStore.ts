@@ -5,7 +5,8 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
-import { ConversationStorage, type ConversationRecoveryIssue } from './ConversationStorage';
+import { ConversationDeletedError, ConversationStorage, type ConversationRecoveryIssue } from './ConversationStorage';
+import { watchConversationLifecycle } from './ConversationLifecycleWatcher';
 import { conversationTextChunks, MAX_HISTORY_QUERY_LENGTH } from './ConversationSearchIndex';
 import { ChatMessage } from './ChatPanel';
 import { AgentHandle } from 'son-of-anton-core/agents/types';
@@ -173,6 +174,13 @@ export class ConversationStore implements vscode.Disposable {
 	private readonly _onDidPermanentlyDelete = new vscode.EventEmitter<string>();
 	readonly onDidPermanentlyDelete = this._onDidPermanentlyDelete.event;
 	private permanentDeleteCleanup?: (id: string) => Promise<void>;
+	private lifecycleWatcher?: vscode.Disposable;
+	private disposed = false;
+	private scanQueued = false;
+	private scanRequested = false;
+	private readonly observedDeletions = new Set<string>();
+	private readonly deletionNotifications = new Set<string>();
+	private readonly cleanupScheduled = new Set<string>();
 
 	constructor(
 		private readonly context: vscode.ExtensionContext,
@@ -180,13 +188,18 @@ export class ConversationStore implements vscode.Disposable {
 		private readonly workspaceName = vscode.workspace.name ?? vscode.l10n.t('Empty Window'),
 	) {
 		this.disk = context.globalStorageUri?.scheme === 'file' ? new ConversationStorage(path.join(context.globalStorageUri.fsPath, 'conversations-v2'), issue => this.reportRecoveryIssue(issue)) : undefined;
+		if (this.disk && typeof vscode.workspace.createFileSystemWatcher === 'function' && typeof vscode.RelativePattern === 'function') {
+			this.lifecycleWatcher = watchConversationLifecycle(path.join(context.globalStorageUri.fsPath, 'conversations-v2'), () => this.scanDeletions());
+		}
+		this.scanDeletions();
 		const oldIndex = context.globalState.get<ConversationSummary[]>(INDEX_KEY) ?? [];
 		const retainedLegacyIds = new Set<string>();
 		if (this.disk) {
 			this.disk.list(); // Scan for recoverable damage without preventing activation.
 			for (const summary of oldIndex) {
 				try {
-					if (!this.disk.load(summary.id)) {
+					if (!this.disk.isPermanentlyDeleted(summary.id) && this.disk.isHidden(summary.id)) { retainedLegacyIds.add(summary.id); continue; }
+					if (!this.disk.isPermanentlyDeleted(summary.id) && !this.disk.load(summary.id)) {
 						const messages = context.globalState.get<ChatMessage[]>(recordKey(summary.id)) ?? [];
 						this.persist({ summary: { ...summary, messageCount: messages.length }, messages });
 					}
@@ -199,13 +212,15 @@ export class ConversationStore implements vscode.Disposable {
 			// A stable import ID makes retrying a failed migration idempotent.
 			const id = createHash('sha256').update(this.workspaceId).update(JSON.stringify(legacy)).digest('hex');
 			try {
-				if (!this.load(id, true)) {
+				if (!this.disk?.isPermanentlyDeleted(id) && this.isHidden(id)) { retainWorkspaceLegacy = true; }
+				else if (!this.disk?.isPermanentlyDeleted(id) && !this.load(id, true)) {
 					const now = Date.now();
 					this.persist({ summary: { id, title: deriveTitle(legacy) ?? 'Imported conversation', createdAt: now, updatedAt: now, messageCount: legacy.length, workspaceId: this.workspaceId, workspaceName: this.workspaceName }, messages: [...legacy] });
 				}
 			} catch { retainWorkspaceLegacy = true; }
 		}
 		this.ready = this.flush().then(async () => {
+			await this.disk?.cleanupDeleted();
 			// Source records are cleared only after every destination manifest is durable.
 			if (this.disk) {
 				for (const summary of oldIndex) { if (!retainedLegacyIds.has(summary.id)) { await context.globalState.update(recordKey(summary.id), undefined); } }
@@ -228,19 +243,85 @@ export class ConversationStore implements vscode.Disposable {
 
 	/** Await pending writes and deletion cleanup, including after UI disposal. */
 	async flush(): Promise<void> {
-		await this.pendingWrite; const failure = this.writeFailure ?? this.failedWrites.values().next().value;
+		let tail: Promise<void>;
+		do { tail = this.pendingWrite; await tail; } while (tail !== this.pendingWrite);
+		const failure = this.writeFailure ?? this.failedWrites.values().next().value;
 		if (failure) { throw failure; }
 	}
 
 	/** Register host cleanup that survives UI disposal and runs only after durable deletion. */
 	setPermanentDeleteCleanup(cleanup: (id: string) => Promise<void>): void {
 		this.permanentDeleteCleanup = cleanup;
+		for (const id of this.observedDeletions) { this.scheduleDeletionCleanup(id); }
+		this.scanDeletions();
+	}
+
+	private scanDeletions(): void {
+		if (!this.disk || this.disposed) { return; }
+		this.scanRequested = true;
+		if (this.scanQueued) { return; }
+		this.scanQueued = true;
+		// Observation must not wait behind a slow save: cancelling active turns
+		// precedes their final writes and the independently queued host cleanup.
+		const scan = (async () => {
+			try {
+				do {
+					this.scanRequested = false;
+					for (const id of await this.disk!.listDeletedIds()) { this.observeDeletion(id); }
+				} while (this.scanRequested && !this.disposed);
+			} finally { this.scanQueued = false; }
+			this._onDidChange.fire();
+		})();
+		void scan.catch(() => {}); // The write queue reports failures, even if an older save is still pending.
+		this.enqueue('lifecycle-scan', () => scan);
+	}
+
+	/** Observe once per window before cleanup so active turns lose ownership immediately. */
+	private observeDeletion(id: string): void {
+		this.pendingRecords.delete(id); this.failedWrites.delete(id);
+		if (!this.observedDeletions.has(id)) {
+			this.observedDeletions.add(id);
+			this._onDidDelete.fire(id); this._onDidChange.fire();
+		}
+		this.scheduleDeletionCleanup(id);
+	}
+
+	private notifyPermanentDeletion(id: string): void {
+		if (!this.deletionNotifications.has(id)) {
+			this.deletionNotifications.add(id); this._onDidPermanentlyDelete.fire(id); this._onDidChange.fire();
+		}
+	}
+
+	private scheduleDeletionCleanup(id: string): void {
+		const cleanup = this.permanentDeleteCleanup;
+		if (!cleanup) { this.notifyPermanentDeletion(id); return; }
+		if (this.cleanupScheduled.has(id)) { return; }
+		this.cleanupScheduled.add(id);
+		this.enqueue(id, async () => {
+			try { await cleanup(id); this.notifyPermanentDeletion(id); }
+			catch (error) { this.cleanupScheduled.delete(id); throw error; }
+		});
+	}
+
+	private isHidden(id: string): boolean {
+		if (this.observedDeletions.has(id)) { return true; }
+		if (this.disk?.isPermanentlyDeleted(id)) { this.observeDeletion(id); return true; }
+		return this.disk?.isHidden(id) ?? false;
+	}
+
+	/** Damaged lifecycle metadata isolates one record without discarding its pending recovery copy. */
+	private isVisibleInList(id: string): boolean {
+		try { return !this.isHidden(id); }
+		catch { return false; } // Storage already reports the preserved marker through the recovery channel.
 	}
 
 	private persist(record: ConversationRecord): void {
 		const snapshot = structuredClone(record); this.pendingRecords.set(record.summary.id, snapshot);
 		this.enqueue(snapshot.summary.id, async () => {
-			if (this.disk) { await this.disk.save(snapshot); }
+			if (this.disk) {
+				try { await this.disk.save(snapshot); }
+				catch (error) { if (error instanceof ConversationDeletedError || this.disk.isPermanentlyDeleted(snapshot.summary.id)) { this.observeDeletion(snapshot.summary.id); return; } throw error; }
+			}
 			else {
 				await this.context.globalState.update(recordKey(snapshot.summary.id), snapshot.messages);
 				const index = this.mementoIndex().filter(summary => summary.id !== snapshot.summary.id);
@@ -291,6 +372,7 @@ export class ConversationStore implements vscode.Disposable {
 
 	/** Returns the full record for a conversation, or `undefined` if missing. */
 	load(id: string, includeDeleted = false): ConversationRecord | undefined {
+		if (this.isHidden(id)) { return undefined; }
 		if (this.pendingRecords.has(id) || this.disk) {
 			const record = this.pendingRecords.has(id) ? this.pendingRecords.get(id) : this.disk?.load(id);
 			return record && (includeDeleted || !record.summary.deletedAt) ? record : undefined;
@@ -414,17 +496,14 @@ export class ConversationStore implements vscode.Disposable {
 				if (this.disk) { await this.disk.delete(id); }
 				else { await this.deleteFromMemento(record); }
 			} catch (error) {
+				if (this.disk?.isPermanentlyDeleted(id)) { this.observeDeletion(id); return; }
 				// Remove only this pending tombstone. Keep the complete Trash record
 				// available for recovery/retry even if the backing deletion was partial.
 				if (this.pendingRecords.get(id) === null) { this.pendingRecords.set(id, record); }
 				this._onDidChange.fire(); throw error;
 			}
-			if (this.pendingRecords.get(id) === null) { this.pendingRecords.delete(id); }
-			// Checkpoints and ACP recovery belong to the durable transcript lifecycle.
-			// The host disposes subscriptions before awaiting deactivate(), so cleanup
-			// must remain in the write queue independently of the UI event listeners.
-			await this.permanentDeleteCleanup?.(id);
-			this._onDidPermanentlyDelete.fire(id); this._onDidChange.fire();
+			// Cleanup stays in the draining write queue even after UI disposal.
+			this.observeDeletion(id);
 		});
 		this._onDidChange.fire();
 	}
@@ -467,7 +546,7 @@ export class ConversationStore implements vscode.Disposable {
 		signal.throwIfAborted(); const query = this.normaliseQuery(options.query);
 		const summaries = this.disk ? await this.disk.listAsync(signal) : this.readIndex();
 		const index = new Map(summaries.map(summary => [summary.id, summary]));
-		for (const [id, record] of this.pendingRecords) { if (record) { index.set(id, record.summary); } else { index.delete(id); } }
+		for (const [id, record] of this.pendingRecords) { if (record && this.isVisibleInList(id)) { index.set(id, record.summary); } else { index.delete(id); } }
 		const matches: ConversationSummary[] = [];
 		for (const summary of index.values()) {
 			signal.throwIfAborted();
@@ -487,7 +566,7 @@ export class ConversationStore implements vscode.Disposable {
 				}
 			} catch { signal.throwIfAborted(); /* Damaged histories retain their visible metadata and recovery notice. */ }
 		}
-		signal.throwIfAborted(); return this.searchPage(matches, options);
+		signal.throwIfAborted(); return this.searchPage(matches.filter(summary => this.isVisibleInList(summary.id)), options);
 	}
 
 	private normaliseQuery(query?: string): string {
@@ -518,6 +597,7 @@ export class ConversationStore implements vscode.Disposable {
 
 	/** Read a bounded message page without loading the complete stored transcript. */
 	loadMessages(id: string, offset: number, limit = 100): ChatMessage[] {
+		if (this.isHidden(id)) { return []; }
 		const pending = this.pendingRecords.get(id);
 		if (this.pendingRecords.has(id)) { return pending?.messages.slice(offset, offset + limit) ?? []; }
 		if (this.disk) { return this.disk.load(id, offset, limit)?.messages ?? []; }
@@ -525,14 +605,14 @@ export class ConversationStore implements vscode.Disposable {
 	}
 
 	dispose(): void {
-		this.searchLifetime.abort();
+		this.disposed = true; this.lifecycleWatcher?.dispose(); this.searchLifetime.abort();
 		this._onDidChange.dispose(); this._onDidDelete.dispose(); this._onDidChangeActive.dispose(); this._onDidPermanentlyDelete.dispose(); this._onDidEncounterRecoveryIssue.dispose();
 	}
 
 	private readIndex(): ConversationSummary[] {
 		const summaries = this.disk ? this.disk.list() : this.mementoIndex();
 		const index = new Map(summaries.map(summary => [summary.id, summary]));
-		for (const [id, record] of this.pendingRecords) { if (record) { index.set(id, record.summary); } else { index.delete(id); } }
+		for (const [id, record] of this.pendingRecords) { if (record && this.isVisibleInList(id)) { index.set(id, record.summary); } else { index.delete(id); } }
 		return [...index.values()];
 	}
 
