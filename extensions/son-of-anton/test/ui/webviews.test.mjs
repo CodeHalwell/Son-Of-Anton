@@ -87,11 +87,12 @@ async function panelHtml(relativeFile, exportName, method, args = []) {
 	const compiled = typescript.transpileModule(source, { compilerOptions: { module: typescript.ModuleKind.CommonJS, target: typescript.ScriptTarget.ES2022 } }).outputText;
 	const exports = {};
 	const sourceRequire = createRequire(filename);
-	const localRequire = name => name === 'vscode' ? { l10n: { t: (value, ...args) => value.replace(/\{(\d+)\}/g, (match, index) => args[Number(index)] === undefined ? match : String(args[Number(index)])) } } : name.startsWith('son-of-anton-core/') ? require(path.join(root, 'son-of-anton-core/dist', name.slice('son-of-anton-core/'.length))) : sourceRequire(name);
+	const localRequire = name => name === 'vscode' ? { workspace: {}, l10n: { t: (value, ...args) => value.replace(/\{(\d+)\}/g, (match, index) => args[Number(index)] === undefined ? match : String(args[Number(index)])) } } : name.startsWith('son-of-anton-core/') ? require(path.join(root, 'son-of-anton-core/dist', name.slice('son-of-anton-core/'.length))) : sourceRequire(name);
 	new Function('require', 'exports', compiled)(localRequire, exports);
 	if (!method) { return exports[exportName](...args); }
 	const panel = Object.assign(Object.create(exports[exportName].prototype), { panel: { webview: { cspSource: 'https://sota.test' } } });
-	return panel[method](...args);
+	const result = panel[method](...args);
+	return method === 'update' ? panel.panel.webview.html : result;
 }
 async function post(page, message) { await page.evaluate(data => window.dispatchEvent(new MessageEvent('message', { data, origin: window.origin, source: window.parent })), message); }
 
@@ -440,20 +441,37 @@ test('setup wizard: every provider form, help, save feedback, back, cancel and s
 
 test('impact analysis: every filter and keyboard file navigation handle long content', async t => {
 	const nodes = ['direct', 'transitive', 'test', 'documentation'].map((type, index) => ({ id: String(index), label: 'Review ' + type, filePath: '/workspace/' + 'long-folder/'.repeat(12) + type + '.ts', type, depth: index }));
-	const html = await panelHtml('impact/ImpactAnalysisPanel', 'ImpactAnalysisPanel', 'getHtml', [{ target: { name: 'clamp', filePath: '/workspace/example.ts' }, nodes, edges: [], summary: { directCount: 1, transitiveCount: 1, testCount: 1, documentationCount: 1 } }]);
+	const html = await panelHtml('impact/ImpactAnalysisPanel', 'ImpactAnalysisPanel', 'update', [{ target: { name: 'clamp', filePath: '/workspace/example.ts' }, nodes, edges: [], summary: { directCount: 1, transitiveCount: 1, testCount: 1, documentationCount: 1 } }]);
 	const page = await openSurface(t, 'panel', 800, undefined, html);
 	for (const node of nodes) {
 		await page.locator(`[data-filter="${node.type}"]`).click();
 		assert.equal(await page.locator('.node-item').count(), 1);
 		await page.locator('.node-item').focus();
 		await page.keyboard.press('Enter');
-		assert.equal(await page.evaluate(() => sentMessages.at(-1)?.filePath), node.filePath);
+		const navigationId = await page.locator('.node-item').getAttribute('data-navigation-id');
+		assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { command: 'navigateToFile', navigationId });
 	}
 	await page.locator('[data-filter="all"]').click();
 	assert.equal(await page.locator('.node-item').count(), 4);
 	await page.setViewportSize({ width: 360, height: 620 });
 	await assertNoPageOverflow(page);
 	await screenshot(page, 'impact-analysis');
+});
+
+test('impact analysis: same-file callers send distinct identities through keyboard and pointer navigation', async t => {
+	const nodes = [12, 38, undefined].map((line, index) => ({ id: `caller-${index}`, label: `Caller ${index + 1}`, filePath: '/workspace/callers.ts', line, type: 'direct', depth: 1 }));
+	const html = await panelHtml('impact/ImpactAnalysisPanel', 'ImpactAnalysisPanel', 'update', [{ target: { name: 'target', filePath: '/workspace/target.ts' }, nodes, edges: [], summary: { directCount: 3, transitiveCount: 0, testCount: 0, documentationCount: 0 } }]);
+	const page = await openSurface(t, 'panel', 400, undefined, html);
+	const rows = page.locator('.node-item'); const navigationIds = await rows.evaluateAll(items => items.map(item => item.dataset.navigationId));
+	assert.equal(new Set(navigationIds).size, 3); assert.ok(navigationIds.every(id => typeof id === 'string' && id.length > 0));
+	await rows.nth(0).focus(); await page.keyboard.press('Enter');
+	await rows.nth(1).focus(); await page.keyboard.press('Space');
+	await rows.nth(2).click();
+	assert.deepEqual(await page.evaluate(() => sentMessages), navigationIds.map(navigationId => ({ command: 'navigateToFile', navigationId })));
+	await page.locator('[data-filter="test"]').click(); assert.equal(await rows.count(), 0);
+	await page.locator('[data-filter="all"]').click(); await rows.nth(0).click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { command: 'navigateToFile', navigationId: navigationIds[0] });
+	await assertNoPageOverflow(page); await screenshot(page, 'impact-same-file-callers');
 });
 
 test('fleet dashboard: active, failed and completed tasks expose refresh, cancellation and results', async t => {
