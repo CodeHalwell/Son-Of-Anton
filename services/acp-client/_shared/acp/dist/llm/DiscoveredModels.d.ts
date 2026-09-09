@@ -1,3 +1,4 @@
+import { type AcpAgentDefinition } from '../acp/protocol';
 export type CatalogProvider = 'anthropic' | 'openai' | 'google' | 'openrouter' | 'ollama' | 'lmstudio' | 'deepseek' | 'mistral' | 'groq' | 'cerebras' | 'together' | 'fireworks' | 'foundry' | 'bedrock' | 'acp' | 'claude-code' | 'codex' | 'copilot' | 'xai' | 'moonshot' | 'zai' | 'minimax';
 export type DiscoveredModelId = `catalog:${CatalogProvider}:${string}`;
 export type CapabilityAvailability = boolean | 'unknown';
@@ -11,6 +12,8 @@ export interface DiscoveredModel {
     id: DiscoveredModelId;
     provider: CatalogProvider;
     acpAdapterId?: string;
+    /** Definition identity only; credentials and environment values are never stored in catalogs. */
+    acpAdapterFingerprint?: string;
     model: string;
     /** Host-configured semantic model key; deployment names and labels do not imply request capabilities. */
     modelFamily?: string;
@@ -28,6 +31,13 @@ export interface DiscoveredModel {
     capabilitySource?: 'catalog-reported' | 'verified';
     verifiedAt?: number;
 }
+/** An IDE catalog owns its current validated adapter scopes; standalone runtimes need no policy. */
+export declare function createAcpCatalogPolicy(): {
+    update(agents: readonly AcpAgentDefinition[]): void;
+    dispose(): void;
+};
+/** Capture before queueing/negotiation so a removed or replaced adapter cannot republish late. */
+export declare function beginAcpModelCatalog(agent: AcpAgentDefinition): (entries: readonly DiscoveredModel[], truncated: boolean) => void;
 export declare function onDiscoveredModelsChanged(listener: () => void): {
     dispose(): void;
 };

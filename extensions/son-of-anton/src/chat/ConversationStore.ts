@@ -334,12 +334,14 @@ export class ConversationStore implements vscode.Disposable {
 		catch { return false; } // Storage already reports the preserved marker through the recovery channel.
 	}
 
-	private persist(record: ConversationRecord): void {
-		const snapshot = attachConversationWriteToken(structuredClone(record), record.writeToken ?? { revision: null }); this.pendingRecords.set(record.summary.id, snapshot);
-		this.enqueue(snapshot.summary.id, async () => {
+	private persist(record: ConversationRecord, provisional = true): Promise<void> {
+		const snapshot = attachConversationWriteToken(structuredClone(record), record.writeToken ?? { revision: null });
+		const previous = this.pendingRecords.get(record.summary.id);
+		if (provisional) { this.pendingRecords.set(record.summary.id, snapshot); }
+		return this.enqueue(snapshot.summary.id, async () => {
 			if (this.disk) {
 				try { await this.disk.save(snapshot); }
-				catch (error) { if (error instanceof ConversationDeletedError || this.disk.isPermanentlyDeleted(snapshot.summary.id)) { this.observeDeletion(snapshot.summary.id); return; } throw error; }
+				catch (error) { if (error instanceof ConversationDeletedError || this.disk.isPermanentlyDeleted(snapshot.summary.id)) { this.observeDeletion(snapshot.summary.id); if (!provisional) { throw new ConversationDeletedError(); } return; } throw error; }
 				finally {
 					// A fork depends on this snapshot settling, including its known base
 					// after a failed write. A conflict never advances that stale base.
@@ -352,20 +354,26 @@ export class ConversationStore implements vscode.Disposable {
 				const index = this.mementoIndex().filter(summary => summary.id !== snapshot.summary.id);
 				await this.context.globalState.update(INDEX_KEY, [...index, snapshot.summary]);
 			}
-			if (this.pendingRecords.get(snapshot.summary.id) === snapshot) { this.pendingRecords.delete(snapshot.summary.id); }
-		});
+			if (!provisional && this.isHidden(snapshot.summary.id)) { throw new ConversationDeletedError(); }
+			if (this.pendingRecords.get(snapshot.summary.id) === (provisional ? snapshot : previous)) { this.pendingRecords.delete(snapshot.summary.id); }
+		}, provisional);
 	}
 
-	private enqueue(id: string, operation: () => Promise<void>): void {
-		this.pendingWrite = this.pendingWrite.then(async () => {
+	private enqueue(id: string, operation: () => Promise<void>, trackFailure = true): Promise<void> {
+		const completion = this.pendingWrite.then(async () => {
 			await operation(); this.failedWrites.delete(id);
-		}).catch(error => {
+		});
+		// Observe rejection even for legacy fire-and-forget callers. Awaited
+		// operations receive their own outcome without unrelated queue failures.
+		this.pendingWrite = completion.catch(error => {
+			if (!trackFailure) { return; }
 			const failure = error instanceof Error ? error : new Error(String(error)); this.failedWrites.set(id, failure);
 			if (!this.disposed) {
 				try { void Promise.resolve(vscode.window.showErrorMessage(vscode.l10n.t('Conversation history could not be saved: {0}', failure.message))).catch(() => {}); }
 				catch { /* Preserve the write failure even if the closing host cannot report it. */ }
 			}
 		});
+		return completion;
 	}
 
 	/** Returns the conversation summaries, newest-first by `updatedAt`. */
@@ -460,9 +468,27 @@ export class ConversationStore implements vscode.Disposable {
 		lastModel?: ModelId,
 		writeToken?: ConversationWriteToken,
 	): void {
+		void this.writeUpdate(id, messages, lastSpecialist, lastMode, lastTab, lastModel, writeToken, true);
+	}
+
+	/** Commit this exact update before returning, without exposing a provisional rewind in History. */
+	async updateAndWait(
+		id: string, messages: ChatMessage[], lastSpecialist?: AgentHandle | 'anton',
+		lastMode?: ChatMode, lastTab?: ChatTab, lastModel?: ModelId, writeToken?: ConversationWriteToken,
+	): Promise<void> {
+		await this.writeUpdate(id, messages, lastSpecialist, lastMode, lastTab, lastModel, writeToken, false);
+		try { this._onDidChange.fire(); } catch { /* The transcript is already durable. */ }
+	}
+
+	private writeUpdate(
+		id: string, messages: ChatMessage[], lastSpecialist: AgentHandle | 'anton' | undefined,
+		lastMode: ChatMode | undefined, lastTab: ChatTab | undefined, lastModel: ModelId | undefined,
+		writeToken: ConversationWriteToken | undefined, provisional: boolean,
+	): Promise<void> | undefined {
 		const index = this.readIndex();
 		const existing = index.find(s => s.id === id);
-		if (!existing) {
+		if (!existing || (!provisional && existing.deletedAt !== undefined)) {
+			if (!provisional) { throw new Error(vscode.l10n.t('The conversation is no longer available to rewind.')); }
 			return;
 		}
 		const trimmed = [...messages];
@@ -483,8 +509,9 @@ export class ConversationStore implements vscode.Disposable {
 			workspaceName: existing.workspaceName,
 		};
 		const token = writeToken ?? this.load(id, true)?.writeToken ?? { revision: null };
-		this.persist(attachConversationWriteToken({ summary: next, messages: trimmed }, token));
-		this._onDidChange.fire();
+		const completion = this.persist(attachConversationWriteToken({ summary: next, messages: trimmed }, token), provisional);
+		if (provisional) { this._onDidChange.fire(); }
+		return completion;
 	}
 
 	/**

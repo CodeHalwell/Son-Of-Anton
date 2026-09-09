@@ -12,9 +12,9 @@ import { parse as parseYaml } from 'yaml';
 import type { ConfigStore, MementoStore, SecretStore } from '../host';
 import { MissingCredentialError } from '../auth/types';
 import { readBoundedFile } from '../util/readBoundedFile';
-import { object } from '../acp/protocol';
+import { object, type AcpAgentDefinition } from '../acp/protocol';
 import { bedrockFamilyCapabilities, isBedrockSemanticFamily, supportsBedrockClaude } from './BedrockModels';
-import { discoveredAcpModels, discoveredModelId, getDiscoveredModel, registerDiscoveredModels, replaceDiscoveredModels, type CatalogProvider, type DiscoveredModel, type CapabilityAvailability } from './DiscoveredModels';
+import { createAcpCatalogPolicy, discoveredAcpModels, discoveredModelId, getDiscoveredModel, registerDiscoveredModels, replaceDiscoveredModels, type CatalogProvider, type DiscoveredModel, type CapabilityAvailability } from './DiscoveredModels';
 
 export interface DiscoveredSoftware {
 	id: string;
@@ -109,6 +109,8 @@ export class ProviderDiscovery {
 	private refreshedThisInstance = false;
 	private controller = new AbortController();
 	private disposed = false;
+	private readonly acpCatalogPolicy: ReturnType<typeof createAcpCatalogPolicy>;
+	private acpConfigurationComplete = false;
 	constructor(private readonly deps: {
 		secrets: SecretStore;
 		config: ConfigStore;
@@ -121,6 +123,8 @@ export class ProviderDiscovery {
 	}) {
 		const cached = deps.state?.get<ProviderDiscoverySnapshot>(storageKey);
 		this.value = validSnapshot(cached) ? cached : { version: 1, updatedAt: 0, software: [], providers: [] };
+		this.acpCatalogPolicy = createAcpCatalogPolicy();
+		this.reconcileAcpConfiguration();
 		const local = this.value.providers.filter(provider => provider.id === 'ollama' || provider.id === 'lmstudio');
 		if (local.length) { this.cachedIncludeLocal = local.some(provider => provider.catalogStatus !== 'disabled'); }
 		// Local mappings are authoritative now, even if a cached discovery snapshot
@@ -130,7 +134,9 @@ export class ProviderDiscovery {
 			const retainedIds = new Set(provider.models.map(model => model.id));
 			registerDiscoveredModels(this.previousConfiguredModels(provider.id as ConfiguredInventoryProvider).filter(model => retainedIds.has(model.id)));
 		}
-		this.value = { ...this.value, providers: [...this.value.providers.filter(provider => !isConfiguredInventoryProvider(provider.id)), ...configured] };
+		this.value = { ...this.value, providers: [...this.value.providers.filter(provider => !isConfiguredInventoryProvider(provider.id) && provider.id !== 'acp'), ...configured, this.acpProvider()] };
+		// Rehydrate only definition-bound current ACP advertisements, never an unknown old scope.
+		for (const provider of validSnapshot(cached) ? cached.providers : []) { if (provider.id === 'acp') { registerDiscoveredModels(provider.models.filter(model => model.provider === 'acp')); } }
 		for (const provider of this.value.providers) {
 			const owned = provider.models.filter(model => model.provider === provider.id);
 			if (isConfiguredInventoryProvider(provider.id) && provider.configurationComplete === true) { replaceDiscoveredModels({ provider: provider.id }, owned); }
@@ -146,23 +152,52 @@ export class ProviderDiscovery {
 		}
 		const advertised = discoveredAcpModels();
 		const adapter = result.providers.find(provider => provider.id === 'acp');
-		if (adapter) { adapter.models = advertised; adapter.catalogStatus = advertised.length ? 'ready' : 'adapter-required'; }
+		if (adapter) { Object.assign(adapter, this.acpProvider(advertised)); }
 		return result;
+	}
+
+	/** Explicit adapter edits apply without network discovery or launching an agent. */
+	refreshAcpAdapters(): ProviderDiscoverySnapshot {
+		if (!this.disposed) {
+			this.reconcileAcpConfiguration();
+			this.value = { ...this.value, providers: [...this.value.providers.filter(provider => provider.id !== 'acp'), this.acpProvider()] };
+		}
+		return this.snapshot();
+	}
+
+	private reconcileAcpConfiguration(): void {
+		try {
+			const configured = this.deps.config.get<unknown>('acp.agents');
+			const agents = configured === undefined ? [] : configured;
+			if (!Array.isArray(agents) || agents.length > 1000) { throw new Error('Invalid ACP adapter configuration'); }
+			// update validates the entire list before replacing any active scopes.
+			this.acpCatalogPolicy.update(agents as AcpAgentDefinition[]);
+			this.acpConfigurationComplete = true;
+		} catch { this.acpConfigurationComplete = false; }
+	}
+
+	private acpProvider(advertised = discoveredAcpModels()): DiscoveredProvider {
+		return { id: 'acp', name: 'ACP Coding Agents', credentialSource: 'none', configurationComplete: this.acpConfigurationComplete,
+			catalogStatus: this.acpConfigurationComplete ? advertised.length ? 'ready' : 'adapter-required' : 'error', inferenceStatus: 'not-tested', models: advertised,
+			error: this.acpConfigurationComplete ? undefined : 'Could not read the configured ACP adapters. Use a list of valid adapters with unique IDs and commands. Previously advertised models are retained.',
+			catalogScope: 'Only session model IDs actually advertised by configured adapters. Discovery does not launch agents or change permissions.' };
 	}
 
 	async captureAdvertisedModels(): Promise<void> {
 		if (this.disposed) { return; }
+		this.refreshAcpAdapters();
 		this.value = this.snapshot();
 		await this.deps.state?.update(storageKey, this.value);
 	}
 	dispose(): void {
-		this.disposed = true; this.controller.abort();
+		this.disposed = true; this.controller.abort(); this.acpCatalogPolicy.dispose();
 		const error = new Error('Provider discovery is disposed');
 		this.pending?.reject(error); this.queued?.reject(error); this.queued = undefined;
 	}
 
 	refresh(options: { force?: boolean; includeLocal?: boolean } = {}): Promise<ProviderDiscoverySnapshot> {
 		if (this.disposed) { return Promise.reject(new Error('Provider discovery is disposed')); }
+		this.refreshAcpAdapters();
 		const includeLocal = options.includeLocal ?? false;
 		if (this.pending) {
 			const requested = this.queued ?? this.pending;
@@ -199,6 +234,7 @@ export class ProviderDiscovery {
 	}
 
 	private async scan(includeLocal: boolean): Promise<ProviderDiscoverySnapshot> {
+		this.reconcileAcpConfiguration();
 		const software = await discoverSoftware(this.deps.home ?? homedir(), this.deps.env ?? process.env);
 		const discovered: DiscoveredProvider[] = [];
 		const work = [...providers];
@@ -208,6 +244,7 @@ export class ProviderDiscovery {
 				discovered.push(await this.scanProvider(spec, includeLocal));
 			}
 		}));
+		this.reconcileAcpConfiguration();
 		// Z.AI's row is scanned above so its credential source can be reported independently.
 		discovered.push(...this.configuredProviders().filter(provider => provider.id !== 'zai'));
 		this.controller.signal.throwIfAborted();
@@ -280,8 +317,7 @@ export class ProviderDiscovery {
 		rows.push({ id: 'claude-code', name: 'Claude Code Subscription', credentialSource: 'none', catalogStatus: 'adapter-required', inferenceStatus: 'not-tested', models: [], catalogScope: 'Subscription models are advertised by the configured ACP adapter during a trusted session; Anthropic API access is separate.' });
 		rows.push({ id: 'codex', name: 'Codex Subscription', credentialSource: 'none', catalogStatus: 'adapter-required', inferenceStatus: 'not-tested', models: [], catalogScope: 'Subscription models are advertised by a configured ACP adapter. A Codex sign-in is not an OpenAI API key.' });
 		rows.push({ id: 'copilot', name: 'GitHub Copilot', credentialSource: 'none', catalogStatus: 'extension-required', inferenceStatus: 'not-tested', models: [], catalogScope: 'Copilot model access belongs to its installed extension and account entitlement; no public API catalog credential is imported.' });
-		const advertised = discoveredAcpModels();
-		rows.push({ id: 'acp', name: 'ACP Coding Agents', credentialSource: 'none', catalogStatus: advertised.length ? 'ready' : 'adapter-required', inferenceStatus: 'not-tested', models: advertised, catalogScope: 'Only session model IDs actually advertised by configured adapters. Discovery does not launch agents or change permissions.' });
+		rows.push(this.acpProvider());
 		return rows;
 	}
 

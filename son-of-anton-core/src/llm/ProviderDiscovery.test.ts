@@ -9,7 +9,7 @@ import { mkdtemp, mkdir, writeFile, chmod, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { ProviderDiscovery } from './ProviderDiscovery';
-import { discoveredAcpModelId, discoveredModelId, getDiscoveredModel, registerDiscoveredModels, replaceDiscoveredModels, type DiscoveredModel } from './DiscoveredModels';
+import { beginAcpModelCatalog, discoveredAcpModelId, discoveredModelId, getDiscoveredModel, registerDiscoveredModels, replaceDiscoveredModels, type DiscoveredModel } from './DiscoveredModels';
 import type { MementoStore } from '../host';
 import { LlmClient, isOpenAIReasoningModel, providerForModel, supportsAgenticToolLoop, modelSupportsImages } from './LlmClient';
 
@@ -113,8 +113,9 @@ test('an empty ACP catalog removes stale picker entries from persisted discovery
 	const home = await fixture(t); const values = new Map<string, unknown>();
 	const state: MementoStore = { get: <T>(key: string, fallback?: T) => (values.get(key) ?? fallback) as T, update: async (key, value) => { values.set(key, structuredClone(value)); } };
 	const entry: DiscoveredModel = { id: discoveredAcpModelId('persisted-adapter', 'retired-model'), provider: 'acp', acpAdapterId: 'persisted-adapter', model: 'retired-model', label: 'Retired', chat: true, images: false, tools: true, fetchedAt: 1 };
-	registerDiscoveredModels([entry]);
-	const deps = { home, state, env: { PATH: '' }, secrets: emptySecrets, config: config() };
+	const agent = { id: 'persisted-adapter', command: 'fixture-adapter' };
+	beginAcpModelCatalog(agent)([entry], false);
+	const deps = { home, state, env: { PATH: '' }, secrets: emptySecrets, config: config({ 'acp.agents': [agent] }) };
 	const finder = new ProviderDiscovery(deps); t.after(() => finder.dispose());
 	await finder.refresh();
 	assert.ok(finder.snapshot().providers.find(provider => provider.id === 'acp')?.models.some(model => model.id === entry.id));

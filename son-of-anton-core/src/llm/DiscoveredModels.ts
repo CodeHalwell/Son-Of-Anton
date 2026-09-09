@@ -3,7 +3,8 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { isValidAcpModelId } from '../acp/protocol';
+import { createHash } from 'node:crypto';
+import { isValidAcpModelId, validateAgent, type AcpAgentDefinition } from '../acp/protocol';
 
 export type CatalogProvider = 'anthropic' | 'openai' | 'google' | 'openrouter' | 'ollama' | 'lmstudio' | 'deepseek' | 'mistral' | 'groq' | 'cerebras' | 'together' | 'fireworks' | 'foundry' | 'bedrock' | 'acp' | 'claude-code' | 'codex' | 'copilot' | 'xai' | 'moonshot' | 'zai' | 'minimax';
 export type DiscoveredModelId = `catalog:${CatalogProvider}:${string}`;
@@ -13,6 +14,8 @@ export interface DiscoveredModel {
 	id: DiscoveredModelId;
 	provider: CatalogProvider;
 	acpAdapterId?: string;
+	/** Definition identity only; credentials and environment values are never stored in catalogs. */
+	acpAdapterFingerprint?: string;
 	model: string;
 	/** Host-configured semantic model key; deployment names and labels do not imply request capabilities. */
 	modelFamily?: string;
@@ -31,6 +34,61 @@ export interface DiscoveredModel {
 const providers = new Set<CatalogProvider>(['anthropic', 'openai', 'google', 'openrouter', 'ollama', 'lmstudio', 'deepseek', 'mistral', 'groq', 'cerebras', 'together', 'fireworks', 'foundry', 'bedrock', 'acp', 'claude-code', 'codex', 'copilot', 'xai', 'moonshot', 'zai', 'minimax']);
 const models = new Map<string, DiscoveredModel>();
 const listeners = new Set<() => void>();
+interface AcpCatalogScope { fingerprint: string; generation: number }
+let acpCatalogPolicy: { scopes?: ReadonlyMap<string, AcpCatalogScope> } | undefined;
+let acpCatalogGeneration = 0;
+
+function acpAdapterFingerprint(agent: AcpAgentDefinition): string {
+	// These model selections are legitimate per-turn overlays of the configured adapter.
+	const env = Object.fromEntries(Object.entries(agent.env ?? {}).filter(([key]) => key !== 'ANTHROPIC_MODEL').sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0));
+	return createHash('sha256').update(JSON.stringify([agent.id, agent.command, agent.args ?? [], env, agent.authMethodId ?? ''])).digest('hex');
+}
+
+/** An IDE catalog owns its current validated adapter scopes; standalone runtimes need no policy. */
+export function createAcpCatalogPolicy(): { update(agents: readonly AcpAgentDefinition[]): void; dispose(): void } {
+	const policy = { scopes: acpCatalogPolicy?.scopes };
+	acpCatalogPolicy = policy;
+	return {
+		update: agents => {
+			const next = new Map<string, AcpCatalogScope>();
+			for (const agent of agents) {
+				validateAgent(agent); discoveredAcpModelId(agent.id, 'scope-validation');
+				if (next.has(agent.id)) { throw new Error('Duplicate ACP adapter ID'); }
+				const fingerprint = acpAdapterFingerprint(agent), previous = policy.scopes?.get(agent.id);
+				next.set(agent.id, previous?.fingerprint === fingerprint ? previous : { fingerprint, generation: ++acpCatalogGeneration });
+			}
+			policy.scopes = next;
+			if (acpCatalogPolicy !== policy) { return; }
+			let changed = false;
+			for (const [id, model] of models) {
+				if (model.provider === 'acp' && !acpModelAllowed(model)) { models.delete(id); changed = true; }
+			}
+			if (changed) { notifyChanged(); }
+		},
+		dispose: () => { if (acpCatalogPolicy === policy) { acpCatalogPolicy = undefined; } },
+	};
+}
+
+function acpModelAllowed(model: DiscoveredModel): boolean {
+	const scopes = acpCatalogPolicy?.scopes;
+	const scope = model.acpAdapterId ? scopes?.get(model.acpAdapterId) : undefined;
+	return scopes === undefined || scope !== undefined && scope.fingerprint === model.acpAdapterFingerprint;
+}
+
+/** Capture before queueing/negotiation so a removed or replaced adapter cannot republish late. */
+export function beginAcpModelCatalog(agent: AcpAgentDefinition): (entries: readonly DiscoveredModel[], truncated: boolean) => void {
+	const fingerprint = acpAdapterFingerprint(agent);
+	const initialScopes = acpCatalogPolicy?.scopes;
+	const scope = initialScopes?.get(agent.id);
+	return (entries, truncated) => {
+		const currentScopes = acpCatalogPolicy?.scopes;
+		if (initialScopes === undefined ? currentScopes !== undefined : !scope || scope.fingerprint !== fingerprint || currentScopes?.get(agent.id)?.generation !== scope.generation) { return; }
+		const advertised = entries.map(model => ({ ...model, acpAdapterFingerprint: fingerprint }));
+		if (truncated) { registerDiscoveredModels(advertised); }
+		else { replaceDiscoveredModels({ provider: 'acp', acpAdapterId: agent.id }, advertised); }
+	};
+}
+
 export function onDiscoveredModelsChanged(listener: () => void): { dispose(): void } { listeners.add(listener); return { dispose: () => { listeners.delete(listener); } }; }
 export function discoveredAcpModels(): DiscoveredModel[] { return [...models.values()].filter(model => model.provider === 'acp').map(model => ({ ...model })); }
 
@@ -61,6 +119,7 @@ export function registerDiscoveredModels(entries: readonly DiscoveredModel[]): v
 export function replaceDiscoveredModels(scope: DiscoveredModelScope, entries: readonly DiscoveredModel[]): void {
 	if (!providers.has(scope.provider) || entries.length > 10000) { throw new Error('Invalid replacement model catalog'); }
 	if (scope.provider === 'acp') { discoveredAcpModelId(scope.acpAdapterId, 'scope-validation'); }
+	if (scope.provider === 'acp' && acpCatalogPolicy?.scopes && !acpCatalogPolicy.scopes.has(scope.acpAdapterId)) { return; }
 	const owns = (model: DiscoveredModel) => model.provider === scope.provider && (scope.provider !== 'acp' || model.acpAdapterId === scope.acpAdapterId);
 	const next = new Map<string, DiscoveredModel>();
 	for (const model of entries) {
@@ -85,6 +144,8 @@ function validatedModel(model: DiscoveredModel): DiscoveredModel | undefined {
 			? discoveredAcpModelId(model.acpAdapterId, model.model)
 			: discoveredModelId(model.provider, model.acpAdapterId ? `${model.acpAdapterId}/${model.model}` : model.model);
 		if (!providers.has(model.provider) || model.id !== identifier
+			|| model.provider === 'acp' && !acpModelAllowed(model)
+			|| model.acpAdapterFingerprint !== undefined && (typeof model.acpAdapterFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(model.acpAdapterFingerprint))
 			|| model.modelFamily !== undefined && (typeof model.modelFamily !== 'string' || !model.modelFamily || model.modelFamily.length > 512 || /[\u0000-\u001f\u007f]/.test(model.modelFamily))
 			|| ![true, false, 'unknown'].includes(model.chat) || ![true, false, 'unknown'].includes(model.images) || ![true, false, 'unknown'].includes(model.tools)) { return undefined; }
 		const previous = models.get(model.id);

@@ -249,7 +249,7 @@ test('chat: batched streaming preserves reading position, text, and composer foc
 	await frames(page);
 	await page.locator('#messageList').evaluate(list => { list.scrollTop = 0; list.dispatchEvent(new Event('scroll')); });
 	await page.locator('#messageInput').focus();
-	await page.evaluate(() => { for (let i = 0; i < 1000; i++) window.dispatchEvent(new MessageEvent('message', { data: { type: 'streamToken', token: 'x' } })); });
+	await page.evaluate(() => { for (let i = 0; i < 1000; i++) window.dispatchEvent(new MessageEvent('message', { origin: window.origin, data: { type: 'streamToken', token: 'x' } })); });
 	await frames(page);
 	assert.equal(await page.locator('#messageList').evaluate(list => list.scrollTop), 0);
 	assert.equal(await page.locator('#messageInput').evaluate(input => input === document.activeElement), true);
@@ -995,6 +995,33 @@ async function openCouncil(t, width = 1100, state) {
 const councilGroup = { id: 'review', name: 'Change Review', members: [{ id: 'code' }, { id: 'tests' }, { id: 'security' }], quorum: 2, concurrency: 2, rounds: 1, runTimeoutMs: 600000, reviewer: { id: 'reviewer' } };
 const councilReport = { version: 1, id: 'report-1', sequence: 2, owned: true, objective: 'Review the parser', group: councilGroup, createdAt: 1, status: 'running', snapshot: { base: 'a'.repeat(40), head: 'b'.repeat(40), digest: 'c'.repeat(64), limitations: ['Tracked diff only'] }, stages: [{ id: 'member-code', kind: 'member', round: 1, member: { label: 'Code Reviewer', model: 'sonnet' }, status: 'running', text: '<img src=x onerror="window.unsafe = true"> partial evidence' }] };
 
+for (const surface of ['chat', 'council']) {
+	test(`${surface} accepts the real same-origin wrapper after VS Code shadows parent and rejects foreign messages`, async t => {
+		const page = surface === 'chat' ? await openSurface(t, 'chat', 400) : await openCouncil(t, 400);
+		await page.route('https://sota.test/host-wrapper', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><body style="margin:0"><iframe style="border:0;width:100%;height:900px" src="https://sota.test/"></iframe>' }));
+		await page.goto('https://sota.test/host-wrapper');
+		const frame = await (await page.locator('iframe').elementHandle()).contentFrame();
+		await frame.locator(surface === 'chat' ? '#messageInput' : '#objective').waitFor();
+		await frame.waitForFunction(type => sentMessages.some(message => message.type === type), surface === 'chat' ? 'webviewReady' : 'ready');
+		await frame.evaluate(() => {
+			window.parent = window; window.top = window;
+			window.addEventListener('message', event => { if (event.origin === window.origin && event.source !== window.parent) window.receivedWrapper = true; });
+		});
+		assert.equal(await frame.evaluate(() => window.parent === window), true);
+		const message = surface === 'chat' ? { type: 'loadConversation', conversationId: 'wrapper-test', messages: [{ role: 'user', content: 'Host request' }, { role: 'assistant', content: 'Real wrapper message' }] } : { type: 'councilState', error: 'Real wrapper message' };
+		await frame.evaluate(message => {
+			for (const data of [null, 1, 'invalid', []]) window.dispatchEvent(new MessageEvent('message', { origin: window.origin, data }));
+			window.dispatchEvent(new MessageEvent('message', { origin: 'https://untrusted.invalid', data: message }));
+		}, message);
+		assert.equal(await frame.getByText('Real wrapper message', { exact: true }).count(), 0);
+		await page.evaluate(message => document.querySelector('iframe').contentWindow.postMessage(message, window.origin), message);
+		await frame.waitForFunction(() => window.receivedWrapper === true);
+		const response = frame.locator(surface === 'chat' ? '.msg-assistant .msg-body' : '#error');
+		await response.waitFor({ state: 'visible' });
+		assert.match(await response.innerText(), /Real wrapper message/);
+	});
+}
+
 test('Council form, progress, cancellation, evidence, export, promotion and restored reports work under CSP', async t => {
 	const page = await openCouncil(t);
 	assert.equal(await page.locator('#start').isDisabled(), true);
@@ -1298,6 +1325,66 @@ test('slash ACP selection updates both chips from the pre-command selection', as
 	await post(page, { type: 'chatSelection', conversationId: 'acp-slash', requestedModel: 'sonnet', requestedSpecialistId: 'anton-spec', model: model.id, specialistId: 'anton-code' });
 	assert.equal(await page.locator('#modelLabel').textContent(), model.label);
 	assert.match(await page.locator('#agentLabel').textContent(), /Anton Code/);
+});
+
+test('removed ACP adapters preserve the selected route and draft until a current adapter advertises it again', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const removed = { id: 'catalog:acp:removed%2Fmodel', model: 'model', label: 'Removed adapter model', chat: true };
+	const survivor = { id: 'catalog:acp:survivor%2Fmodel', model: 'model', label: 'Surviving adapter model', chat: true };
+	const snapshot = (models, state = {}) => ({ updatedAt: Date.now(), software: [], providers: [{ id: 'acp', name: 'ACP', credentialSource: 'adapter', catalogStatus: models.length ? 'ready' : 'adapter-required', configurationComplete: true, inferenceStatus: 'not-verified', models, ...state }] });
+	const metadata = { [removed.id]: { capabilities: ['text'], blurb: 'Former adapter metadata', pricingStatus: 'unknown' } };
+	await post(page, { type: 'providerCatalog', snapshot: snapshot([removed, survivor]), metadata });
+	await post(page, { type: 'loadConversation', conversationId: 'adapter-removal', lastSpecialist: 'anton-code', lastModel: removed.id, messages: [] });
+	await page.locator('#messageInput').fill('Keep this draft and its chosen adapter');
+	for (const state of [{ configurationComplete: false }, { catalogStatus: 'error' }, { catalogStatus: 'disabled' }, { truncated: true }]) {
+		await post(page, { type: 'providerCatalog', snapshot: snapshot([], state) });
+		assert.deepEqual({ notice: await page.locator('#unavailableModelNotice').isVisible(), send: await page.locator('#sendBtn').isDisabled() }, { notice: false, send: false });
+	}
+	await post(page, { type: 'providerCatalog', snapshot: snapshot([survivor]), metadata });
+	assert.equal(await page.locator('#unavailableModelNotice').isVisible(), true);
+	await page.locator('#modelChip').click();
+	assert.deepEqual(await page.locator('[data-discovered][data-model]').evaluateAll(items => items.map(item => item.dataset.model)), [survivor.id]);
+	await page.locator(`[data-model="${survivor.id}"]`).click();
+	await post(page, { type: 'chatSelection', conversationId: 'adapter-removal', requestedModel: survivor.id, requestedSpecialistId: 'anton-code', model: survivor.id, specialistId: 'anton-code' });
+	assert.equal(await page.locator('#sendBtn').isDisabled(), false);
+	await post(page, { type: 'loadConversation', conversationId: 'adapter-removal', lastSpecialist: 'anton-code', lastModel: removed.id, messages: [] });
+	await page.locator('#messageInput').fill('Keep this draft and its chosen adapter');
+	await post(page, { type: 'providerCatalog', snapshot: snapshot([]), metadata });
+	await page.locator('#messageInput').press('Enter');
+	assert.deepEqual({ label: await page.locator('#modelLabel').textContent(), notice: await page.locator('#unavailableModelNotice').isVisible(), send: await page.locator('#sendBtn').isDisabled(), queue: await page.locator('#queueMessageBtn').isDisabled(), redirect: await page.locator('#redirectMessageBtn').isDisabled(), requests: await page.evaluate(() => sentMessages.filter(message => ['sendMessage', 'queueMessage', 'redirectMessage'].includes(message.type)).length), draft: await page.locator('#messageInput').inputValue() }, { label: removed.id, notice: true, send: true, queue: true, redirect: true, requests: 0, draft: 'Keep this draft and its chosen adapter' });
+	await post(page, { type: 'providerCatalog', snapshot: snapshot([removed]), metadata });
+	assert.deepEqual({ label: await page.locator('#modelLabel').textContent(), notice: await page.locator('#unavailableModelNotice').isVisible(), send: await page.locator('#sendBtn').isDisabled() }, { label: removed.label, notice: false, send: false });
+	await page.locator('#sendBtn').click();
+	const send = await page.evaluate(() => sentMessages.findLast(message => message.type === 'sendMessage'));
+	assert.deepEqual({ model: send.model, specialist: send.specialistId, text: send.text }, { model: removed.id, specialist: 'anton-code', text: 'Keep this draft and its chosen adapter' });
+	await assertNoPageOverflow(page);
+});
+
+test('model tooltip metadata is rendered as text, including markup-shaped provider fields', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const payload = '<img src=x onerror="window.unsafe = true">';
+	const model = { id: 'catalog:openai:tooltip-model', model: 'tooltip-model', label: 'Tooltip fixture', chat: true };
+	await post(page, { type: 'providerCatalog', snapshot: { updatedAt: Date.now(), software: [], providers: [{ id: 'openai', name: 'OpenAI', credentialSource: 'none', catalogStatus: 'ready', inferenceStatus: 'not-verified', models: [model] }] }, metadata: { [model.id]: { contextWindow: payload, maxOutputTokens: payload, capabilities: [payload], blurb: payload, inputCostPer1M: payload, outputCostPer1M: payload } } });
+	await page.locator('#modelChip').click(); await page.locator('#modelSearch').fill('Tooltip fixture');
+	await page.locator(`[data-model="${model.id}"]`).focus();
+	assert.equal(await page.locator('.sota-model-tooltip img, .sota-model-tooltip script').count(), 0);
+	assert.match(await page.locator('.sota-model-tooltip').innerText(), /<img src=x/);
+	assert.equal(await page.evaluate(() => window.unsafe), undefined);
+});
+
+test('image previews validate restored content and picker payloads without dropping neighboring text', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const base64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS1sAAAAASUVORK5CYII=';
+	const invalid = [{ mime: 'image/svg+xml', base64: 'PHN2Zy8+' }, { mime: 'image/png;base64,https://untrusted.invalid/', base64 }, { mime: 'image/png', base64: 'https://untrusted.invalid/' }, { mime: 'image/png', base64: 'A'.repeat(7 * 1024 * 1024) }];
+	for (const image of invalid) { await post(page, { type: 'imagePicked', ...image }); }
+	assert.equal(await page.locator('.attachment-thumb').count(), 0);
+	await post(page, { type: 'loadConversation', conversationId: 'image-validation', messages: [{ role: 'user', content: [...invalid.map(image => ({ type: 'image', mimeType: image.mime, base64Data: image.base64 })), { type: 'image', mimeType: 'image/png', base64Data: base64, name: 'valid.png' }, { type: 'text', text: 'Keep the text after invalid images' }] }, { role: 'assistant', content: 'The valid image is preserved.' }] });
+	assert.equal(await page.locator('.msg-image').count(), 1);
+	assert.match(await page.locator('.msg-user').innerText(), /Keep the text after invalid images/);
+	await page.getByRole('button', { name: 'Reuse Prompt', exact: true }).click();
+	assert.deepEqual(await page.locator('.attachment-thumb').evaluateAll(images => images.map(image => image.getAttribute('src'))), ['data:image/png;base64,' + base64]);
+	await page.locator('#sendBtn').click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.findLast(message => message.type === 'sendMessage').images), [{ mime: 'image/png', base64, name: 'valid.png' }]);
 });
 
 test('provider catalogs isolate special object keys and retire removed picker metadata', async t => {
