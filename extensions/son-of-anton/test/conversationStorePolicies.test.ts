@@ -459,6 +459,18 @@ suite('ConversationStore — Phase 47', () => {
 		} finally { store.dispose(); await fs.rm(directory, { recursive: true, force: true }); }
 	});
 
+	test('an unavailable lifecycle directory retains its own recovery notice when history is readable', async () => {
+		const directory = await fs.mkdtemp(path.join(tmpdir(), 'sota-history-invalid-lifecycle-'));
+		const { context } = makeContext(); Object.assign(context, { globalStorageUri: vscode.Uri.file(directory) });
+		const historyPath = path.join(directory, 'conversations-v2'); const lifecyclePath = path.join(historyPath, '.lifecycle');
+		await fs.mkdir(historyPath); await fs.writeFile(lifecyclePath, 'Retain this lifecycle file');
+		const store = new ConversationStore(context);
+		try {
+			await store.ready;
+			assert.deepStrictEqual({ issues: store.recoveryIssues.map(issue => issue.path), retained: await fs.readFile(lifecyclePath, 'utf8') }, { issues: [lifecyclePath], retained: 'Retain this lifecycle file' });
+		} finally { store.dispose(); await fs.rm(directory, { recursive: true, force: true }); }
+	});
+
 	test('a damaged active message page reports once and cannot block initial history or body search', async () => {
 		const directory = await fs.mkdtemp(path.join(tmpdir(), 'sota-history-damaged-page-'));
 		const { context, workspaceState } = makeContext(); Object.assign(context, { globalStorageUri: vscode.Uri.file(directory) });
