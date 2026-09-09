@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 import { applyImageCapability, serializeOpenAIMessages, serializeGoogleMessages, parseToolArguments } from './messageSerialization';
 import { BedrockRuntimeClient, InvokeModelWithResponseStreamCommand } from '@aws-sdk/client-bedrock-runtime';
+import { bedrockFamilyCapabilities, supportsBedrockClaude } from './BedrockModels';
 import { fromIni, fromNodeProviderChain } from '@aws-sdk/credential-providers';
 import type { AwsCredentialIdentity, AwsCredentialIdentityProvider } from '@smithy/types';
 import type { ConfigStore, SecretStore } from '../host';
@@ -303,10 +304,8 @@ const MULTIMODAL_MODELS: ReadonlySet<ModelId> = new Set<ModelId>([
 	'foundry-claude-sonnet',
 	'foundry-llama-3-70b',
 	'foundry-custom',
-	// Bedrock Claude family + Nova support images.
-	'bedrock-claude-opus-4', 'bedrock-claude-sonnet-4', 'bedrock-claude-haiku-4',
-	'bedrock-claude-3-7-sonnet',
-	'bedrock-claude-sonnet',
+	// Bedrock Claude aliases share their capability declarations with discovery.
+	// Nova vision metadata remains available even though this adapter requires Claude.
 	'bedrock-nova-pro', 'bedrock-nova-lite',
 	// Google Gemini — every shipping Gemini model accepts inline images.
 	// Gemma is text-only (no vision capability in the open-weights tier).
@@ -344,7 +343,7 @@ const MULTIMODAL_MODELS: ReadonlySet<ModelId> = new Set<ModelId>([
  * `streamXxx` method has a single, identical question to ask.
  */
 export function modelSupportsImages(model: ModelId): boolean {
-	return getDiscoveredModel(model)?.images === true || MULTIMODAL_MODELS.has(model);
+	return getDiscoveredModel(model)?.images === true || bedrockFamilyCapabilities(model)?.images === true || MULTIMODAL_MODELS.has(model);
 }
 
 /**
@@ -2483,7 +2482,9 @@ export class LlmClient {
 	 * extraction and usage accounting mirror `streamAnthropic` line-for-line.
 	 */
 	private async *streamBedrock(options: LlmRequestOptions): AsyncGenerator<LlmStreamEvent> {
-		if (!options.model.startsWith('bedrock-claude-') && !getDiscoveredModel(options.model)?.model.includes('anthropic.claude')) {
+		const discovered = getDiscoveredModel(options.model);
+		const modelFamily = discovered?.modelFamily ?? options.model;
+		if (!supportsBedrockClaude(modelFamily, discovered?.model)) {
 			yield { type: 'error', error: 'The Bedrock adapter currently supports Claude models. Select a bedrock-claude model or use an OpenAI-compatible endpoint for this model family.' };
 			return;
 		}
@@ -2517,7 +2518,7 @@ export class LlmClient {
 		}
 
 		// Phase 4 — extended thinking budget for Bedrock Claude 4.x ids.
-		if (/^bedrock-claude-(opus|sonnet|haiku)-4/.test(options.model)) {
+		if (/^bedrock-claude-(opus|sonnet|haiku)-4/.test(modelFamily)) {
 			const budget = Math.max(0, Math.min(24000, this.config.get<number>('thinkingBudgetTokens') ?? 0));
 			if (budget > 0) {
 				body['thinking'] = { type: 'enabled', budget_tokens: budget };

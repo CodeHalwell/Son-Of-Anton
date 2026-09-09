@@ -13,6 +13,7 @@ import type { ConfigStore, MementoStore, SecretStore } from '../host';
 import { MissingCredentialError } from '../auth/types';
 import { readBoundedFile } from '../util/readBoundedFile';
 import { object } from '../acp/protocol';
+import { bedrockFamilyCapabilities, isBedrockSemanticFamily, supportsBedrockClaude } from './BedrockModels';
 import { discoveredAcpModels, discoveredModelId, getDiscoveredModel, registerDiscoveredModels, replaceDiscoveredModels, type CatalogProvider, type DiscoveredModel, type CapabilityAvailability } from './DiscoveredModels';
 
 export interface DiscoveredSoftware {
@@ -230,7 +231,7 @@ export class ProviderDiscovery {
 	}
 
 	private configuredInventory(id: ConfiguredInventoryProvider, name: string, setting: string): DiscoveredProvider {
-		let models: DiscoveredModel[] = []; let configurationComplete = false;
+		let models: DiscoveredModel[] = []; let configurationComplete = false; let configurationError: string | undefined;
 		try {
 			const raw = this.deps.config.get<unknown>(setting);
 			let entries: Array<[string, unknown]>;
@@ -243,15 +244,31 @@ export class ProviderDiscovery {
 				if (!object(map) || Object.keys(map).length > 1000) { throw new Error('Invalid configured inventory'); }
 				entries = Object.entries(map);
 			}
+			if (id === 'bedrock') {
+				// One invocation route can have several friendly labels, but only one
+				// declared semantic family. Resolve aliases identically on restart/refresh.
+				const families = new Map<string, string>();
+				for (const [family, wireId] of entries) {
+					if (typeof wireId !== 'string' || !wireId.trim() || wireId.length > 512 || !family || family.length > 512 || /[\u0000-\u001f\u007f]/.test(family)) { throw new Error('Invalid configured model family'); }
+					const previous = families.get(wireId);
+					if (previous !== undefined && previous !== family && isBedrockSemanticFamily(previous) && isBedrockSemanticFamily(family)) {
+						configurationError = 'Multiple Bedrock model families map to the same invocation ID. Keep one declared model family per invocation ID; previously discovered models are retained.';
+						throw new Error(configurationError);
+					}
+					if (previous === undefined || isBedrockSemanticFamily(family) || !isBedrockSemanticFamily(previous) && family < previous) { families.set(wireId, family); }
+				}
+				entries = [...families].map(([wireId, family]) => [family, wireId]);
+			}
 			for (const [label, wireId] of entries) {
 				if (typeof wireId !== 'string' || !wireId.trim() || wireId.length > 512) { throw new Error('Invalid configured model ID'); }
-				if (id === 'foundry' && (!label || label.length > 512 || /[\u0000-\u001f\u007f]/.test(label))) { throw new Error('Invalid configured model family'); }
-				models.push({ id: discoveredModelId(id, wireId), provider: id, model: wireId, ...(id === 'foundry' ? { modelFamily: label } : {}), label: id === 'zai' ? wireId : `${label} · ${wireId}`, chat: id === 'bedrock' ? wireId.includes('anthropic.claude') : 'unknown', tools: 'unknown', images: 'unknown', fetchedAt: Date.now() });
+				if (id !== 'zai' && (!label || label.length > 512 || /[\u0000-\u001f\u007f]/.test(label))) { throw new Error('Invalid configured model family'); }
+				const capabilities = id === 'bedrock' ? bedrockFamilyCapabilities(label) : undefined;
+				models.push({ id: discoveredModelId(id, wireId), provider: id, model: wireId, ...(id !== 'zai' ? { modelFamily: label } : {}), label: id === 'zai' ? wireId : `${label} · ${wireId}`, chat: id === 'bedrock' ? supportsBedrockClaude(label, wireId) : 'unknown', tools: capabilities?.tools ?? 'unknown', images: capabilities?.images ?? 'unknown', fetchedAt: Date.now() });
 			}
 			configurationComplete = true;
 		} catch { models = this.previousConfiguredModels(id); }
 		return { id, name, credentialSource: 'none', configurationComplete, catalogStatus: configurationComplete ? id === 'zai' ? 'catalog-unavailable' : models.length ? 'configuration-only' : 'not-configured' : 'error', inferenceStatus: 'not-tested', models,
-			error: configurationComplete ? undefined : id === 'zai' ? 'Could not read the configured model inventory. Use an array of at most 1000 exact model IDs. Previously discovered models are retained.' : 'Could not read the configured model inventory. Use a JSON object mapping names to model IDs, with at most 1000 entries. Previously discovered models are retained.',
+			error: configurationComplete ? undefined : configurationError ?? (id === 'zai' ? 'Could not read the configured model inventory. Use an array of at most 1000 exact model IDs. Previously discovered models are retained.' : 'Could not read the configured model inventory. Use a JSON object mapping names to model IDs, with at most 1000 entries. Previously discovered models are retained.'),
 			catalogScope: id === 'foundry' ? 'Configured deployments only. Account-wide deployment discovery requires Azure management access.' : id === 'bedrock' ? 'Configured invocation IDs only. Account-wide model discovery requires AWS management access and an explicitly configured region/profile.' : 'This provider does not document an account model-list endpoint. Add exact model IDs to sota.zaiModels; API and Coding Plan endpoints have separate entitlements.' };
 	}
 
