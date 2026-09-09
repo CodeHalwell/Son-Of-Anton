@@ -983,7 +983,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		conversationStore,
 		(id, count) => checkpointManager.list(id).find(checkpoint => checkpoint.turnIndex === count)?.id,
 		(id, branchId) => checkpointManager.attachToBranch(id, branchId),
-		branchId => checkpointManager.deleteFor(branchId),
+		branchId => checkpointManager.detachBranch(branchId),
 	);
 	context.subscriptions.push(
 		vscode.commands.registerCommand('sota.openConversation', async (id: string) => {

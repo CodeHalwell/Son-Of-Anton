@@ -225,15 +225,22 @@ export class ConversationStore implements vscode.Disposable {
 			} catch { retainWorkspaceLegacy = true; }
 		}
 		this.ready = this.flush().then(async () => {
-			await this.disk?.cleanupDeleted();
-			// Source records are cleared only after every destination manifest is durable.
-			if (this.disk) {
-				for (const summary of oldIndex) { if (!retainedLegacyIds.has(summary.id)) { await context.globalState.update(recordKey(summary.id), undefined); } }
-				await context.globalState.update(INDEX_KEY, retainedLegacyIds.size ? oldIndex.filter(summary => retainedLegacyIds.has(summary.id)) : undefined);
-			}
-			if (!retainWorkspaceLegacy) {
-				await context.workspaceState.update(LEGACY_CONVERSATION_KEY, undefined);
-				await context.workspaceState.update(MIGRATION_FLAG_KEY, true);
+			try {
+				await this.disk?.cleanupDeleted();
+				// Source records are cleared only after every destination manifest is durable.
+				if (this.disk) {
+					for (const summary of oldIndex) { if (!retainedLegacyIds.has(summary.id)) { await context.globalState.update(recordKey(summary.id), undefined); } }
+					await context.globalState.update(INDEX_KEY, retainedLegacyIds.size ? oldIndex.filter(summary => retainedLegacyIds.has(summary.id)) : undefined);
+				}
+				if (!retainWorkspaceLegacy) {
+					await context.workspaceState.update(LEGACY_CONVERSATION_KEY, undefined);
+					await context.workspaceState.update(MIGRATION_FLAG_KEY, true);
+				}
+			} catch (error) {
+				// Finalization is not part of the retryable write queue. Preserve its
+				// failure until restart, while queue failures clear when their retry succeeds.
+				this.writeFailure = error instanceof Error ? error : new Error(String(error));
+				throw error;
 			}
 		});
 		const refreshAfterMigration = (): void => {
@@ -241,10 +248,7 @@ export class ConversationStore implements vscode.Disposable {
 				try { this._onDidChange.fire(); } catch { /* Notification failures must not change migration's result. */ }
 			}
 		};
-		void this.ready.then(refreshAfterMigration, error => {
-			this.writeFailure = error instanceof Error ? error : new Error(String(error));
-			refreshAfterMigration();
-		});
+		void this.ready.then(refreshAfterMigration, refreshAfterMigration);
 	}
 
 	private reportRecoveryIssue(issue: ConversationRecoveryIssue): void {

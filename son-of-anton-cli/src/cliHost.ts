@@ -184,6 +184,15 @@ function lookupDotted<T>(data: Record<string, unknown>, key: string): T | undefi
 }
 
 class FileMementoStore implements MementoStore {
+	keys(): readonly string[] {
+		let raw: string;
+		try { raw = fs.readFileSync(STATE_PATH, 'utf8'); }
+		catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return []; } throw error; }
+		const value: unknown = JSON.parse(raw);
+		if (!value || typeof value !== 'object' || Array.isArray(value)) { throw new Error('Invalid saved CLI state. Existing data was preserved.'); }
+		return Object.keys(value);
+	}
+
 	get<T>(key: string): T | undefined;
 	get<T>(key: string, defaultValue: T): T;
 	get<T>(key: string, defaultValue?: T): T | undefined {

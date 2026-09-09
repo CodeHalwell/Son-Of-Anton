@@ -48,6 +48,25 @@ function deferDeletion(store: ConversationStore, state: Memento, id: string, fai
 }
 
 suite('Permanent conversation deletion', () => {
+	test('startup cleanup failure is recoverable after a restart scan without poisoning later flushes', async () => {
+		await fixture(true, async (store, _state, context) => {
+			const record = store.create([message('deleted before reopening history')]); store.delete(record.summary.id); await store.flush();
+			store.permanentDelete(record.summary.id); await store.flush();
+			const reopened = new ConversationStore(context); const failure = new Error('Checkpoint storage temporarily unavailable');
+			let attempts = 0; const completed: string[] = [];
+			reopened.onDidPermanentlyDelete(id => completed.push(id));
+			reopened.setPermanentDeleteCleanup(async id => { assert.equal(id, record.summary.id); if (++attempts === 1) { throw failure; } });
+			try {
+				await assert.rejects(reopened.ready, error => error === failure);
+				assert.equal(reopened.load(record.summary.id, true), undefined); assert.deepEqual(completed, []);
+				await reopened.flush(); assert.equal(attempts, 2); assert.deepEqual(completed, [record.summary.id]);
+				const fresh = reopened.create([message('usable after cleanup retry')]); await reopened.flush();
+				assert.deepEqual(new ConversationStorage(path.join(context.globalStorageUri.fsPath, 'conversations-v2')).load(fresh.summary.id)?.messages, fresh.messages);
+				assert.equal(attempts, 2, 'successful cleanup is not repeated on every save');
+			} finally { reopened.dispose(); await reopened.flush().catch(() => {}); }
+		});
+	});
+
 	for (const disk of [true, false]) {
 		test(`${disk ? 'disk' : 'fallback'} deletion survives disposal and shutdown flush waits for all host cleanup`, async () => {
 			await fixture(disk, async (store, state, context) => {

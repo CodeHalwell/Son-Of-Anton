@@ -74,6 +74,8 @@ export interface Disposable {
  * file under `~/.son-of-anton/data/`).
  */
 export interface MementoStore {
+	/** Optional enumeration of legacy storage keys for cross-workspace migration. */
+	keys?(): readonly string[];
 	get<T>(key: string): T | undefined;
 	get<T>(key: string, defaultValue: T): T;
 	update(key: string, value: unknown): Thenable<void> | Promise<void>;

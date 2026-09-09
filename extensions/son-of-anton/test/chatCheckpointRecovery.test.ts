@@ -82,7 +82,7 @@ suite('Chat checkpoint index recovery', () => {
 		await fixture(async f => {
 			let retained = false;
 			const actions = new ConversationActions(f.store, (id, count) => f.manager.list(id).find(checkpoint => checkpoint.turnIndex === count)?.id,
-				async (id, branchId) => { retained = true; await f.manager.attachToBranch(id, branchId); }, branchId => f.manager.deleteFor(branchId));
+				async (id, branchId) => { retained = true; await f.manager.attachToBranch(id, branchId); }, branchId => f.manager.detachBranch(branchId));
 			const branch = await actions.branch(f.first, 0); assert.ok(branch);
 			assert.deepEqual(branch.messages, f.store.load(f.first)?.messages); assert.equal(branch.summary.branch?.workspaceState, 'unlinked'); assert.equal(branch.summary.branch?.checkpointId, undefined); assert.equal(retained, false);
 			await assert.rejects(f.manager.restore(f.checkpoint, { conversationToo: true }), /unavailable/); assert.equal(await fs.readFile(f.index, 'utf8'), '{ damaged');

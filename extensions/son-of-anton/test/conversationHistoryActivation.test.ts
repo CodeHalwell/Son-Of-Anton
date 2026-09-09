@@ -57,6 +57,23 @@ async function fixture(run: (value: {
 }
 
 suite('Conversation history activation', () => {
+	test('unresolved migration finalization failures remain visible after unrelated writes succeed', async () => {
+		await fixture(async f => {
+			const update = f.context.globalState.update.bind(f.context.globalState); const failure = new Error('Legacy migration source cannot be finalized');
+			f.context.globalState.update = async (key, value) => {
+				if (key === 'sota.conversations.original' && value === undefined) { throw failure; }
+				await update(key, value);
+			};
+			const store = activateConversationHistory(f.context); await f.started; f.finish();
+			await assert.rejects(store.ready, error => error === failure);
+			const fresh = store.create([{ role: 'user', content: 'Still writable while migration needs recovery', timestamp: 2 }]);
+			await assert.rejects(store.flush(), error => error === failure); await assert.rejects(store.flush(), error => error === failure);
+			const disk = new ConversationStorage(path.join(f.directory, 'conversations-v2'));
+			assert.deepEqual(disk.load('original')?.messages, [f.original]); assert.deepEqual(disk.load(fresh.summary.id)?.messages, fresh.messages);
+			assert.equal(f.values.has('sota.conversations.original'), true, 'the unresolved original migration source remains recoverable');
+		});
+	});
+
 	test('registration and queued user edits proceed while image-history migration is blocked', async () => {
 		await fixture(async f => {
 			const store = activateConversationHistory(f.context);

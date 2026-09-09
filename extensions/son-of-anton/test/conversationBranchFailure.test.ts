@@ -44,7 +44,7 @@ async function fixture(run: (value: {
 		const retained: string[] = []; const dropped: string[] = []; let retainFailure: Error | undefined;
 		const actions = new ConversationActions(store, (_id, count) => count === 2 ? checkpoint.id : undefined,
 			async (id, branchId) => { retained.push(branchId); await manager.attachToBranch(id, branchId); if (retainFailure) { throw retainFailure; } },
-			async branchId => { dropped.push(branchId); await manager.deleteFor(branchId); });
+			async branchId => { dropped.push(branchId); await manager.detachBranch(branchId); });
 		await run({ store, disk: (store as unknown as { disk: ConversationStorage }).disk, manager, actions, sourceId: source.summary.id, checkpointId: checkpoint.id,
 			snapshotPath: path.join(snapshot.storageRoot, createHash('sha256').update(snapshot.workspaceRoot).digest('hex'), snapshot.id), retained, dropped, setRetainFailure: error => { retainFailure = error; } });
 	} finally { manager.dispose(); store.dispose(); await store.flush().catch(() => {}); await fs.rm(directory, { recursive: true, force: true }); }
@@ -75,6 +75,9 @@ suite('Conversation branch failure recovery', () => {
 			await f.manager.deleteFor(retry.summary.id);
 			assert.equal(f.manager.get(f.checkpointId), undefined);
 			await assert.rejects(fs.access(f.snapshotPath), { code: 'ENOENT' });
+			const continued = await f.manager.capture(failedId, 2, 'Continue recovered branch'); assert.ok(continued?.fileSnapshot);
+			assert.equal(f.manager.list(failedId)[0]?.id, continued.id, 'rollback removes the old link without permanently deleting the recovered conversation');
+			assert.equal(f.disk.load(failedId)?.summary.branch?.workspaceState, 'unlinked');
 		});
 	});
 
@@ -110,7 +113,7 @@ suite('Conversation branch failure recovery', () => {
 			const retained: string[] = []; const retainFailure = new Error('Retention reporting failed'); const dropFailure = new Error('Checkpoint cleanup reporting failed');
 			const actions = new ConversationActions(f.store, () => f.checkpointId,
 				async (checkpointId, branchId) => { retained.push(branchId); await f.manager.attachToBranch(checkpointId, branchId); throw retainFailure; },
-				async branchId => { await f.manager.deleteFor(branchId); throw dropFailure; });
+				async branchId => { await f.manager.detachBranch(branchId); throw dropFailure; });
 			await assert.rejects(actions.branch(f.sourceId, 1), error => error instanceof AggregateError && error.errors[0] === retainFailure && error.errors.includes(dropFailure));
 			assert.equal(f.disk.load(retained[0])?.summary.branch?.workspaceState, 'unlinked');
 			assert.equal(f.manager.list(retained[0]).length, 0);

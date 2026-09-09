@@ -542,8 +542,8 @@
 			renderContextChips(); updateContextPreview();
 			messageInput.style.height = 'auto';
 			messageInput.style.height = Math.min(Math.max(messageInput.scrollHeight, 64), 240) + 'px';
-			vscode.postMessage({ type: 'selectModel', conversationId: activeConversationId, model: currentModel });
-			vscode.postMessage({ type: 'selectSpecialist', conversationId: activeConversationId, specialistId: currentAgent });
+			vscode.postMessage({ type: 'selectModel', conversationId: activeConversationId, model: currentModel, specialistId: currentAgent });
+			vscode.postMessage({ type: 'selectSpecialist', conversationId: activeConversationId, specialistId: currentAgent, model: currentModel });
 			vscode.postMessage({ type: 'modeChange', conversationId: activeConversationId, chatMode: currentMode });
 			selectTab('chat'); messageInput.focus();
 		}
@@ -4109,8 +4109,7 @@
 			const target = e.target.closest('.popover-item');
 			if (!target) return;
 			currentModel = target.dataset.model;
-			if (currentModel.startsWith('catalog:acp:') && currentAgent === 'anton') { currentAgent = 'anton-code'; updateAgentLabel(); updateAgentMenuChecks(); vscode.postMessage({ type: 'selectSpecialist', conversationId: activeConversationId, specialistId: currentAgent }); }
-			vscode.postMessage({ type: 'selectModel', conversationId: activeConversationId, model: currentModel });
+			vscode.postMessage({ type: 'selectModel', conversationId: activeConversationId, model: currentModel, specialistId: currentAgent });
 			persistDraft();
 			updateModelLabel();
 			updateModelMenuChecks();
@@ -4200,7 +4199,7 @@
 			const target = e.target.closest('.popover-item');
 			if (!target) return;
 			currentAgent = target.dataset.agent || 'anton';
-			vscode.postMessage({ type: 'selectSpecialist', conversationId: activeConversationId, specialistId: currentAgent });
+			vscode.postMessage({ type: 'selectSpecialist', conversationId: activeConversationId, specialistId: currentAgent, model: currentModel });
 			updateAgentLabel();
 			updateAgentMenuChecks();
 			updateHeaderSubtitle();
@@ -4719,6 +4718,13 @@
 					break;
 				case 'systemMessage':
 					if (!message.conversationId || message.conversationId === activeConversationId) addMessage('system', message.content || '', { persistedIndex: message.persistedIndex, timestamp: message.timestamp });
+					break;
+				case 'chatSelection':
+					if (message.conversationId !== activeConversationId || message.requestedModel !== currentModel || message.requestedSpecialistId !== currentAgent) break;
+					currentModel = message.model;
+					currentAgent = message.specialistId;
+					persistDraft(); updateAgentLabel(); updateAgentMenuChecks(); updateHeaderSubtitle(); updateComposerPlaceholder(); updateModelLabel(); updateModelMenuChecks();
+					if (message.error) { draftStatus.hidden = false; draftStatus.textContent = message.error; }
 					break;
 				case 'specialistChange':
 					if (message.specialistId) {

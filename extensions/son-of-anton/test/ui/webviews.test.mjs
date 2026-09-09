@@ -621,7 +621,7 @@ test('model picker: search by provider, choose with keyboard, escape restores fo
 	await page.keyboard.press('Enter');
 	await page.locator('#modelMenu').waitFor({ state: 'hidden' });
 	assert.equal(await page.locator('#modelChip').evaluate(button => button === document.activeElement), true);
-	assert.deepEqual(await page.evaluate(() => sentMessages.find(message => message.type === 'selectModel')), { type: 'selectModel', conversationId: 'initial-conversation', model: selected });
+	assert.deepEqual(await page.evaluate(() => sentMessages.find(message => message.type === 'selectModel')), { type: 'selectModel', conversationId: 'initial-conversation', model: selected, specialistId: 'anton' });
 	await page.locator('#modelChip').click();
 	await page.getByRole('searchbox', { name: 'Search Models…' }).fill('does-not-exist');
 	await page.locator('#modelSearchEmpty').waitFor({ state: 'visible' });
@@ -1194,6 +1194,52 @@ test('provider discovery searches the complete catalog and distinguishes catalog
 	assert.match(await page.locator('#providerDiscoveryStatus').innerText(), /Fixture CLI[\s\S]*Installed/);
 	assert.doesNotMatch(await page.locator('#providerDiscoveryStatus').innerText(), /\/fixture\/config.json/);
 	await assertNoPageOverflow(page); await screenshot(page, 'provider-discovery-sidebar');
+});
+
+test('ACP model selection uses the host-confirmed specialist and model atomically', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const model = { id: 'catalog:acp:fixture%2Fmodel', model: 'model', label: 'ACP fixture model', chat: true };
+	await post(page, { type: 'loadConversation', conversationId: 'acp-selection', lastSpecialist: 'anton-spec', lastModel: 'sonnet', messages: [] });
+	await post(page, { type: 'providerCatalog', snapshot: { updatedAt: Date.now(), software: [], providers: [{ id: 'acp', name: 'ACP', credentialSource: 'adapter', catalogStatus: 'ready', inferenceStatus: 'not-verified', models: [model] }] } });
+	await page.locator('#modelChip').click(); await page.locator('#modelSearch').fill('ACP fixture');
+	await page.locator(`[data-model="${model.id}"]`).click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.findLast(message => message.type === 'selectModel')), { type: 'selectModel', conversationId: 'acp-selection', model: model.id, specialistId: 'anton-spec' });
+	assert.equal(await page.evaluate(() => sentMessages.filter(message => message.type === 'selectSpecialist').length), 0, 'The browser must not guess which specialist can run an adapter');
+	await post(page, { type: 'chatSelection', conversationId: 'acp-selection', requestedModel: model.id, requestedSpecialistId: 'anton-spec', model: model.id, specialistId: 'anton-code' });
+	await page.locator('#messageInput').fill('Use that exact adapter model'); await page.locator('#sendBtn').click();
+	const send = await page.evaluate(() => sentMessages.findLast(message => message.type === 'sendMessage'));
+	assert.equal(send.model, model.id); assert.equal(send.specialistId, 'anton-code');
+});
+
+test('ACP route rejection restores the accepted chips without losing the draft or applying stale acknowledgements', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const model = { id: 'catalog:acp:missing%2Fmodel', model: 'model', label: 'Unavailable ACP fixture', chat: true };
+	await post(page, { type: 'loadConversation', conversationId: 'acp-rejection', lastSpecialist: 'anton-spec', lastModel: 'sonnet', messages: [] });
+	await post(page, { type: 'providerCatalog', snapshot: { updatedAt: Date.now(), software: [], providers: [{ id: 'acp', name: 'ACP', credentialSource: 'adapter', catalogStatus: 'ready', inferenceStatus: 'not-verified', models: [model] }] } });
+	await page.locator('#messageInput').fill('Keep my unsent prompt');
+	await page.locator('#modelChip').click(); await page.locator('#modelSearch').fill('Unavailable ACP'); await page.locator(`[data-model="${model.id}"]`).click();
+	const reply = { type: 'chatSelection', conversationId: 'acp-rejection', requestedModel: model.id, requestedSpecialistId: 'anton-spec', model: 'sonnet', specialistId: 'anton-spec', error: 'Open Anton: Browse ACP Adapters' };
+	await post(page, { ...reply, conversationId: 'other-conversation' });
+	assert.equal(await page.locator('#modelLabel').textContent(), model.label);
+	await post(page, reply);
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Keep my unsent prompt');
+	assert.match(await page.locator('#draftStatus').textContent(), /Browse ACP Adapters/);
+	await post(page, { ...reply, model: model.id, specialistId: 'anton-code', error: undefined });
+	assert.notEqual(await page.locator('#modelLabel').textContent(), model.label, 'An acknowledgement for the superseded selection must be ignored');
+	await page.locator('#sendBtn').click();
+	const send = await page.evaluate(() => sentMessages.findLast(message => message.type === 'sendMessage'));
+	assert.equal(send.model, 'sonnet'); assert.equal(send.specialistId, 'anton-spec'); assert.equal(send.text, 'Keep my unsent prompt');
+});
+
+test('slash ACP selection updates both chips from the pre-command selection', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const model = { id: 'catalog:acp:slash%2Fmodel', model: 'model', label: 'Slash ACP fixture', chat: true };
+	await post(page, { type: 'loadConversation', conversationId: 'acp-slash', lastSpecialist: 'anton-spec', lastModel: 'sonnet', messages: [] });
+	await post(page, { type: 'providerCatalog', snapshot: { updatedAt: Date.now(), software: [], providers: [{ id: 'acp', name: 'ACP', credentialSource: 'adapter', catalogStatus: 'ready', inferenceStatus: 'not-verified', models: [model] }] } });
+	await page.locator('#messageInput').fill(`/model ${model.id}`); await page.locator('#sendBtn').click();
+	await post(page, { type: 'chatSelection', conversationId: 'acp-slash', requestedModel: 'sonnet', requestedSpecialistId: 'anton-spec', model: model.id, specialistId: 'anton-code' });
+	assert.equal(await page.locator('#modelLabel').textContent(), model.label);
+	assert.match(await page.locator('#agentLabel').textContent(), /Anton Code/);
 });
 
 test('provider catalogs isolate special object keys and retire removed picker metadata', async t => {

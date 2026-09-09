@@ -214,15 +214,62 @@ export class CheckpointManager implements Disposable {
 	 * conversation is deleted so we don't keep dangling index entries.
 	 */
 	async deleteFor(conversationId: string): Promise<void> {
-		await this.mutateIndex((index, pinned) => {
-			if (index.some(cp => pinned.has(cp.id) && (cp.conversationId === conversationId || cp.branchConversationIds?.includes(conversationId)))) { throw new Error('This conversation has a checkpoint restore in progress. Retry deletion after it finishes.'); }
-			return index.map(cp => ({
-			...cp,
-			ownerDeleted: cp.ownerDeleted || cp.conversationId === conversationId,
-			branchConversationIds: cp.branchConversationIds?.filter(id => id !== conversationId),
-		})).filter(cp => !cp.ownerDeleted || !!cp.branchConversationIds?.length);
-		}, this.getWorkspaceRoot(), undefined, conversationId);
+		await this.enqueue(async () => {
+			await CheckpointIndexStorage.markDeleted(this.fileStorageRoot(), conversationId, message => this.host.notifier.warn(message));
+			await this.updateAllIndexes((index, pinned) => {
+				if (index.some(cp => pinned.has(cp.id) && (cp.conversationId === conversationId || cp.branchConversationIds?.includes(conversationId)))) { throw new Error('This conversation has a checkpoint restore in progress. Retry deletion after it finishes.'); }
+				return index.map(cp => ({ ...cp,
+					ownerDeleted: cp.ownerDeleted || cp.conversationId === conversationId,
+					branchConversationIds: cp.branchConversationIds?.filter(id => id !== conversationId),
+				})).filter(cp => !cp.ownerDeleted || !!cp.branchConversationIds?.length);
+			}, conversationId);
+		});
 		this._onDidChange.fire();
+	}
+
+	/** Undo a provisional branch link without permanently deleting the recoverable conversation. */
+	async detachBranch(branchId: string): Promise<void> {
+		await this.enqueue(() => this.updateAllIndexes((index, pinned) => {
+			if (index.some(cp => pinned.has(cp.id) && cp.branchConversationIds?.includes(branchId))) { throw new Error('This branch has a checkpoint restore in progress. Retry after it finishes.'); }
+			return index.map(cp => ({ ...cp, branchConversationIds: cp.branchConversationIds?.filter(id => id !== branchId) }));
+		}));
+		this._onDidChange.fire();
+	}
+
+	private async updateAllIndexes(update: (index: Checkpoint[], pinned: ReadonlySet<string>) => Checkpoint[], deletedConversationId?: string): Promise<void> {
+		const discovered = await CheckpointIndexStorage.discover(this.fileStorageRoot());
+		const roots = new Set([...discovered.roots, ...this.indexes.keys()]); const errors = discovered.errors;
+		// The current key is available even to hosts without legacy-key enumeration.
+		const current = this.getWorkspaceRoot();
+		if (current) { try { roots.add(fs.realpathSync.native(current)); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { errors.push(error); } } }
+		else { roots.add('no-workspace'); }
+		let keys: readonly string[] = [];
+		try { keys = this.globalState.keys?.() ?? []; } catch (error) { errors.push(error); }
+		const knownKeys = new Set([...roots].map(root => this.keyForIdentity(root)));
+		for (const key of keys) {
+			if (!key.startsWith(`${CHECKPOINT_INDEX_KEY}.`) || knownKeys.has(key)) { continue; }
+			try {
+				if (key === `${CHECKPOINT_INDEX_KEY}.no-workspace`) { roots.add('no-workspace'); continue; }
+				if (!/^[a-f0-9]{64}$/.test(key.slice(CHECKPOINT_INDEX_KEY.length + 1))) { continue; }
+				const entries = this.globalState.get<Checkpoint[]>(key) ?? [];
+				if (!Array.isArray(entries)) { throw new Error('Invalid legacy checkpoint index.'); }
+				for (const checkpoint of entries) {
+					const root = checkpoint?.fileSnapshot?.workspaceRoot ?? checkpoint?.snapshot?.workspaceRoot;
+					// Old SHA-only metadata has no releasable payload or reversible workspace identity.
+					if (root === undefined) { continue; }
+					if (typeof root !== 'string' || !path.isAbsolute(root) || path.normalize(root) !== root || this.keyForIdentity(root) !== key) { throw new Error('Invalid legacy checkpoint workspace identity.'); }
+					roots.add(root);
+				}
+			} catch (error) { errors.push(error); }
+			await new Promise<void>(resolve => setImmediate(resolve));
+		}
+
+		for (const root of roots) {
+			try { const storage = this.indexForIdentity(root); await storage.mutate(update, undefined, deletedConversationId); await this.cleanupIndex(storage); }
+			catch (error) { errors.push(error); }
+		}
+		if (errors.length === 1) { throw errors[0]; }
+		if (errors.length) { throw new AggregateError(errors, 'Checkpoint cleanup is incomplete in one or more workspaces. Retry after their stored indexes are available.'); }
 	}
 
 	/** Explicit links keep a branch's checkpoint alive even if its parent is deleted. */
@@ -391,24 +438,21 @@ export class CheckpointManager implements Disposable {
 		);
 	}
 
-	private storageKey(root = this.getWorkspaceRoot()): string {
-		if (!root) {
-			return `${CHECKPOINT_INDEX_KEY}.no-workspace`;
-		}
-		// Match fs.promises.realpath used by both snapshot stores. The JS fallback
-		// preserves input casing on Windows, splitting reads and writes across keys.
-		const canonical = fs.realpathSync.native(root);
-		return `${CHECKPOINT_INDEX_KEY}.${createHash('sha256').update(canonical).digest('hex')}`;
+	private keyForIdentity(workspaceRoot: string): string {
+		return `${CHECKPOINT_INDEX_KEY}.${workspaceRoot === 'no-workspace' ? 'no-workspace' : createHash('sha256').update(workspaceRoot).digest('hex')}`;
 	}
 
 	private indexStore(root = this.getWorkspaceRoot()): CheckpointIndexStorage {
-		const workspaceRoot = root ? fs.realpathSync.native(root) : 'no-workspace';
+		return this.indexForIdentity(root ? fs.realpathSync.native(root) : 'no-workspace');
+	}
+
+	/** Stored identities are canonical already; cleanup never needs to reopen their workspace. */
+	private indexForIdentity(workspaceRoot: string): CheckpointIndexStorage {
 		let storage = this.indexes.get(workspaceRoot);
 		if (!storage) {
-			const key = this.storageKey(root);
+			const key = this.keyForIdentity(workspaceRoot);
 			storage = new CheckpointIndexStorage(this.fileStorageRoot(), workspaceRoot,
-				() => this.globalState.get<Checkpoint[]>(key) ?? [],
-				message => this.host.notifier.warn(message));
+				() => this.globalState.get<Checkpoint[]>(key) ?? [], message => this.host.notifier.warn(message));
 			this.indexes.set(workspaceRoot, storage);
 		}
 		return storage;
@@ -416,25 +460,22 @@ export class CheckpointManager implements Disposable {
 
 	private readIndex(): Checkpoint[] { return this.indexStore().read(); }
 
-	private mutateIndex(update: (index: Checkpoint[], pinned: ReadonlySet<string>) => Checkpoint[], root = this.getWorkspaceRoot(), onPersisted?: () => void, deletedConversationId?: string): Promise<void> {
-		const storage = this.indexStore(root);
-		const operation = this.pendingWrite.then(async () => {
-			const { previous, next } = await storage.mutate(update, onPersisted, deletedConversationId);
-			for (const removed of previous.filter(item => !next.some(retained => retained.id === item.id))) {
-				if (removed.fileSnapshot) {
-					await new FileSnapshotStore(removed.fileSnapshot.workspaceRoot, removed.fileSnapshot.storageRoot).release(removed.fileSnapshot).catch(error => {
-						this.host.notifier.warn(`Could not release an expired file checkpoint: ${String(error)}`);
-					});
-				}
-				if (removed.snapshot) {
-					await new GitSnapshotStore(removed.snapshot.workspaceRoot).release(removed.snapshot).catch(error => {
-						this.host.notifier.warn(`Could not release an expired checkpoint: ${String(error)}`);
-					});
-				}
-			}
-		});
+	private enqueue(action: () => Promise<void>): Promise<void> {
+		const operation = this.pendingWrite.then(action);
 		this.pendingWrite = operation.catch(() => { /* Allow the next persistence attempt after a failure. */ });
 		return operation;
+	}
+
+	private mutateIndex(update: (index: Checkpoint[], pinned: ReadonlySet<string>) => Checkpoint[], root = this.getWorkspaceRoot(), onPersisted?: () => void): Promise<void> {
+		const storage = this.indexStore(root);
+		return this.enqueue(async () => { await storage.mutate(update, onPersisted); await this.cleanupIndex(storage); });
+	}
+
+	private async cleanupIndex(storage: CheckpointIndexStorage): Promise<void> {
+		await storage.cleanup(async removed => {
+			if (removed.fileSnapshot) { await new FileSnapshotStore(removed.fileSnapshot.workspaceRoot, removed.fileSnapshot.storageRoot).release(removed.fileSnapshot); }
+			if (removed.snapshot) { await new GitSnapshotStore(removed.snapshot.workspaceRoot).release(removed.snapshot); }
+		});
 	}
 
 	private pruneIndex(index: Checkpoint[], pinned: ReadonlySet<string> = new Set()): Checkpoint[] {

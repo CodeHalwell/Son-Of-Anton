@@ -5,6 +5,7 @@
 
 import { ModelId } from 'son-of-anton-core/llm/LlmClient';
 import { SPECIALIST_ROLES, getSpecialist } from 'son-of-anton-core/chat/specialistRegistry';
+import { getDiscoveredModel } from 'son-of-anton-core/llm/DiscoveredModels';
 import { ChatMode } from 'son-of-anton-core/agents/agentEvents';
 
 export interface SlashCommandContext {
@@ -184,14 +185,15 @@ function handleSpecialist(arg: string, ctx: SlashCommandContext): string {
 		return `Unknown specialist: \`${id}\`. Use \`/agents\` to list available specialists.`;
 	}
 	ctx.setSpecialistId(specialist.id);
-	return `Switched specialist to **${specialist.displayName}** (\`${specialist.id}\`).`;
+	const resolved = getSpecialist(ctx.getSpecialistId()) ?? specialist;
+	return `Switched specialist to **${resolved.displayName}** (\`${resolved.id}\`).`;
 }
 
 function handleModel(arg: string, ctx: SlashCommandContext): string {
 	if (!arg) {
 		return 'Usage: `/model <id>` — e.g. `/model sonnet`. Use `/help` for the full list.';
 	}
-	if (!MODEL_SET.has(arg)) {
+	if (!MODEL_SET.has(arg) && !getDiscoveredModel(arg)) {
 		const available = ALL_MODELS.map(m => `\`${m}\``).join(', ');
 		return `Unknown model: \`${arg}\`.\n\nAvailable models: ${available}.`;
 	}

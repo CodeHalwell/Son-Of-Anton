@@ -87,7 +87,7 @@ test('post-commit pruning failure cannot delete the newly indexed file checkpoin
 	const released: string[] = [];
 	t.mock.method(FileSnapshotStore.prototype, 'release', async (snapshot: FileSnapshot) => { released.push(snapshot.id); throw new Error('Pruning cleanup failed'); });
 	const notificationError = new Error('Pruning warning failed'); faults.warn = () => { throw notificationError; };
-	await assert.rejects(manager.capture('parent', 1, 'new'), error => error === notificationError);
+	await assert.rejects(manager.capture('parent', 1, 'new'), error => error instanceof AggregateError && error.errors[0]?.message === 'Pruning cleanup failed');
 	assert.ok(candidate); await fs.access(snapshotDirectory(candidate));
 	assert.deepEqual({ released, indexed: manager.listAll().map(checkpoint => checkpoint.fileSnapshot?.id) }, { released: [old.fileSnapshot.id], indexed: [candidate.id] });
 });
@@ -170,7 +170,7 @@ test('checkpoint capture and history use one index when Windows host path casing
 	await manager.attachToBranch(checkpoint.id, 'branch');
 	assert.equal(manager.list('branch')[0]?.id, checkpoint.id);
 	const indexFolders = await fs.readdir(join(directory, 'storage', 'index-v1'));
-	assert.deepEqual(indexFolders, [createHash('sha256').update(canonicalRoot).digest('hex')]);
+	assert.deepEqual(indexFolders.filter(name => name !== '.lifecycle'), [createHash('sha256').update(canonicalRoot).digest('hex')]);
 	assert.equal(values.size, 0, 'new checkpoints never write the per-window legacy index');
 	// Opening the same workspace with either spelling retains the existing history.
 	const reopened = new CheckpointManager(conversations, state, host); t.after(() => reopened.dispose());

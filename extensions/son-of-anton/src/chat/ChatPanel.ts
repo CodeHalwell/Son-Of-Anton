@@ -5,6 +5,7 @@
 import * as vscode from 'vscode';
 import { getChatUiStrings } from './chatUiStrings';
 import { ChatTurnQueue } from './ChatTurnQueue';
+import { resolveChatSpecialist } from './ChatModelRouting';
 import { assembleTurnContext, type TurnContext } from './TurnContext';
 import type { ProviderFinder } from '../providers/ProviderFinder';
 import { globalScopedConfig } from './globalScopedConfig';
@@ -510,6 +511,7 @@ export class ChatSession {
 		this.conversationWriteToken = resolved.writeToken;
 		this.currentSpecialistId = resolved.summary.lastSpecialist ?? 'anton';
 		this.currentModel = this.resolveChatModel(resolved.summary.lastModel);
+		this.restoreChatRoute();
 		this.conversationStore.rememberActive(this.currentConversationId);
 		this.currentMode = resolved.summary.lastMode ?? 'act';
 		this.currentTab = resolved.summary.lastTab ?? 'chat';
@@ -1322,6 +1324,26 @@ export class ChatSession {
 		void this.webview.postMessage({ type: 'agentCapabilities', capabilities: this.agentBridge?.getCapabilities(this.currentSpecialistId, this.currentModel) });
 	}
 
+	/** Acknowledge both chips together; a stale reply must not replace a newer draft selection. */
+	private postChatSelection(requestedModel: ModelId, requestedSpecialistId: string, error?: string): void {
+		void this.webview.postMessage({ type: 'chatSelection', conversationId: this.currentConversationId, requestedModel, requestedSpecialistId, model: this.currentModel, specialistId: this.currentSpecialistId, error });
+	}
+
+	private selectChatRoute(model: ModelId, requestedSpecialistId: string, previousSelection?: { model: ModelId; specialistId: string }): void {
+		const specialistId = resolveChatSpecialist(model, requestedSpecialistId, this.agentBridge);
+		this.currentModel = model;
+		this.currentSpecialistId = specialistId;
+		this.saveConversation();
+		this.postChatSelection(previousSelection?.model ?? model, previousSelection?.specialistId ?? requestedSpecialistId);
+		this.postProviderCatalog(false);
+	}
+
+	private restoreChatRoute(): void {
+		if (!this.currentModel.startsWith('catalog:acp:')) { return; }
+		try { this.currentSpecialistId = resolveChatSpecialist(this.currentModel, this.currentSpecialistId, this.agentBridge); }
+		catch { /* Preserve an unavailable saved selection; send reports the actionable error before persistence. */ }
+	}
+
 	switchConversation(id: string): void {
 		if (id === this.currentConversationId) {
 			return;
@@ -1343,6 +1365,7 @@ export class ChatSession {
 		this.conversationWriteToken = record.writeToken;
 		this.currentSpecialistId = record.summary.lastSpecialist ?? 'anton';
 		this.currentModel = this.resolveChatModel(record.summary.lastModel);
+		this.restoreChatRoute();
 		this.conversationStore.rememberActive(this.currentConversationId);
 		this.currentMode = record.summary.lastMode ?? 'act';
 		this.currentTab = record.summary.lastTab ?? 'chat';
@@ -1550,17 +1573,11 @@ export class ChatSession {
 		return {
 			getSpecialistId: () => this.currentSpecialistId,
 			setSpecialistId: (id: string) => {
-				this.currentSpecialistId = id;
-				// Reflect the change in the toolbar chip immediately so the
-				// next user message inherits the new selection without
-				// requiring the user to also click the chip.
-				this.webview.postMessage({ type: 'specialistChange', specialistId: id });
+				this.selectChatRoute(this.currentModel, id, { model: this.currentModel, specialistId: this.currentSpecialistId });
 			},
 			getModel: () => this.currentModel,
 			setModel: (id: ModelId) => {
-				this.currentModel = id;
-				this.saveConversation();
-				this.webview.postMessage({ type: 'modelChange', model: id });
+				this.selectChatRoute(id, this.currentSpecialistId, { model: this.currentModel, specialistId: this.currentSpecialistId });
 			},
 			getMode: () => this.currentMode,
 			setMode: (mode: ChatMode) => {
@@ -1620,9 +1637,9 @@ export class ChatSession {
 	}
 
 	private resolveChatModel(saved?: ModelId): ModelId {
-		if (typeof saved === 'string' && Object.prototype.hasOwnProperty.call(MODEL_METADATA, saved)) { return saved; }
+		if (typeof saved === 'string' && (Object.prototype.hasOwnProperty.call(MODEL_METADATA, saved) || saved.startsWith('catalog:acp:'))) { return saved; }
 		const configured = vscode.workspace.getConfiguration('sota').get<string>('defaultModel', 'sonnet');
-		return typeof configured === 'string' && Object.prototype.hasOwnProperty.call(MODEL_METADATA, configured) ? configured as ModelId : 'sonnet';
+		return typeof configured === 'string' && (Object.prototype.hasOwnProperty.call(MODEL_METADATA, configured) || configured.startsWith('catalog:acp:')) ? configured as ModelId : 'sonnet';
 	}
 
 	private saveConversation(): void {
@@ -1713,17 +1730,17 @@ export class ChatSession {
 						}
 						break;
 					case 'selectModel':
-						if (message.conversationId === this.currentConversationId && typeof message.model === 'string' && Object.prototype.hasOwnProperty.call(MODEL_METADATA, message.model)) {
-							this.currentModel = message.model;
-							this.saveConversation();
-							this.postProviderCatalog(false);
+						if (message.conversationId === this.currentConversationId && typeof message.model === 'string' && (Object.prototype.hasOwnProperty.call(MODEL_METADATA, message.model) || message.model.startsWith('catalog:acp:'))) {
+							const requested = message.specialistId ?? this.currentSpecialistId;
+							try { this.selectChatRoute(message.model, requested); }
+							catch (error) { this.postChatSelection(message.model, requested, error instanceof Error ? error.message : String(error)); }
 						}
 						break;
 					case 'selectSpecialist':
-						if (message.conversationId === this.currentConversationId && typeof message.specialistId === 'string' && getSpecialist(message.specialistId)) {
-							this.currentSpecialistId = message.specialistId;
-							this.saveConversation();
-							this.postProviderCatalog(false);
+						if (message.conversationId === this.currentConversationId && typeof message.specialistId === 'string' && (getSpecialist(message.specialistId) || (message.model ?? this.currentModel).startsWith('catalog:acp:'))) {
+							const model = message.model ?? this.currentModel;
+							try { this.selectChatRoute(model, message.specialistId); }
+							catch (error) { this.postChatSelection(model, message.specialistId, error instanceof Error ? error.message : String(error)); }
 						}
 						break;
 					case 'browseAcpAdapters':
@@ -2966,7 +2983,9 @@ export class ChatSession {
 			} else {
 				if (JSON.stringify(message).length > 12 * 1024 * 1024) { throw new Error(vscode.l10n.t('Queued message is too large. Use fewer image attachments.')); }
 				if (!message.text?.trim() && !message.attachments?.length && !message.mentions?.length && !message.mentionsKinded?.length && !message.images?.length) { return; }
-				this.followupQueue.add(this.currentConversationId, { ...message, type: 'sendMessage' }, message.type === 'redirectMessage');
+				const model = message.model ?? this.currentModel;
+				const specialistId = resolveChatSpecialist(model, message.specialistId ?? this.currentSpecialistId, this.agentBridge);
+				this.followupQueue.add(this.currentConversationId, { ...message, model, specialistId, type: 'sendMessage' }, message.type === 'redirectMessage');
 				if (message.type === 'redirectMessage') {
 					this.redirectedController = this.abortController;
 					this.followupQueue.pause(this.currentConversationId, false);
@@ -3055,12 +3074,10 @@ export class ChatSession {
 		}
 
 		const model: ModelId = message.model ?? this.currentModel;
-		this.currentModel = model;
 		// Resolve the specialist for this turn, falling back to the orchestrator
 		// if the webview sent an unknown id (e.g. specialist was removed).
-		const requestedSpecialistId = model.startsWith('catalog:acp:') && (message.specialistId ?? this.currentSpecialistId) === 'anton' ? 'anton-code' : message.specialistId ?? this.currentSpecialistId;
-		const specialistId = getSpecialist(requestedSpecialistId) ? requestedSpecialistId : 'anton';
-		this.currentSpecialistId = specialistId;
+		const requestedSpecialistId = message.specialistId ?? this.currentSpecialistId;
+		let specialistId = getSpecialist(requestedSpecialistId) ? requestedSpecialistId : 'anton';
 		// Mode arrives on every send so a chip toggle that hasn't yet been
 		// echoed back stays authoritative for the turn the user is firing.
 		// Falls back to the session's persisted mode (default 'act').
@@ -3094,6 +3111,14 @@ export class ChatSession {
 			}
 			// Unknown command — fall through to normal dispatch.
 		}
+
+		// Control commands belong to the active orchestrator plan regardless of
+		// the composer model. All inference turns must resolve before hooks,
+		// context collection, checkpoint capture or transcript persistence.
+		if (!approveOverride && !rejectOverride) { specialistId = resolveChatSpecialist(model, requestedSpecialistId, this.agentBridge); }
+		this.currentModel = model;
+		this.currentSpecialistId = specialistId;
+		if (specialistId !== requestedSpecialistId) { this.postChatSelection(model, requestedSpecialistId); }
 
 		// H17 — `pre-prompt` lifecycle hook. Fires AFTER slash-command
 		// interception so handled commands don't pay the script latency,
@@ -3271,7 +3296,7 @@ export class ChatSession {
 		// drive the agent backend instead of the direct-LLM path. The legacy path
 		// remains as a fallback for specialists that aren't in the agent stack
 		// yet (e.g. anton-spec) and for sessions where no bridge was supplied.
-		if (this.agentBridge && this.agentBridge.hasAgent(specialistId)) {
+		if (this.agentBridge && (this.agentBridge.hasAgent(specialistId) || ((approveOverride || rejectOverride) && this.agentBridge.hasAgent('anton')))) {
 			// Workspace context is now injected as a system-prompt section by
 			// `BaseAgent.buildSystemPrompt` via `request.workspaceContextSnapshot`,
 			// so the user's typed text stays clean — no prepending.

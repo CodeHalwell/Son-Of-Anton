@@ -22,7 +22,7 @@ export function activateConversationHistory(context: vscode.ExtensionContext): C
 	context.subscriptions.push(store.onDidEncounterRecoveryIssue(reportRecovery));
 	for (const issue of store.recoveryIssues) { reportRecovery(issue); }
 	void store.ready.catch(error => {
-		warn(vscode.l10n.t('Conversation history could not finish loading. Chat remains available and existing conversation data is preserved. Resolve the storage problem and restart to retry. {0}', error instanceof Error ? error.message : String(error)));
+		warn(vscode.l10n.t('Conversation history could not finish loading. Chat remains available and existing conversation data is preserved. Resolve the storage problem to retry recovery. {0}', error instanceof Error ? error.message : String(error)));
 	});
 	return store;
 }

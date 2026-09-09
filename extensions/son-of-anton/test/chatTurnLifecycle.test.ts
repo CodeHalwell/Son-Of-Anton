@@ -7,14 +7,16 @@ import * as vscode from 'vscode';
 import { ChatTurnQueue } from '../src/chat/ChatTurnQueue';
 import { ChatSession, type ChatMessage } from '../src/chat/ChatPanel';
 import { LlmClient, type LlmStreamEvent, type ModelId, type ToolDefinition } from 'son-of-anton-core/llm/LlmClient';
-import { discoveredModelId, getDiscoveredModel, registerDiscoveredModels, type CapabilityAvailability } from 'son-of-anton-core/llm/DiscoveredModels';
+import { discoveredAcpModelId, discoveredModelId, getDiscoveredModel, registerDiscoveredModels, replaceDiscoveredModels, type CapabilityAvailability } from 'son-of-anton-core/llm/DiscoveredModels';
 import type { AgentEvent } from '../src/chat/agentEvents';
 import { AgentBridge } from '../src/chat/AgentBridge';
 import { OrchestratorAgent } from 'son-of-anton-core/agents/OrchestratorAgent';
 import { AgentManager } from 'son-of-anton-core/agents/AgentManager';
 import { MetricsTracker } from 'son-of-anton-core/agents/MetricsTracker';
 import { ProjectMemory } from 'son-of-anton-core/agents/ProjectMemory';
-import type { AgentStack } from 'son-of-anton-core/agents/AgentStackFactory';
+import { createAgentStack, type AgentStack } from 'son-of-anton-core/agents/AgentStackFactory';
+import { McpClient } from 'son-of-anton-core/mcp/McpClient';
+import type { AcpTurn } from 'son-of-anton-core/acp/AcpRuntime';
 import type { ConversationStore } from '../src/chat/ConversationStore';
 import { registerResponseFeedback } from '../src/chat/ResponseFeedback';
 
@@ -31,7 +33,7 @@ interface TestSession {
 	currentSpecialistId: string;
 	currentMode: string;
 	handleConversationDeleted(id: string): void;
-	handleSendMessage(message: { text: string; requestId?: string; conversationId?: string; includeWorkspaceContext?: boolean; mentionsKinded?: NonNullable<ChatMessage['request']>['mentionsKinded']; attachments?: string[]; model?: ModelId; chatMode?: 'plan' | 'act'; images?: Array<{ mime: string; base64: string }> }): Promise<void>;
+	handleSendMessage(message: { text: string; requestId?: string; conversationId?: string; specialistId?: string; includeWorkspaceContext?: boolean; mentionsKinded?: NonNullable<ChatMessage['request']>['mentionsKinded']; attachments?: string[]; model?: ModelId; chatMode?: 'plan' | 'act'; images?: Array<{ mime: string; base64: string }> }): Promise<void>;
 	switchConversation(id: string): void;
 	clearConversation(): void;
 	abortInFlight(): void;
@@ -43,7 +45,7 @@ interface TestSession {
 function createSession() {
 	const messages: Array<{ type: string; [key: string]: unknown }> = [];
 	const models = new Map<string, ModelId>();
-	let receive: (message: { type: string; conversationId?: string; model?: ModelId; id?: string; specialistId?: string; chatMode?: string; messageIndex?: number; responseId?: string; value?: string }) => Promise<void>;
+	let receive: (message: { type: string; conversationId?: string; model?: ModelId; id?: string; specialistId?: string; chatMode?: string; messageIndex?: number; responseId?: string; value?: string; text?: string; queueAction?: string }) => Promise<void>;
 	const conversations = new Map<string, ChatMessage[]>([['first', []], ['second', []]]);
 	const started = new Map<string, ReturnType<typeof deferred>>();
 	const releases = new Map<string, ReturnType<typeof deferred>>();
@@ -154,6 +156,128 @@ async function withCatalogNativeSession(
 	try { await run({ ...f, llm, model, bodies, definition, executed }); }
 	finally { f.session.abortInFlight(); globalThis.fetch = originalFetch; }
 }
+
+async function withAcpSession(run: (fixture: ReturnType<typeof createSession> & { model: ModelId; otherModel: ModelId; turns: AcpTurn[]; settings: Record<string, unknown>; stack: AgentStack }) => Promise<void>): Promise<void> {
+	const adapters = ['chat-route-codex', 'chat-route-gemini'].map(id => ({ id, command: process.execPath, args: ['fixture-adapter.cjs'] }));
+	const [model, otherModel] = adapters.map(adapter => discoveredAcpModelId(adapter.id, 'exact-model'));
+	registerDiscoveredModels(adapters.map(adapter => ({ id: discoveredAcpModelId(adapter.id, 'exact-model'), provider: 'acp', acpAdapterId: adapter.id, model: 'exact-model', label: adapter.id, chat: true, tools: true, images: true, fetchedAt: Date.now() })));
+	const settings: Record<string, unknown> = { 'sota.acp.agents': adapters, 'sota.agents.anton-code.acpAgent': adapters[1].id };
+	const config = { get: <T>(key: string, fallback?: T) => (settings[key] ?? fallback) as T };
+	const llm = new LlmClient({ get: async () => { assert.fail('ACP selections must not use native credentials or inference'); }, store: async () => {}, delete: async () => {} }, config);
+	const mcp = new McpClient({ readServersSetting: () => [], getWorkspaceRoot: () => (process as NodeJS.Process).cwd(), onSettingChange: () => ({ dispose() {} }) });
+	const stack = createAgentStack({ llmClient: llm, mcpClient: mcp, agentManager: new AgentManager(llm), globalState: { get: <T>(_key: string, fallback?: T) => fallback as T, update: async () => {} }, workspaceRoot: (process as NodeJS.Process).cwd(), configStore: config, canUseAcp: () => true, persistMetrics: false });
+	const turns: AcpTurn[] = [];
+	stack.acpRuntime!.run = async turn => { turns.push(turn); turn.onUpdate?.({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Adapter answer' } }); return { stopReason: 'end_turn' }; };
+	const bridge = new AgentBridge(stack); const f = createSession(); Object.assign(f.session, { agentBridge: bridge, llmClient: llm });
+	try { await run({ ...f, model, otherModel, turns, settings, stack }); }
+	finally { f.session.abortInFlight(); bridge.dispose(); stack.dispose(); await stack.acpRuntime?.shutdown(); mcp.dispose(); for (const adapter of adapters) replaceDiscoveredModels({ provider: 'acp', acpAdapterId: adapter.id }, []); }
+}
+
+suite('ACP chat model routing', () => {
+	test('model selection remaps direct-only and removed personas and routes the exact adapter/model', async () => {
+		await withAcpSession(async f => {
+			for (const specialistId of ['anton-spec', 'custom-persona', 'anton']) {
+				f.session.currentModel = 'sonnet'; f.session.currentSpecialistId = specialistId;
+				await f.receive({ type: 'selectModel', conversationId: 'first', model: f.model, specialistId });
+				assert.equal(f.session.currentSpecialistId, 'anton-code'); assert.equal(f.session.currentModel, f.model);
+				assert.deepEqual(f.messages.findLast(message => message.type === 'chatSelection'), { type: 'chatSelection', conversationId: 'first', requestedModel: f.model, requestedSpecialistId: specialistId, model: f.model, specialistId: 'anton-code', error: undefined });
+				await f.session.handleSendMessage({ text: 'Use this exact model', model: f.model, specialistId, includeWorkspaceContext: false });
+				assert.equal(f.turns.at(-1)?.agent.id, 'chat-route-codex'); assert.equal(f.turns.at(-1)?.agent.modelId, 'exact-model');
+				assert.equal(f.conversations.get('first')?.at(-1)?.execution?.route, 'acp');
+			}
+		});
+	});
+
+	test('registered specialists and other available adapters retain the requested persona and model', async () => {
+		await withAcpSession(async f => {
+			await f.receive({ type: 'selectModel', conversationId: 'first', model: f.otherModel, specialistId: 'anton-docs' });
+			assert.equal(f.session.currentSpecialistId, 'anton-docs');
+			await f.session.handleSendMessage({ text: 'Plan from an image', model: f.otherModel, specialistId: 'anton-docs', chatMode: 'plan', images: [{ mime: 'image/png', base64: 'YWJj' }], includeWorkspaceContext: false });
+			assert.equal(f.turns[0].agent.id, 'chat-route-gemini'); assert.equal(f.turns[0].modeId, 'plan');
+			assert.deepEqual(f.turns[0].images, [{ mimeType: 'image/png', data: 'YWJj' }]);
+			assert.equal(f.turns[0].maxToolCalls, 100); assert.equal(f.turns[0].timeoutMs, 300_000);
+			assert.equal(f.turns[0].conversationId, 'anton-docs:first');
+		});
+	});
+
+	test('a missing preferred specialist falls back only to another concrete ACP route', async () => {
+		await withAcpSession(async f => {
+			Object.assign(f.stack, { specialists: new Map([...f.stack.specialists].filter(([id]) => id !== 'anton-code')) });
+			await f.receive({ type: 'selectModel', conversationId: 'first', model: f.model, specialistId: 'anton-spec' });
+			assert.equal(f.session.currentSpecialistId, 'anton-test');
+			await f.session.handleSendMessage({ text: 'Still available', model: f.model, specialistId: 'anton-spec', includeWorkspaceContext: false });
+			assert.equal(f.turns[0].conversationId, 'anton-test:first');
+		});
+	});
+
+	test('unavailable adapter selection is rejected atomically and sends settle before persistence or hooks', async () => {
+		await withAcpSession(async f => {
+			f.settings['sota.acp.agents'] = [];
+			Object.assign(f.session, { hookRunner: { fire: () => assert.fail('Route validation precedes hooks') }, checkpointManager: { capture: () => assert.fail('Route validation precedes checkpoints') } });
+			await f.receive({ type: 'selectModel', conversationId: 'first', model: f.model, specialistId: 'anton-spec' });
+			assert.deepEqual([f.session.currentModel, f.session.currentSpecialistId], ['sonnet', 'anton']);
+			assert.match(String(f.messages.findLast(message => message.type === 'chatSelection')?.error), /Browse ACP Adapters/);
+			await f.session.handleSendMessage({ text: 'Keep this prompt', model: f.model, specialistId: 'anton-spec', requestId: 'rejected-adapter' });
+			assert.match(String(f.messages.findLast(message => message.type === 'streamError')?.error), /Browse ACP Adapters/);
+			assert.equal(f.messages.findLast(message => message.type === 'requestSettled')?.requestId, 'rejected-adapter');
+			assert.deepEqual(f.conversations.get('first'), []); assert.equal(f.turns.length, 0); assert.equal(f.session.abortController, undefined);
+		});
+	});
+
+	test('a retired catalog and a missing bridge cannot fall through to native inference', async () => {
+		await withAcpSession(async f => {
+			replaceDiscoveredModels({ provider: 'acp', acpAdapterId: 'chat-route-codex' }, []);
+			await f.session.handleSendMessage({ text: 'Retired', model: f.model, specialistId: 'anton-spec' });
+			assert.match(String(f.messages.findLast(message => message.type === 'streamError')?.error), /model is unavailable/);
+			Object.assign(f.session, { agentBridge: undefined });
+			await f.session.handleSendMessage({ text: 'No bridge', model: f.otherModel, specialistId: 'anton-spec' });
+			assert.match(String(f.messages.findLast(message => message.type === 'streamError')?.error), /configured agent adapter/);
+			assert.deepEqual(f.conversations.get('first'), []); assert.equal(f.turns.length, 0);
+		});
+	});
+
+	test('queued and redirect drafts validate before acceptance or cancellation, and revalidate at dispatch', async () => {
+		await withAcpSession(async f => {
+			const controller = new AbortController(); f.session.abortController = controller;
+			await f.receive({ type: 'queueMessage', conversationId: 'first', id: 'queued', text: 'Queued prompt', model: f.model, specialistId: 'anton-spec' });
+			assert.equal(f.messages.findLast(message => message.type === 'queueAccepted')?.id, 'queued');
+			f.settings['sota.acp.agents'] = [];
+			await f.receive({ type: 'redirectMessage', conversationId: 'first', id: 'invalid-redirect', text: 'Keep active turn', model: f.model, specialistId: 'anton-spec' });
+			assert.equal(controller.signal.aborted, false); assert.equal(f.messages.findLast(message => message.type === 'queueError')?.id, 'invalid-redirect');
+			f.session.abortController = undefined;
+			await f.receive({ type: 'queueAction', conversationId: 'first', queueAction: 'resume' });
+			for (let wait = 0; f.session.abortController && wait < 50; wait++) await new Promise<void>(resolve => setImmediate(resolve));
+			const queue = (f.session as unknown as { followupQueue: ChatTurnQueue<{ text?: string; specialistId?: string }> }).followupQueue.snapshot('first');
+			assert.equal(queue.paused, true); assert.equal(queue.entries[0]?.draft.text, 'Queued prompt'); assert.equal(queue.entries[0]?.draft.specialistId, 'anton-code');
+			assert.deepEqual(f.conversations.get('first'), []); assert.equal(f.turns.length, 0);
+		});
+	});
+
+	test('history and defaults that restore incompatible personas are normalized by the actual send path', async () => {
+		await withAcpSession(async f => {
+			const load = f.store.load;
+			f.store.load = id => { const record = load(id); return record && { ...record, summary: { ...record.summary, ...(id === 'second' ? { lastModel: f.model, lastSpecialist: 'custom-persona' } : {}) } }; };
+			f.session.switchConversation('second');
+			assert.equal(f.session.currentModel, f.model); assert.equal(f.session.currentSpecialistId, 'anton-code');
+			await f.session.handleSendMessage({ text: 'Restored selection', includeWorkspaceContext: false });
+			assert.equal(f.session.currentSpecialistId, 'anton-code'); assert.equal(f.turns[0].agent.id, 'chat-route-codex');
+			await f.receive({ type: 'selectSpecialist', conversationId: 'second', model: f.model, specialistId: 'anton-spec' });
+			assert.equal(f.session.currentSpecialistId, 'anton-code');
+		});
+	});
+
+	test('slash model changes acknowledge the previous pair and specialist changes report the resolved persona', async () => {
+		await withAcpSession(async f => {
+			f.session.currentSpecialistId = 'anton-spec';
+			await f.session.handleSendMessage({ text: `/model ${f.model}` });
+			assert.deepEqual(f.messages.findLast(message => message.type === 'chatSelection'), { type: 'chatSelection', conversationId: 'first', requestedModel: 'sonnet', requestedSpecialistId: 'anton-spec', model: f.model, specialistId: 'anton-code', error: undefined });
+			await f.session.handleSendMessage({ text: '/specialist anton-spec' });
+			assert.equal(f.session.currentSpecialistId, 'anton-code');
+			assert.match(String(f.conversations.get('first')?.at(-1)?.content), /Switched specialist to \*\*Anton Code\*\*/);
+			assert.equal(f.turns.length, 0);
+		});
+	});
+});
 
 suite('Chat turn ownership', () => {
 	test('webview bootstrap replays the active binding and available transcript text without restarting', async () => {
