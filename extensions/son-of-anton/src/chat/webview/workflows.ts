@@ -115,10 +115,27 @@ export function renderProviderInventory(root: HTMLElement, snapshot: {
 
 interface LocalModelCatalog { source: string; updatedAt: number; models: Array<{ id: string; label: string }> }
 function appendLocalModels(root: HTMLElement, catalog: LocalModelCatalog, text: Text): void {
-	const details = document.createElement('details'); const summary = document.createElement('summary'); summary.textContent = text('localModelCatalog', catalog.models.length); details.append(summary);
-	const source = document.createElement('p'); source.textContent = text('localModelCatalogSource', catalog.source, new Date(catalog.updatedAt).toLocaleString()); details.append(source);
-	const scope = document.createElement('p'); scope.textContent = text('localModelsNeedAdapter'); details.append(scope);
-	for (const model of catalog.models) { const row = document.createElement('p'); row.textContent = `${model.label} · ${model.id}`; details.append(row); }
+	const details = document.createElement('details');
+	const summary = document.createElement('summary');
+	summary.textContent = text('localModelCatalog', catalog.models.length);
+	details.append(summary);
+	const source = document.createElement('p');
+	source.textContent = text('localModelCatalogSource', catalog.source, new Date(catalog.updatedAt).toLocaleString());
+	details.append(source);
+	const scope = document.createElement('p');
+	scope.textContent = text('localModelsNeedAdapter');
+	details.append(scope);
+	const limit = 200;
+	for (const model of catalog.models.slice(0, limit)) {
+		const row = document.createElement('p');
+		row.textContent = `${model.label} · ${model.id}`;
+		details.append(row);
+	}
+	if (catalog.models.length > limit) {
+		const more = document.createElement('p');
+		more.textContent = `+${text('models', catalog.models.length - limit)}`;
+		details.append(more);
+	}
 	root.append(details);
 }
 
