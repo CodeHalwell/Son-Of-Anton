@@ -39,10 +39,10 @@ jobs:
         run: |
           npm --prefix son-of-anton-core run build
           npm --prefix son-of-anton-cli run build
-      - name: Protocol, isolation and upgrade regressions
+      - name: Protocol, checkpoint, isolation and upgrade regressions
         shell: bash
         run: |
-          node --test son-of-anton-core/dist/acp/*.test.js son-of-anton-core/dist/workspace/*.test.js
+          node --test son-of-anton-core/dist/acp/*.test.js son-of-anton-core/dist/checkpoint/*.test.js son-of-anton-core/dist/workspace/*.test.js
           node --test son-of-anton-cli/dist/test/updateInstall.test.js son-of-anton-cli/scripts/lib/file-operations.test.mjs
       - name: Build and verify installed binary
         run: npm run package:${{ matrix.target }}

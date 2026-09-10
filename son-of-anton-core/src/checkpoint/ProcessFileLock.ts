@@ -35,7 +35,17 @@ export async function atomicCheckpointWrite(destination: string, body: string, o
 	try {
 		const handle = await fsp.open(temporary, 'wx', 0o600);
 		try { await handle.writeFile(body); await handle.sync(); } finally { await handle.close(); }
-		await fsp.rename(temporary, destination); onCommitted?.();
+		for (let attempt = 0; ; attempt++) {
+			try { await fsp.rename(temporary, destination); break; }
+			catch (error) {
+				const code = (error as NodeJS.ErrnoException).code;
+				if (process.platform !== 'win32' || (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY') || attempt >= 20) { throw error; }
+				// Another process can briefly hold the old metadata open on Windows. Keep it
+				// published while retrying: unlinking a choosing ticket would break exclusion.
+				await new Promise<void>(resolve => setTimeout(resolve, Math.min(100, (attempt + 1) * 10)));
+			}
+		}
+		onCommitted?.();
 	} finally { await fsp.rm(temporary, { force: true }); }
 }
 
