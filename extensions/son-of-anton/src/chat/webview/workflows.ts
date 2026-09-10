@@ -88,8 +88,8 @@ export function renderContext(root: HTMLElement, sections: Array<{ id: string; l
 /** Discovery reports installation, credentials, catalog access and inference separately. */
 export function renderProviderInventory(root: HTMLElement, snapshot: {
 	updatedAt: number;
-	software: Array<{ name: string; installed: boolean; auth: string; configFiles: string[] }>;
-	providers: Array<{ id: string; name: string; credentialSource: string; catalogStatus: string; inferenceStatus: string; catalogScope?: string; fetchedAt?: number; models: readonly object[]; error?: string; truncated?: boolean }>;
+	software: Array<{ name: string; installed: boolean; auth: string; configFiles: string[]; configuredModels?: string[]; modelCatalog?: LocalModelCatalog }>;
+	providers: Array<{ id: string; name: string; credentialSource: string; catalogStatus: string; inferenceStatus: string; catalogScope?: string; fetchedAt?: number; models: readonly object[]; error?: string; truncated?: boolean; localModelCatalog?: LocalModelCatalog }>;
 }, text: Text): void {
 	root.replaceChildren();
 	const status = document.createElement('p'); status.textContent = text('discoveryUpdated', snapshot.updatedAt ? new Date(snapshot.updatedAt).toLocaleString() : text('notChecked')); root.append(status);
@@ -100,14 +100,43 @@ export function renderProviderInventory(root: HTMLElement, snapshot: {
 		const details = document.createElement('span'); details.textContent = `${provider.catalogStatus.replaceAll('-', ' ')} · ${text('models', provider.models.length)} · ${text('credentials', provider.credentialSource.replaceAll('-', ' '))} · ${text('inference', provider.inferenceStatus.replaceAll('-', ' '))}`; row.append(details);
 		if (provider.error || provider.truncated) { const note = document.createElement('p'); note.textContent = provider.error || text('catalogTruncated'); row.append(note); }
 		if (provider.catalogScope) { const scope = document.createElement('p'); scope.textContent = provider.catalogScope; row.append(scope); }
+		if (provider.localModelCatalog) { appendLocalModels(row, provider.localModelCatalog, text); }
 		list.append(row);
 	}
 	root.append(list);
 	const tools = document.createElement('details'); const summary = document.createElement('summary'); summary.textContent = text('detectedCodingTools'); tools.append(summary);
 	for (const software of snapshot.software.filter(item => item.installed || item.configFiles.length)) {
 		const item = document.createElement('p'); item.textContent = `${software.name} · ${software.installed ? text('installed') : text('configurationFound')} · ${software.auth === 'file-present' ? text('authFilePresent') : text('authNotDetected')}`; tools.append(item);
+		if (software.modelCatalog) { appendLocalModels(tools, software.modelCatalog, text); }
+		else if (software.configuredModels?.length) { const models = document.createElement('p'); models.textContent = text('localModelCatalog', software.configuredModels.join(', ')); tools.append(models); }
 	}
 	root.append(tools);
+}
+
+interface LocalModelCatalog { source: string; updatedAt: number; models: Array<{ id: string; label: string }> }
+function appendLocalModels(root: HTMLElement, catalog: LocalModelCatalog, text: Text): void {
+	const details = document.createElement('details');
+	const summary = document.createElement('summary');
+	summary.textContent = text('localModelCatalog', catalog.models.length);
+	details.append(summary);
+	const source = document.createElement('p');
+	source.textContent = text('localModelCatalogSource', catalog.source, new Date(catalog.updatedAt).toLocaleString());
+	details.append(source);
+	const scope = document.createElement('p');
+	scope.textContent = text('localModelsNeedAdapter');
+	details.append(scope);
+	const limit = 200;
+	for (const model of catalog.models.slice(0, limit)) {
+		const row = document.createElement('p');
+		row.textContent = `${model.label} · ${model.id}`;
+		details.append(row);
+	}
+	if (catalog.models.length > limit) {
+		const more = document.createElement('p');
+		more.textContent = `+${text('models', catalog.models.length - limit)}`;
+		details.append(more);
+	}
+	root.append(details);
 }
 
 export { TimelineWindow } from './TimelineWindow';
