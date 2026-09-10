@@ -90,6 +90,16 @@ export class ConversationStorage {
 			throw new Error('Conversation manifest failed its integrity check.', { cause: error });
 		}
 	}
+	/** Read one conversation's metadata without scanning history or opening message pages. */
+	async getSummaryAsync(id: string, signal?: AbortSignal): Promise<ConversationSummary | undefined> {
+		signal?.throwIfAborted();
+		let summary: ConversationSummary | undefined;
+		try { summary = (await this.manifestAsync(path.join(this.folder(id), 'manifest.json'), id))?.summary; }
+		catch { /* Damaged metadata is reported by manifestAsync without hiding healthy search results. */ }
+		signal?.throwIfAborted();
+		return summary;
+	}
+
 	async listAsync(signal?: AbortSignal): Promise<ConversationSummary[]> {
 		let entries: fs.Dirent[];
 		try { entries = await fsp.readdir(this.directory, { withFileTypes: true }); }

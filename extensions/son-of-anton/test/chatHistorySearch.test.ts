@@ -13,14 +13,14 @@ interface HistorySession {
 	dispose(): void;
 }
 
-function fixture() {
+function fixture(readSummary = async (_id: string, _signal: AbortSignal) => ({ title: 'The active conversation' })) {
 	const posted: Array<{ activeTitle: string; query: string; historyScope: string; total: number; append: boolean; conversations: Array<{ inCurrentWorkspace: boolean }> }> = [];
 	const pending: Array<{ query?: string; signal: AbortSignal; resolve: (result: SearchResult) => void; reject: (error: Error) => void }> = [];
 	const session = Object.assign(Object.create(ChatSession.prototype), {
 		historyFilter: { query: 'first', scope: 'active', workspaceOnly: false },
 		currentConversationId: 'conversation', disposables: [], pendingApprovals: new Map(), followupQueue: { clear() {} },
 		conversationStore: {
-			getSummary: () => ({ title: 'The active conversation' }),
+			getSummaryAsync: readSummary,
 			load() { throw new Error('History must not load the active transcript'); },
 			search() { throw new Error('History must not load transcripts synchronously'); },
 			listForWorkspace() { throw new Error('History must not reload all manifests to decorate a result'); },
@@ -51,6 +51,19 @@ suite('History search lifecycle', () => {
 		const search = session.postHistorySnapshot();
 		session.dispose(); pending[0].resolve({ items: [], total: 2 }); await search;
 		assert.deepStrictEqual({ cancelled: pending[0].signal.aborted, posted }, { cancelled: true, posted: [] });
+	});
+
+	test('a superseded active-title lookup cannot overwrite the latest history snapshot', async () => {
+		const summaries: Array<{ signal: AbortSignal; resolve: (value: { title: string }) => void }> = [];
+		const { session, pending, posted } = fixture((_id, signal) => new Promise(resolve => summaries.push({ signal, resolve })));
+		const first = session.postHistorySnapshot();
+		pending[0].resolve({ items: [], total: 99 }); await Promise.resolve();
+		const latest = session.postHistorySnapshot();
+		pending[1].resolve({ items: [], total: 0 }); await Promise.resolve();
+		summaries[1].resolve({ title: 'Current title' }); await latest;
+		summaries[0].resolve({ title: 'Obsolete title' }); await first;
+		assert.deepStrictEqual({ cancelled: summaries.map(request => request.signal.aborted), results: posted.map(({ activeTitle, total }) => ({ activeTitle, total })) }, { cancelled: [true, false], results: [{ activeTitle: 'Current title', total: 0 }] });
+		session.dispose();
 	});
 
 	test('handles a cancelled search rejection and lets its replacement finish', async () => {

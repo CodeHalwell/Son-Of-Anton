@@ -179,6 +179,28 @@ async function withAcpSession(run: (fixture: ReturnType<typeof createSession> & 
 }
 
 suite('ACP chat model routing', () => {
+	test('only completed ACP transport attempts refresh the model catalog, even if the composer changes mid-turn', async () => {
+		await withAcpSession(async f => {
+			const refreshes: boolean[] = [];
+			Object.assign(f.session, { postProviderCatalog: (includeModels: boolean) => refreshes.push(includeModels) });
+			const run = f.stack.acpRuntime!.run;
+			f.stack.acpRuntime!.run = async turn => {
+				const result = await run(turn);
+				f.session.currentModel = 'sonnet'; f.session.currentSpecialistId = 'anton';
+				return result;
+			};
+			await f.session.handleSendMessage({ text: 'Connect the adapter', specialistId: 'anton-code', model: f.model, includeWorkspaceContext: false });
+			await f.session.handleSendMessage({ text: '/help' });
+			assert.deepEqual({ refreshes, turns: f.turns.length }, { refreshes: [true, false], turns: 1 });
+		});
+		await withCatalogNativeSession({ tools: false }, async f => {
+			const refreshes: boolean[] = [];
+			Object.assign(f.session, { postProviderCatalog: (includeModels: boolean) => refreshes.push(includeModels) });
+			await f.session.handleSendMessage({ text: 'Native provider turn', model: f.model, includeWorkspaceContext: false });
+			assert.deepEqual({ refreshes, requests: f.bodies.length }, { refreshes: [false], requests: 1 });
+		});
+	});
+
 	test('workspace preflight rejects ACP before hooks, context, persistence and runtime', async () => {
 		await withAcpSession(async f => {
 			const folder = vscode.workspace.workspaceFolders;

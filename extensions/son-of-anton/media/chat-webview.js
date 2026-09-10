@@ -8516,6 +8516,16 @@
 			return [...groups.values(), ...readBundledModelOptions().map(group => ({ ...group, label: uiText('bundledModelGroup', group.label) }))];
 		}
 
+		/** Restore saved choices without reintroducing ineffective ACP overrides. */
+		function restoreSettingsModelSelection(select, value, label) {
+			if (value && !canSelectAdapterModel(value, select.dataset.acpAgent)) {
+				select.value = '';
+				return;
+			}
+			if (value && ![...select.options].some(option => option.value === value)) select.add(new Option(label, value));
+			select.value = value;
+		}
+
 		function refreshSettingsModelOptions() {
 			const defaults = document.getElementById('settingsDefaultModel');
 			const selects = [defaults, ...document.querySelectorAll('#specialistModelsList select.specialist-row-model:not(:disabled)')].filter(Boolean);
@@ -8527,8 +8537,7 @@
 				const defaultOption = select.querySelector('option[value=""]');
 				if (select === defaults) defaultOption?.remove();
 				else if (defaultLabel && defaultOption) defaultOption.textContent = defaultLabel;
-				if (value && ![...select.options].some(option => option.value === value)) select.add(new Option(selectedLabel, value));
-				select.value = value;
+				restoreSettingsModelSelection(select, value, selectedLabel);
 				select.dataset.modelsReady = 'true';
 			}
 		}
@@ -8590,18 +8599,15 @@
 					+ '</div>';
 			});
 			list.innerHTML = rows.join('');
-			// Apply the selected value after the markup is in the DOM —
-			// setting `select.value` directly is more reliable than
-			// emitting `selected` attributes inline, since unknown values
-			// (e.g. a model id removed from the menu) cleanly fall back to
-			// the empty default rather than rendering as an orphan option.
+			// Restore selectable saved values after the markup is in the DOM.
+			// Ineffective ACP overrides display the adapter default without
+			// rewriting the user's persisted setting during rendering.
 			entries.forEach((entry) => {
 				const handle = typeof entry.handle === 'string' ? entry.handle : '';
 				const value = typeof entry.value === 'string' ? entry.value : '';
 				const sel = list.querySelector('select.specialist-row-model[data-handle="' + handle + '"]');
 				if (sel) {
-					if (value && ![...sel.options].some(option => option.value === value)) sel.add(new Option(entry.acpAgent ? uiText('adapterDefault', entry.acpAgent) : MODEL_LABELS.get(value) || value, value));
-					sel.value = value;
+					restoreSettingsModelSelection(sel, value, MODEL_LABELS.get(value) || value);
 				}
 			});
 		}

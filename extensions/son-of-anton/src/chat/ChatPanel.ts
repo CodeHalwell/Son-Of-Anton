@@ -94,6 +94,7 @@ interface ChatTurn {
 	failed?: boolean;
 	userMessagePersisted?: boolean;
 	checkpointCancelled?: boolean;
+	usedAcpTransport?: boolean;
 }
 
 interface WebviewMessage {
@@ -1556,6 +1557,11 @@ export class ChatSession {
 			if (this.disposed || controller.signal.aborted || this.historySearchController !== controller) {
 				return;
 			}
+			const activeId = this.currentConversationId;
+			const activeSummary = await this.conversationStore.getSummaryAsync?.(activeId, controller.signal);
+			if (this.disposed || controller.signal.aborted || this.historySearchController !== controller || this.currentConversationId !== activeId) {
+				return;
+			}
 			const summaries = result.items.map(s => ({
 				id: s.id,
 				title: s.title,
@@ -1569,8 +1575,8 @@ export class ChatSession {
 			}));
 			this.webview.postMessage({
 				type: 'historySnapshot',
-				activeId: this.currentConversationId,
-				activeTitle: this.conversationStore.getSummary?.(this.currentConversationId)?.title,
+				activeId,
+				activeTitle: activeSummary?.title,
 				conversations: summaries,
 				query: filter.query, historyScope: filter.scope, workspaceOnly: filter.workspaceOnly,
 				total: result.total, nextOffset: result.nextOffset, append: offset > 0,
@@ -3034,7 +3040,7 @@ export class ChatSession {
 			}
 			if (this.ownsTurn(turn)) {
 				this.webview.postMessage({ type: 'requestSettled', conversationId: turn.conversationId, requestId: turn.requestId, turnId: turn.turnId, cancelled: turn.controller.signal.aborted });
-				this.postProviderCatalog();
+				this.postProviderCatalog(turn.usedAcpTransport === true);
 				this.abortController = undefined; this.activeTurn = undefined;
 				if ((turn.failed || turn.controller.signal.aborted) && !redirected) { this.followupQueue.pause(turn.conversationId); }
 				this.dispatchNextQueued();
@@ -3969,6 +3975,7 @@ export class ChatSession {
 				});
 			} else {
 				// The selected mode and multimodal payload follow every specialist route.
+				owner.usedAcpTransport = this.agentBridge.getCapabilities?.(specialistId, model)?.transport === 'acp';
 				await this.agentBridge.runSpecialist(specialistId as AgentHandle, fullPrompt, emit, cancellationSource.token, model, workspaceContextSnapshot, owner.conversationId, executionOptions);
 			}
 		} catch (err) {

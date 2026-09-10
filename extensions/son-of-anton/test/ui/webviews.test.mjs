@@ -963,11 +963,31 @@ test('specialist models: ACP routes keep model pickers available without offerin
 	await post(page, { type: 'specialistModelsState', entries: [{ handle: 'anton-docs', displayName: 'Anton Docs', defaultModel: 'haiku', value: 'sonnet', pinned: true, acpAgent: 'local-anton-docs' }] });
 	const model = page.getByRole('combobox', { name: 'Model for @anton-docs' });
 	assert.equal(await model.isEnabled(), true);
-	assert.equal(await model.inputValue(), 'sonnet');
+	assert.equal(await model.inputValue(), '');
+	assert.equal(await model.locator('option[value="sonnet"]').count(), 0);
 	assert.match(await model.locator('option:checked').textContent(), /local-anton-docs.*Default Model/);
 	assert.equal(await model.locator('option[value="gpt-5"]').count(), 0);
 	assert.match(await page.locator('.specialist-row-status').textContent(), /ACP: local-anton-docs/);
 	await assertNoPageOverflow(page);
+});
+
+test('specialist models: catalog refreshes cannot restore incompatible ACP overrides and retain supported selections', async t => {
+	const page = await openSurface(t, 'chat', 900);
+	const entries = [
+		{ handle: 'anton-code', displayName: 'Anton Code', defaultModel: 'sonnet', value: 'gpt-5', acpAgent: 'claude-acp' },
+		{ handle: 'anton-docs', displayName: 'Anton Docs', defaultModel: 'haiku', value: 'claude-code-sonnet', acpAgent: 'claude-acp' },
+		{ handle: 'anton', displayName: 'Anton', defaultModel: 'sonnet', value: 'saved-native-model' },
+	];
+	await post(page, { type: 'specialistModelsState', entries });
+	const selects = page.locator('#specialistModelsList select');
+	const values = () => selects.evaluateAll(elements => elements.map(select => select.value));
+	assert.deepEqual(await values(), ['', 'claude-code-sonnet', 'saved-native-model']);
+	// Emulate an older rendered selection surviving into the catalog refresh path.
+	await selects.first().evaluate(select => { select.add(new Option('GPT-5', 'gpt-5')); select.value = 'gpt-5'; });
+	await post(page, { type: 'providerCatalog', snapshot: { providers: [], software: [] } });
+	assert.deepEqual(await values(), ['', 'claude-code-sonnet', 'saved-native-model']);
+	assert.equal(await selects.first().locator('option[value="gpt-5"]').count(), 0);
+	assert.equal(await page.evaluate(() => sentMessages.filter(message => message.type === 'setSpecialistModel').length), 0);
 });
 
 test('history restores the selected specialist and retains each response author and unavailable usage', async t => {
