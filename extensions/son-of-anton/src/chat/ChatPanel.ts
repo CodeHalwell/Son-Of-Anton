@@ -5411,7 +5411,7 @@ export class ChatSession {
 		<div class="popover model-picker" id="modelMenu" hidden role="dialog" data-ui-label="chooseModel">
 			<div class="model-search"><input type="search" id="modelSearch" data-ui-label="searchModels" data-ui-placeholder="searchModels" autocomplete="off" spellcheck="false" /></div>
 			<p class="model-search-empty" id="modelSearchEmpty" hidden data-ui-text="noModels"></p>
-			<div class="popover-section-label">Claude (latest)</div>
+			<div class="popover-section-label">Claude</div>
 			<button class="popover-item" role="menuitem" data-model="claude-opus-4-7"><span class="item-check"></span>Claude Opus 4.7<span class="item-key">complex</span></button>
 			<button class="popover-item" role="menuitem" data-model="claude-sonnet-4-7"><span class="item-check"></span>Claude Sonnet 4.7<span class="item-key">balanced</span></button>
 			<button class="popover-item" role="menuitem" data-model="claude-haiku-4-7"><span class="item-check"></span>Claude Haiku 4.7<span class="item-key">fast</span></button>

@@ -14,6 +14,7 @@ import { MissingCredentialError } from '../auth/types';
 import { readBoundedFile } from '../util/readBoundedFile';
 import { object, type AcpAgentDefinition } from '../acp/protocol';
 import { bedrockFamilyCapabilities, isBedrockSemanticFamily, supportsBedrockClaude } from './BedrockModels';
+import { readLocalModelInventory, type LocalModelInventory } from './LocalModelInventory';
 import { createAcpCatalogPolicy, discoveredAcpModels, discoveredModelId, getDiscoveredModel, registerDiscoveredModels, replaceDiscoveredModels, type CatalogProvider, type DiscoveredModel, type CapabilityAvailability } from './DiscoveredModels';
 
 export interface DiscoveredSoftware {
@@ -26,6 +27,7 @@ export interface DiscoveredSoftware {
 	/** Presence is not validation; private auth payloads are never loaded or exported. */
 	auth: 'file-present' | 'not-detected';
 	configuredModels: string[];
+	modelCatalog?: LocalModelInventory;
 }
 export interface DiscoveredProvider {
 	id: CatalogProvider;
@@ -43,6 +45,8 @@ export interface DiscoveredProvider {
 	truncated?: boolean;
 	/** The entire supported configured model inventory was read successfully; this does not verify management access or inference entitlement. */
 	configurationComplete?: boolean;
+	/** Models observed in another application's cache; not an executable catalog. */
+	localModelCatalog?: LocalModelInventory;
 }
 export interface ProviderDiscoverySnapshot {
 	version: 1;
@@ -246,7 +250,11 @@ export class ProviderDiscovery {
 		}));
 		this.reconcileAcpConfiguration();
 		// Z.AI's row is scanned above so its credential source can be reported independently.
-		discovered.push(...this.configuredProviders().filter(provider => provider.id !== 'zai'));
+		discovered.push(...this.configuredProviders().filter(provider => provider.id !== 'zai').map(provider => {
+			const tool = provider.id === 'claude-code' ? 'claude' : provider.id === 'codex' ? 'codex' : undefined;
+			const localModelCatalog = tool && software.find(item => item.id === tool)?.modelCatalog;
+			return localModelCatalog ? { ...provider, localModelCatalog } : provider;
+		}));
 		this.controller.signal.throwIfAborted();
 		this.value = { version: 1, updatedAt: Date.now(), software, providers: discovered.sort((a, b) => a.name.localeCompare(b.name)) };
 		for (const provider of discovered) {
@@ -475,13 +483,13 @@ async function discoverSoftware(home: string, env: NodeJS.ProcessEnv): Promise<D
 	const config = env.XDG_CONFIG_HOME || path.join(home, '.config');
 	const codex = env.CODEX_HOME || path.join(home, '.codex');
 	const specs = [
-		{ id: 'claude', name: 'Claude Code', commands: ['claude'], apps: [], files: [path.join(home, '.claude/settings.json'), path.join(home, '.claude.json')], auth: [path.join(home, '.claude/.credentials.json')] },
+		{ id: 'claude', name: 'Claude Code', commands: ['claude'], apps: ['Claude.app'], files: [path.join(home, '.claude/settings.json'), path.join(home, '.claude.json')], auth: [path.join(home, '.claude/.credentials.json')] },
 		{ id: 'codex', name: 'Codex', commands: ['codex'], apps: ['Codex.app'], files: [path.join(codex, 'config.toml')], auth: [path.join(codex, 'auth.json')] },
 		{ id: 'kimi', name: 'Kimi Code', commands: ['kimi'], files: [path.join(home, '.kimi/config.toml')] },
 		{ id: 'gemini', name: 'Gemini CLI', commands: ['gemini'], files: [path.join(home, '.gemini/settings.json')], auth: [path.join(home, '.gemini/oauth_creds.json')] },
 		{ id: 'cursor', name: 'Cursor', commands: ['cursor', 'cursor-agent'], apps: ['Cursor.app'], files: [path.join(home, '.cursor/cli-config.json')] },
 		{ id: 'vscode', name: 'Visual Studio Code', commands: ['code', 'code-insiders'], apps: ['Visual Studio Code.app', 'Visual Studio Code - Insiders.app'], files: [] },
-		{ id: 'opencode', name: 'OpenCode', commands: ['opencode'], files: [path.join(config, 'opencode/opencode.json'), path.join(config, 'opencode/opencode.jsonc')], auth: [path.join(env.XDG_DATA_HOME || path.join(home, '.local/share'), 'opencode/auth.json')] },
+		{ id: 'opencode', name: 'OpenCode', commands: ['opencode'], apps: ['OpenCode.app'], files: [path.join(config, 'opencode/opencode.json'), path.join(config, 'opencode/opencode.jsonc')], auth: [path.join(env.XDG_DATA_HOME || path.join(home, '.local/share'), 'opencode/auth.json')] },
 		{ id: 'aider', name: 'Aider', commands: ['aider'], files: [path.join(home, '.aider.conf.yml')] },
 		{ id: 'goose', name: 'Goose', commands: ['goose'], apps: ['Goose.app'], files: [path.join(config, 'goose/config.yaml')] },
 		{ id: 'continue', name: 'Continue', commands: ['cn'], files: [path.join(home, '.continue/config.yaml'), path.join(home, '.continue/config.json')], extension: 'continue.continue-' },
@@ -489,7 +497,7 @@ async function discoverSoftware(home: string, env: NodeJS.ProcessEnv): Promise<D
 		{ id: 'roo', name: 'Roo Code', commands: [], files: [], extension: 'rooveterinaryinc.roo-cline-' },
 		{ id: 'copilot', name: 'GitHub Copilot', commands: ['copilot'], files: [], extension: 'github.copilot-' },
 		{ id: 'windsurf', name: 'Windsurf', commands: ['windsurf'], apps: ['Windsurf.app'], files: [path.join(home, '.codeium/windsurf/mcp_config.json')] },
-		{ id: 'antigravity', name: 'Antigravity', commands: ['antigravity'], apps: ['Antigravity.app'], files: [path.join(home, '.gemini/antigravity/mcp_config.json')] },
+		{ id: 'antigravity', name: 'Antigravity', commands: ['antigravity'], apps: ['Antigravity.app', 'Antigravity IDE.app'], files: [path.join(home, '.gemini/antigravity/mcp_config.json')] },
 		{ id: 'zed', name: 'Zed', commands: ['zed'], apps: ['Zed.app'], files: [path.join(config, 'zed/settings.json')] },
 		{ id: 'ollama', name: 'Ollama', commands: ['ollama'], apps: ['Ollama.app'], files: [] },
 		{ id: 'lmstudio', name: 'LM Studio', commands: ['lms'], apps: ['LM Studio.app'], files: [] },
@@ -497,7 +505,7 @@ async function discoverSoftware(home: string, env: NodeJS.ProcessEnv): Promise<D
 	const extensionDirs = [path.join(home, '.vscode/extensions'), path.join(home, '.vscode-insiders/extensions'), path.join(home, '.cursor/extensions'), path.join(home, '.windsurf/extensions')];
 	const extensions = (await Promise.all(extensionDirs.map(async directory => { try { return (await readdir(directory)).slice(0, 5000); } catch { return []; } }))).flat();
 	return Promise.all(specs.map(async spec => {
-		const executable = await findExecutable(spec.commands, env);
+		const executable = await findExecutable(spec.commands, home, env);
 		let application: string | undefined;
 		for (const app of spec.apps ?? []) { for (const base of ['/Applications', path.join(home, 'Applications')]) { const filename = path.join(base, app); if (await exists(filename)) { application = filename; break; } } }
 		const configFiles: string[] = [], models = new Set<string>();
@@ -510,18 +518,26 @@ async function discoverSoftware(home: string, env: NodeJS.ProcessEnv): Promise<D
 				if (!object(parsed)) { continue; }
 				// Read only documented model fields, never recursively enumerate potentially secret values.
 				for (const value of [parsed.model, parsed['weak-model'], parsed['editor-model'], parsed.GOOSE_MODEL]) { if (typeof value === 'string' && safeModelReference(value)) { models.add(value); } }
-				if (object(parsed.model) && typeof parsed.model.name === 'string' && safeModelReference(parsed.model.name)) { models.add(parsed.model.name); }
+				if (object(parsed.model)) { for (const value of [parsed.model.name, parsed.model.modelId]) { if (typeof value === 'string' && safeModelReference(value)) { models.add(value); } } }
+				if (object(parsed.selectedModel) && typeof parsed.selectedModel.modelId === 'string' && safeModelReference(parsed.selectedModel.modelId)) { models.add(parsed.selectedModel.modelId); }
 				if (Array.isArray(parsed.models)) { for (const model of parsed.models.slice(0, 100)) { if (object(model) && typeof model.model === 'string' && safeModelReference(model.model)) { models.add(model.model); } } }
 			} catch { /* Config presence remains visible even when its format/version cannot be parsed. */ }
 		}
 		let auth: DiscoveredSoftware['auth'] = 'not-detected';
 		for (const filename of spec.auth ?? []) { if (await exists(filename)) { auth = 'file-present'; break; } }
-		return { id: spec.id, name: spec.name, installed: !!executable || !!application || !!spec.extension && extensions.some(name => name.toLowerCase().startsWith(spec.extension!)), executable, application, configFiles, auth, configuredModels: [...models] };
+		const modelCatalog = await readLocalModelInventory(spec.id, home, env);
+		return { id: spec.id, name: spec.name, installed: !!executable || !!application || !!spec.extension && extensions.some(name => name.toLowerCase().startsWith(spec.extension!)), executable, application, configFiles, auth, configuredModels: [...models], ...(modelCatalog ? { modelCatalog } : {}) };
 	}));
 }
 
-async function findExecutable(commands: string[], env: NodeJS.ProcessEnv): Promise<string | undefined> {
-	const directories = (env.PATH ?? '').split(path.delimiter).filter(directory => path.isAbsolute(directory)).slice(0, 100);
+async function findExecutable(commands: string[], home: string, env: NodeJS.ProcessEnv): Promise<string | undefined> {
+	// Finder-launched macOS apps often lack the user's terminal PATH.
+	const directories = [...new Set([
+		...(env.PATH ?? '').split(path.delimiter).filter(directory => path.isAbsolute(directory)).slice(0, 100),
+		path.join(home, '.local/bin'), path.join(home, '.cargo/bin'), path.join(home, '.npm-global/bin'),
+		path.join(home, '.claude/local'), path.join(home, '.opencode/bin'),
+		...(process.platform === 'darwin' ? ['/opt/homebrew/bin', '/usr/local/bin'] : []),
+	])];
 	const suffixes = process.platform === 'win32' ? ['', '.exe', '.cmd', '.bat'] : [''];
 	for (const command of commands) { for (const directory of directories) { for (const suffix of suffixes) {
 		const filename = path.join(directory, command + suffix);
@@ -534,7 +550,7 @@ function text(value: unknown): string | undefined { return typeof value === 'str
 function flag(value: unknown): CapabilityAvailability { return typeof value === 'boolean' ? value : 'unknown'; }
 function positive(value: unknown): number | undefined { return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined; }
 function numeric(value: unknown): number | undefined { const result = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : NaN; return Number.isFinite(result) && result >= 0 ? result : undefined; }
-function safeModelReference(value: string): boolean { return value.length < 200 && /^[\w][\w./:@-]*$/.test(value) && !/^(?:sk-|Bearer|eyJ)/.test(value); }
+function safeModelReference(value: string): boolean { return value.length <= 512 && /^[\w][\w./:@+\[\]-]*$/.test(value) && !/^(?:sk-|Bearer|eyJ)/i.test(value); }
 function validSnapshot(value: unknown): value is ProviderDiscoverySnapshot {
 	return object(value) && value.version === 1 && typeof value.updatedAt === 'number' && Array.isArray(value.software) && Array.isArray(value.providers)
 		&& value.providers.every(provider => object(provider) && typeof provider.id === 'string' && Array.isArray(provider.models) && provider.models.every(model => object(model) && typeof model.id === 'string' && typeof model.provider === 'string' && typeof model.model === 'string'));

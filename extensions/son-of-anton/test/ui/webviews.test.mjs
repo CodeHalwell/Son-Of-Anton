@@ -1425,6 +1425,41 @@ test('provider catalogs isolate special object keys and retire removed picker me
 	assert.equal(await page.locator('#sendBtn').isDisabled(), false);
 });
 
+test('late provider catalogs refresh default and specialist settings from the full unfiltered model inventory', async t => {
+	const page = await openSurface(t, 'chat', 900);
+	await post(page, { type: 'settingsState', settings: { 'sota.defaultModel': 'gpt-5' } });
+	await post(page, { type: 'specialistModelsState', entries: [{ handle: 'anton-code', displayName: 'Anton Code', defaultModel: 'sonnet', value: 'haiku', pinned: true }] });
+	const models = Array.from({ length: 125 }, (_, index) => ({ id: `catalog:openai:future-${index}`, model: `future-${index}`, label: `Future Model ${index}`, chat: true }));
+	const snapshot = entries => ({ updatedAt: Date.now(), software: [], providers: [{ id: 'openai', name: 'OpenAI', credentialSource: 'setting', catalogStatus: 'ready', inferenceStatus: 'not-tested', models: entries }] });
+	await post(page, { type: 'providerCatalog', snapshot: snapshot(models) });
+	const defaults = page.locator('#settingsDefaultModel'); const specialist = page.locator('#specialistModelsList select');
+	assert.deepEqual(await Promise.all([defaults.inputValue(), specialist.inputValue()]), ['gpt-5', 'haiku']);
+	for (const select of [defaults, specialist]) assert.equal(await select.locator('option[value^="catalog:"]').count(), 125);
+	assert.equal(await page.locator('#modelMenu [data-model]').first().getAttribute('data-model'), models[0].id);
+	assert.equal(await page.locator('#modelMenu [data-discovered][data-model]').count(), 100);
+	await page.locator('#modelChip').click(); await screenshot(page, 'refreshed-model-catalog'); await page.locator('#modelSearch').fill('Future Model 124');
+	await post(page, { type: 'providerCatalog', snapshot: snapshot(models.slice(1)) });
+	for (const select of [defaults, specialist]) {
+		assert.equal(await select.locator('option[value^="catalog:"]').count(), 124);
+		assert.equal(await select.locator(`option[value="${models[0].id}"]`).count(), 0);
+		assert.equal(await select.locator('optgroup').first().getAttribute('label'), 'OpenAI');
+	}
+	assert.equal(await page.locator('#modelMenu [data-discovered][data-model]').count(), 1);
+	assert.deepEqual(await Promise.all([defaults.inputValue(), specialist.inputValue()]), ['gpt-5', 'haiku']);
+	assert.equal(await page.evaluate(() => sentMessages.filter(message => message.type === 'updateSetting' || message.type === 'setSpecialistModel').length), 0);
+});
+
+test('provider inventory shows current local model metadata without advertising an execution catalog', async t => {
+	const page = await openSurface(t, 'chat', 900);
+	const modelCatalog = { source: '/home/test/.codex/models_cache.json', updatedAt: Date.now(), models: [{ id: 'future-codex', label: 'Future Codex' }] };
+	await post(page, { type: 'providerCatalog', snapshot: { updatedAt: Date.now(), software: [{ name: 'Codex', installed: true, auth: 'file-present', configFiles: [], modelCatalog }], providers: [{ id: 'codex', name: 'Codex Subscription', credentialSource: 'none', catalogStatus: 'adapter-required', inferenceStatus: 'not-tested', models: [], localModelCatalog: modelCatalog }] } });
+	const inventory = page.locator('#providerDiscoveryStatus');
+	assert.match(await inventory.textContent(), /Future Codex · future-codex/);
+	assert.match(await inventory.textContent(), /models_cache.json/);
+	assert.match(await inventory.textContent(), /Configure an ACP adapter/);
+	assert.equal(await page.locator('[data-discovered][data-model]').count(), 0);
+});
+
 test('confirmed HTTP credential removal retires the selected model while missing evidence and lookup errors stay usable', async t => {
 	const page = await openSurface(t, 'chat', 400);
 	const model = { id: 'catalog:openai:credential-model', model: 'credential-model', label: 'Credential-backed model', chat: true };

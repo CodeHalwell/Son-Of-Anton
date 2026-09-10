@@ -4100,18 +4100,24 @@
 		let discoveredModels = [];
 		function renderDiscoveredModels(query = '') {
 			modelMenu.querySelectorAll('[data-discovered]').forEach(node => node.remove());
+			const catalog = document.createDocumentFragment();
 			const matching = discoveredModels.filter(model => [model.label, model.providerName, model.model].join(' ').toLocaleLowerCase().includes(query.toLocaleLowerCase()));
 			let previousProvider;
 			for (const model of matching.slice(0, 100)) {
-				if (previousProvider !== model.providerName) { const heading = document.createElement('div'); heading.className = 'popover-section-label'; heading.dataset.discovered = 'true'; heading.textContent = model.providerName; modelMenu.append(heading); previousProvider = model.providerName; }
+				if (previousProvider !== model.providerName) { const heading = document.createElement('div'); heading.className = 'popover-section-label'; heading.dataset.discovered = 'true'; heading.textContent = model.providerName; catalog.append(heading); previousProvider = model.providerName; }
 				const item = document.createElement('button'); item.type = 'button'; item.className = 'popover-item'; item.dataset.model = model.id; item.dataset.discovered = 'true'; item.setAttribute('role', 'menuitemradio'); item.setAttribute('aria-checked', String(model.id === currentModel));
 				const check = document.createElement('span'); check.className = 'item-check';
 				item.append(check, document.createTextNode(model.label));
-				item.addEventListener('focus', () => showModelTooltip(model.id, item)); item.addEventListener('blur', hideModelTooltip); modelMenu.append(item);
+				item.addEventListener('focus', () => showModelTooltip(model.id, item)); item.addEventListener('blur', hideModelTooltip); catalog.append(item);
 			}
-			if (matching.length > 100) { const note = document.createElement('div'); note.className = 'popover-section-label'; note.dataset.discovered = 'true'; note.textContent = uiText('narrowModelSearch', matching.length); modelMenu.append(note); }
+			if (matching.length > 100) { const note = document.createElement('p'); note.className = 'model-search-empty'; note.dataset.discovered = 'true'; note.textContent = uiText('narrowModelSearch', 100, matching.length); catalog.append(note); }
+			modelMenu.insertBefore(catalog, modelMenu.querySelector('.popover-section-label'));
 		}
 		const modelItems = Array.from(modelMenu.querySelectorAll('[data-model]'));
+		for (const group of modelMenu.querySelectorAll('.popover-section-label')) {
+			group.dataset.bundledLabel = group.textContent;
+			group.textContent = uiText('bundledModelGroup', group.textContent);
+		}
 		for (const item of modelItems) {
 			item.removeAttribute('role');
 			// A focusable element nested in a button is not a separate control.
@@ -4505,6 +4511,7 @@
 					for (const [id, metadata] of Object.entries(message.metadata || {})) { if (catalogIds.has(id)) MODEL_METADATA_RAW.set(id, metadata); }
 					for (const model of discoveredModels) MODEL_LABELS.set(model.id, model.label);
 					filterModels(); updateModelLabel(); updateModelMenuChecks();
+					refreshSettingsModelOptions();
 					if (message.snapshot) SotaWorkflows.renderProviderInventory(document.getElementById('providerDiscoveryStatus'), message.snapshot, uiText);
 					updateAuthGate(latestConnectionStatus);
 					break;
@@ -8443,7 +8450,7 @@
 		 * menu rather than re-listing models here so any future addition
 		 * (a new provider, a new tier) flows into this picker automatically.
 		 */
-		function readSpecialistModelOptions() {
+		function readBundledModelOptions() {
 			if (specialistModelOptionsCache) return specialistModelOptionsCache;
 			const menu = document.getElementById('modelMenu');
 			if (!menu) return [];
@@ -8451,8 +8458,9 @@
 			let current = null;
 			menu.childNodes.forEach((node) => {
 				if (!(node instanceof HTMLElement)) return;
+				if (node.hasAttribute('data-discovered')) return;
 				if (node.classList && node.classList.contains('popover-section-label')) {
-					current = { label: node.textContent || '', options: [] };
+					current = { label: node.dataset.bundledLabel || node.textContent || '', options: [] };
 					groups.push(current);
 					return;
 				}
@@ -8478,6 +8486,34 @@
 			});
 			specialistModelOptionsCache = groups;
 			return groups;
+		}
+
+		// Build from the complete catalog, not the searched/capped composer DOM.
+		// Settings may arrive before discovery, and catalog refreshes retire models.
+		function readSpecialistModelOptions() {
+			const groups = new Map();
+			for (const model of discoveredModels) {
+				if (!groups.has(model.providerName)) groups.set(model.providerName, { label: model.providerName, options: [] });
+				groups.get(model.providerName).options.push({ id: model.id, label: model.label });
+			}
+			return [...groups.values(), ...readBundledModelOptions().map(group => ({ ...group, label: uiText('bundledModelGroup', group.label) }))];
+		}
+
+		function refreshSettingsModelOptions() {
+			const defaults = document.getElementById('settingsDefaultModel');
+			const selects = [defaults, ...document.querySelectorAll('#specialistModelsList select.specialist-row-model:not(:disabled)')].filter(Boolean);
+			for (const select of selects) {
+				const value = select.value;
+				const selectedLabel = select.selectedOptions[0]?.textContent || value;
+				const defaultLabel = select.querySelector('option[value=""]')?.textContent;
+				select.innerHTML = buildSpecialistModelOptions('sonnet');
+				const defaultOption = select.querySelector('option[value=""]');
+				if (select === defaults) defaultOption?.remove();
+				else if (defaultLabel && defaultOption) defaultOption.textContent = defaultLabel;
+				if (value && ![...select.options].some(option => option.value === value)) select.add(new Option(selectedLabel, value));
+				select.value = value;
+				select.dataset.modelsReady = 'true';
+			}
 		}
 
 		/**

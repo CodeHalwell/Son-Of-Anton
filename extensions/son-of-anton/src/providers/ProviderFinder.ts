@@ -152,12 +152,18 @@ export class ProviderFinder implements vscode.Disposable {
 			items.push({ label: provider.name, kind: vscode.QuickPickItemKind.Separator });
 			if (!provider.models.length) { items.push({ label: provider.name, description: provider.catalogStatus, detail: provider.error ?? provider.catalogScope ?? vscode.l10n.t("No models discovered. Configure this provider or enable local server discovery."), setup: provider.id, command: ['acp', 'claude-code', 'codex'].includes(provider.id) ? 'sota.browseAcpAdapters' : undefined }); }
 			if (provider.models.length) { items.push({ label: vscode.l10n.t("Configure {0}", provider.name), setup: provider.id }); }
+			for (const model of provider.localModelCatalog?.models ?? []) {
+				items.push({ label: model.label, description: model.id, detail: vscode.l10n.t("Found in the local {0} catalog. Configure an ACP adapter to negotiate execution access.", provider.name), command: 'sota.browseAcpAdapters' });
+			}
 			for (const model of provider.models) {
 				items.push({ label: model.label, description: model.model, detail: model.chat === false ? vscode.l10n.t("Listed by provider; this model is not a chat model.") : vscode.l10n.t("Tools: {0} · Images: {1} · Pricing: {2}", String(model.tools), String(model.images), model.pricing ? vscode.l10n.t("Reported") : vscode.l10n.t("Unknown")), modelId: model.chat === false ? undefined : model.id });
 			}
 		}
 		items.push({ label: vscode.l10n.t("Installed Coding Software"), kind: vscode.QuickPickItemKind.Separator });
-		for (const software of snapshot.software.filter(item => item.installed || item.configFiles.length)) { items.push({ label: software.name, description: software.installed ? vscode.l10n.t("Installed") : vscode.l10n.t("Configuration Found"), detail: vscode.l10n.t("Sign-in file: {0}. Browse ACP adapters to configure an execution route.", software.auth), command: 'sota.browseAcpAdapters' }); }
+		for (const software of snapshot.software.filter(item => item.installed || item.configFiles.length)) {
+			const models = software.modelCatalog?.models.map(model => model.id) ?? software.configuredModels;
+			items.push({ label: software.name, description: software.installed ? vscode.l10n.t("Installed") : vscode.l10n.t("Configuration Found"), detail: vscode.l10n.t("Sign-in file: {0}. Models found: {1}. Browse ACP adapters to configure an execution route.", software.auth, models.join(', ') || vscode.l10n.t("None reported")), command: 'sota.browseAcpAdapters' });
+		}
 		const choice = await vscode.window.showQuickPick(items, { title: vscode.l10n.t("Coding Providers and Models"), matchOnDescription: true, matchOnDetail: true, placeHolder: vscode.l10n.t("Select a model to use as the default in new chats") });
 		if (choice?.command) { await vscode.commands.executeCommand(choice.command); return; }
 		if (choice?.setup) { await this.configureProvider(choice.setup); return; }
