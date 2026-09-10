@@ -161,6 +161,8 @@ async function withCatalogNativeSession(
 }
 
 async function withAcpSession(run: (fixture: ReturnType<typeof createSession> & { model: ModelId; otherModel: ModelId; turns: AcpTurn[]; settings: Record<string, unknown>; stack: AgentStack }) => Promise<void>): Promise<void> {
+	const workspace = { workspaceFolders: vscode.workspace.workspaceFolders, isTrusted: vscode.workspace.isTrusted };
+	Object.assign(vscode.workspace, { workspaceFolders: [{ uri: vscode.Uri.file((process as NodeJS.Process).cwd()), name: 'Fixture', index: 0 }], isTrusted: true });
 	const adapters = ['chat-route-codex', 'chat-route-gemini'].map(id => ({ id, command: process.execPath, args: ['fixture-adapter.cjs'] }));
 	const [model, otherModel] = adapters.map(adapter => discoveredAcpModelId(adapter.id, 'exact-model'));
 	registerDiscoveredModels(adapters.map(adapter => ({ id: discoveredAcpModelId(adapter.id, 'exact-model'), provider: 'acp', acpAdapterId: adapter.id, model: 'exact-model', label: adapter.id, chat: true, tools: true, images: true, fetchedAt: Date.now() })));
@@ -173,10 +175,26 @@ async function withAcpSession(run: (fixture: ReturnType<typeof createSession> & 
 	stack.acpRuntime!.run = async turn => { turns.push(turn); turn.onUpdate?.({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Adapter answer' } }); return { stopReason: 'end_turn' }; };
 	const bridge = new AgentBridge(stack); const f = createSession(); Object.assign(f.session, { agentBridge: bridge, llmClient: llm });
 	try { await run({ ...f, model, otherModel, turns, settings, stack }); }
-	finally { f.session.abortInFlight(); bridge.dispose(); stack.dispose(); await stack.acpRuntime?.shutdown(); mcp.dispose(); for (const adapter of adapters) replaceDiscoveredModels({ provider: 'acp', acpAdapterId: adapter.id }, []); }
+	finally { Object.assign(vscode.workspace, workspace); f.session.abortInFlight(); bridge.dispose(); stack.dispose(); await stack.acpRuntime?.shutdown(); mcp.dispose(); for (const adapter of adapters) replaceDiscoveredModels({ provider: 'acp', acpAdapterId: adapter.id }, []); }
 }
 
 suite('ACP chat model routing', () => {
+	test('workspace preflight rejects ACP before hooks, context, persistence and runtime', async () => {
+		await withAcpSession(async f => {
+			const folder = vscode.workspace.workspaceFolders;
+			Object.assign(f.session, {
+				hookRunner: { fire: async () => assert.fail('No hooks before workspace preflight') },
+				workspaceContext: { collect: async () => assert.fail('No context before workspace preflight') },
+			});
+			for (const state of [{ workspaceFolders: undefined, isTrusted: true }, { workspaceFolders: folder, isTrusted: false }]) {
+				Object.assign(vscode.workspace, state);
+				await f.session.handleSendMessage({ text: 'Keep this draft', specialistId: 'anton-code', model: f.model });
+				assert.match(String(f.messages.findLast(message => message.type === 'streamError')?.error), /Your prompt has not been sent/);
+				assert.deepEqual({ turns: f.turns, transcript: f.conversations.get('first') }, { turns: [], transcript: [] });
+			}
+		});
+	});
+
 	test('model selection remaps direct-only and removed personas and routes the exact adapter/model', async () => {
 		await withAcpSession(async f => {
 			for (const specialistId of ['anton-spec', 'custom-persona', 'anton']) {

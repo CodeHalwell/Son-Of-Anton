@@ -376,6 +376,11 @@ export class ConversationStore implements vscode.Disposable {
 		return completion;
 	}
 
+	/** Read a title and other metadata without loading the transcript or applying history filters. */
+	getSummary(id: string): ConversationSummary | undefined {
+		return this.readIndex().find(summary => summary.id === id && !this.isHidden(id));
+	}
+
 	/** Returns the conversation summaries, newest-first by `updatedAt`. */
 	list(): ReadonlyArray<ConversationSummary> {
 		return this.search({ limit: Number.MAX_SAFE_INTEGER }).items;

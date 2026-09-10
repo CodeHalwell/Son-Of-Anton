@@ -14,12 +14,14 @@ interface HistorySession {
 }
 
 function fixture() {
-	const posted: Array<{ query: string; historyScope: string; total: number; append: boolean; conversations: Array<{ inCurrentWorkspace: boolean }> }> = [];
+	const posted: Array<{ activeTitle: string; query: string; historyScope: string; total: number; append: boolean; conversations: Array<{ inCurrentWorkspace: boolean }> }> = [];
 	const pending: Array<{ query?: string; signal: AbortSignal; resolve: (result: SearchResult) => void; reject: (error: Error) => void }> = [];
 	const session = Object.assign(Object.create(ChatSession.prototype), {
 		historyFilter: { query: 'first', scope: 'active', workspaceOnly: false },
 		currentConversationId: 'conversation', disposables: [], pendingApprovals: new Map(), followupQueue: { clear() {} },
 		conversationStore: {
+			getSummary: () => ({ title: 'The active conversation' }),
+			load() { throw new Error('History must not load the active transcript'); },
 			search() { throw new Error('History must not load transcripts synchronously'); },
 			listForWorkspace() { throw new Error('History must not reload all manifests to decorate a result'); },
 			searchAsync: (options: { query?: string }, signal: AbortSignal) => new Promise<SearchResult>((resolve, reject) => pending.push({ query: options.query, signal, resolve, reject })),
@@ -40,6 +42,7 @@ suite('History search lifecycle', () => {
 		pending[0].resolve({ items: [], total: 99 }); await first;
 		assert.deepStrictEqual({ cancelled: pending.map(request => request.signal.aborted), results: posted.map(({ query, historyScope, total, append }) => ({ query, historyScope, total, append })) }, { cancelled: [true, false], results: [{ query: 'latest', historyScope: 'archived', total: 3, append: true }] });
 		assert.equal(posted[0].conversations[0].inCurrentWorkspace, true);
+		assert.equal(posted[0].activeTitle, 'The active conversation');
 		session.dispose();
 	});
 

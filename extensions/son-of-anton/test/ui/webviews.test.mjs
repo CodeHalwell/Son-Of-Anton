@@ -948,12 +948,12 @@ test('integrations: search, filtering, pagination, connection updates and error 
 	assert.match(await page.locator('#integrationStatus').textContent(), /1 integrations/);
 });
 
-test('specialist models: ACP routes show their owning agent instead of an ineffective model picker', async t => {
+test('specialist models: ACP routes keep model pickers available without offering ineffective bundled overrides', async t => {
 	const specialists = SPECIALIST_ROLES.map(role => ({ ...role, acpAgent: role.id === 'anton-docs' ? 'local-anton-docs' : '' }));
 	const page = await openSurface(t, 'chat', 320, undefined, undefined, specialists);
 	await post(page, { type: 'loadConversation', conversationId: 'acp-model', lastSpecialist: 'anton-docs', messages: [] });
-	assert.equal(await page.locator('#modelChip').isDisabled(), true);
-	assert.match(await page.locator('#modelChip').textContent(), /Managed by ACP/);
+	assert.equal(await page.locator('#modelChip').isEnabled(), true);
+	assert.match(await page.locator('#modelChip').textContent(), /local-anton-docs.*Default Model/);
 	assert.match(await page.locator('#modelChip').getAttribute('title'), /local-anton-docs/);
 	await post(page, { type: 'loadConversation', conversationId: 'native-model', lastSpecialist: 'anton', messages: [] });
 	assert.equal(await page.locator('#modelChip').isEnabled(), true);
@@ -962,9 +962,11 @@ test('specialist models: ACP routes show their owning agent instead of an ineffe
 	await page.locator('#settingsTab-specialists').click();
 	await post(page, { type: 'specialistModelsState', entries: [{ handle: 'anton-docs', displayName: 'Anton Docs', defaultModel: 'haiku', value: 'sonnet', pinned: true, acpAgent: 'local-anton-docs' }] });
 	const model = page.getByRole('combobox', { name: 'Model for @anton-docs' });
-	assert.equal(await model.isDisabled(), true);
-	assert.equal(await model.textContent(), 'local-anton-docs');
-	assert.match(await page.locator('.specialist-row-status').textContent(), /Managed by ACP/);
+	assert.equal(await model.isEnabled(), true);
+	assert.equal(await model.inputValue(), 'sonnet');
+	assert.match(await model.locator('option:checked').textContent(), /local-anton-docs.*Default Model/);
+	assert.equal(await model.locator('option[value="gpt-5"]').count(), 0);
+	assert.match(await page.locator('.specialist-row-status').textContent(), /ACP: local-anton-docs/);
 	await assertNoPageOverflow(page);
 });
 
@@ -1831,4 +1833,65 @@ test('checkpoint snapshots clear unavailable controls and ignore resets from oth
 	await page.locator('.checkpoint-stripe-label').click(); await page.locator('.checkpoint-stripe-popover [data-action="restoreWorkspace"]').click();
 	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'checkpointRestoreWorkspace', checkpointId: checkpoint.checkpointId });
 	await assertNoPageOverflow(page);
+});
+
+
+test('ACP composer can change advertised models and providers while preserving a draft', async t => {
+	const specialists = SPECIALIST_ROLES.map(role => ({ ...role, acpAgent: role.id === 'anton-code' ? 'claude-acp' : '' }));
+	const page = await openSurface(t, 'chat', 360, undefined, undefined, specialists);
+	await post(page, { type: 'loadConversation', conversationId: 'unlocked-acp', lastSpecialist: 'anton-code', lastModel: 'claude-code-sonnet', messages: [] });
+	const models = [
+		{ id: 'catalog:acp:claude-acp%2Fadvertised-model', acpAdapterId: 'claude-acp', label: 'Advertised adapter model', model: 'advertised-model', chat: true },
+		{ id: 'catalog:google:live-model', label: 'Live provider model', model: 'live-model', chat: true },
+	];
+	await post(page, { type: 'providerCatalog', snapshot: { providers: models.map((model, index) => ({ id: index ? 'google' : 'acp', name: index ? 'Google' : 'ACP', catalogStatus: 'ready', credentialSource: 'adapter', inferenceStatus: 'not-verified', models: [model] })), software: [] } });
+	await page.locator('#messageInput').fill('Keep this draft');
+	assert.equal(await page.locator('#modelChip').isEnabled(), true);
+	assert.match(await page.locator('#modelChip').textContent(), /Sonnet via Claude Code/);
+	for (const model of models) {
+		await page.locator('#modelChip').click();
+		await page.locator('#modelSearch').fill(model.label);
+		await page.locator(`[data-model="${model.id}"]`).click();
+		const selected = await page.evaluate(() => sentMessages.findLast(message => message.type === 'selectModel'));
+		await post(page, { type: 'chatSelection', conversationId: 'unlocked-acp', requestedModel: selected.model, requestedSpecialistId: selected.specialistId, model: selected.model, specialistId: selected.specialistId });
+		assert.equal(await page.locator('#modelLabel').textContent(), model.label);
+		assert.equal(await page.locator('#messageInput').inputValue(), 'Keep this draft');
+	}
+	await page.getByRole('tab', { name: 'Settings tab', exact: true }).click();
+	await page.locator('#settingsTab-specialists').click();
+	await post(page, { type: 'specialistModelsState', entries: [{ handle: 'anton-code', displayName: 'Anton Code', defaultModel: 'sonnet', value: 'claude-code-sonnet', acpAgent: 'claude-acp' }] });
+	const specialistModel = page.getByRole('combobox', { name: 'Model for @anton-code' });
+	await specialistModel.selectOption(models[0].id);
+	assert.equal(await page.evaluate(() => sentMessages.findLast(message => message.type === 'setSpecialistModel').model), models[0].id);
+	await page.getByRole('tab', { name: 'Chat tab', exact: true }).click();
+	await page.locator('#modelChip').click(); await page.locator('#modelSearch').fill('');
+	await assertNoPageOverflow(page); await screenshot(page, 'acp-model-picker-unlocked');
+});
+
+test('ACP workspace preflight retains the draft and offers setup without sending', async t => {
+	const page = await openSurface(t, 'chat', 360);
+	await page.locator('#messageInput').fill('Keep my prompt until ready');
+	for (const workspaceState of ['empty', 'untrusted']) {
+		await post(page, { type: 'agentCapabilities', capabilities: { transport: 'acp' }, workspaceState });
+		await page.locator('#sendBtn').click();
+		assert.equal(await page.locator('#messageInput').inputValue(), 'Keep my prompt until ready');
+		assert.equal(await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').length), 0);
+		await page.locator('#resolveWorkspace').click();
+		assert.equal(await page.evaluate(() => sentMessages.at(-1).type), 'resolveWorkspace');
+	}
+	await post(page, { type: 'agentCapabilities', capabilities: { transport: 'acp' }, workspaceState: 'ready' });
+	assert.equal(await page.locator('#workspaceGate').isVisible(), false);
+	await page.locator('#sendBtn').click();
+	assert.equal(await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').length), 1);
+});
+
+test('history filtering preserves the active title and explains empty search results', async t => {
+	const page = await openSurface(t, 'chat', 360);
+	await post(page, { type: 'historySnapshot', activeId: 'active', activeTitle: 'Current project', conversations: [{ id: 'active', title: 'Current project', updatedAt: Date.now(), messageCount: 2 }] });
+	await page.getByRole('tab', { name: 'History tab', exact: true }).click();
+	await page.locator('#historySearch').fill('no matching conversation');
+	await post(page, { type: 'historySnapshot', activeId: 'active', activeTitle: 'Current project', query: 'no matching conversation', historyScope: 'active', workspaceOnly: false, conversations: [] });
+	assert.equal(await page.locator('#conversationTitle').textContent(), 'Current project');
+	assert.equal(await page.locator('#historyNoResults').isVisible(), true);
+	assert.equal(await page.locator('#historyPaneEmpty').isVisible(), false);
 });

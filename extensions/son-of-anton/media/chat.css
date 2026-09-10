@@ -6173,3 +6173,8 @@ body.vscode-light { color-scheme: light; }
 .provider-inventory li { padding: 8px 0; border-bottom: 1px solid var(--vscode-widget-border); }
 .provider-inventory strong, .provider-inventory span { display: block; }
 .provider-inventory span { margin-top: 4px; color: var(--vscode-descriptionForeground); font-size: 11px; overflow-wrap: anywhere; }
+
+/* Keep workspace setup next to the draft that requires it. */
+.workspace-gate { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px; margin-bottom: 8px; border: 1px solid var(--vscode-focusBorder); border-radius: 6px; }
+.workspace-gate[hidden] { display: none; }
+.workspace-gate button { color: var(--vscode-button-foreground); background: var(--vscode-button-background); border: 0; border-radius: 4px; padding: 6px 10px; cursor: pointer; }
