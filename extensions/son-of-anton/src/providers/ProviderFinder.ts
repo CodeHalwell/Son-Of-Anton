@@ -152,8 +152,13 @@ export class ProviderFinder implements vscode.Disposable {
 			items.push({ label: provider.name, kind: vscode.QuickPickItemKind.Separator });
 			if (!provider.models.length) { items.push({ label: provider.name, description: provider.catalogStatus, detail: provider.error ?? provider.catalogScope ?? vscode.l10n.t("No models discovered. Configure this provider or enable local server discovery."), setup: provider.id, command: ['acp', 'claude-code', 'codex'].includes(provider.id) ? 'sota.browseAcpAdapters' : undefined }); }
 			if (provider.models.length) { items.push({ label: vscode.l10n.t("Configure {0}", provider.name), setup: provider.id }); }
-			for (const model of provider.localModelCatalog?.models ?? []) {
+			const localModels = provider.localModelCatalog?.models ?? [];
+			const localModelsToShow = localModels.slice(0, 200);
+			for (const model of localModelsToShow) {
 				items.push({ label: model.label, description: model.id, detail: vscode.l10n.t("Found in the local {0} catalog. Configure an ACP adapter to negotiate execution access.", provider.name), command: 'sota.browseAcpAdapters' });
+			}
+			if (localModels.length > localModelsToShow.length) {
+				items.push({ label: vscode.l10n.t("{0} more local models…", localModels.length - localModelsToShow.length), description: '', detail: vscode.l10n.t("Showing the first {0} local models.", localModelsToShow.length), command: 'sota.browseAcpAdapters' });
 			}
 			for (const model of provider.models) {
 				items.push({ label: model.label, description: model.model, detail: model.chat === false ? vscode.l10n.t("Listed by provider; this model is not a chat model.") : vscode.l10n.t("Tools: {0} · Images: {1} · Pricing: {2}", String(model.tools), String(model.images), model.pricing ? vscode.l10n.t("Reported") : vscode.l10n.t("Unknown")), modelId: model.chat === false ? undefined : model.id });
