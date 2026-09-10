@@ -94,6 +94,7 @@ interface ChatTurn {
 	failed?: boolean;
 	userMessagePersisted?: boolean;
 	checkpointCancelled?: boolean;
+	usedAcpTransport?: boolean;
 }
 
 interface WebviewMessage {
@@ -535,6 +536,11 @@ export class ChatSession {
 					this.postSpendLimitState();
 				}
 			}),
+		);
+
+		this.disposables.push(
+			vscode.workspace.onDidGrantWorkspaceTrust(() => this.postProviderCatalog(false)),
+			vscode.workspace.onDidChangeWorkspaceFolders(() => this.postProviderCatalog(false)),
 		);
 
 		if (this.conversation.length > 0) {
@@ -1253,6 +1259,12 @@ export class ChatSession {
 		this.webview.postMessage({ type: 'workspaceIndexUpdate', entries });
 	}
 
+	showChat(): void {
+		this.currentTab = 'chat';
+		this.saveConversation();
+		void this.webview.postMessage({ type: 'tabChanged', tab: 'chat' });
+	}
+
 	openProviderSettings(): void {
 		this.currentTab = 'settings';
 		this.saveConversation();
@@ -1315,7 +1327,7 @@ export class ChatSession {
 	postProviderCatalog(includeModels = true): void {
 		if (this.disposed) { return; }
 		if (activeProviderFinder && includeModels) { void this.webview.postMessage({ type: 'providerCatalog', snapshot: activeProviderFinder.snapshot(), metadata: MODEL_METADATA }); }
-		void this.webview.postMessage({ type: 'agentCapabilities', capabilities: this.agentBridge?.getCapabilities(this.currentSpecialistId, this.currentModel) });
+		void this.webview.postMessage({ type: 'agentCapabilities', capabilities: this.agentBridge?.getCapabilities(this.currentSpecialistId, this.currentModel), workspaceState: !vscode.workspace.workspaceFolders?.length ? 'empty' : vscode.workspace.isTrusted ? 'ready' : 'untrusted' });
 	}
 
 	/** Acknowledge both chips together; a stale reply must not replace a newer draft selection. */
@@ -1545,6 +1557,11 @@ export class ChatSession {
 			if (this.disposed || controller.signal.aborted || this.historySearchController !== controller) {
 				return;
 			}
+			const activeId = this.currentConversationId;
+			const activeSummary = await this.conversationStore.getSummaryAsync?.(activeId, controller.signal);
+			if (this.disposed || controller.signal.aborted || this.historySearchController !== controller || this.currentConversationId !== activeId) {
+				return;
+			}
 			const summaries = result.items.map(s => ({
 				id: s.id,
 				title: s.title,
@@ -1558,7 +1575,8 @@ export class ChatSession {
 			}));
 			this.webview.postMessage({
 				type: 'historySnapshot',
-				activeId: this.currentConversationId,
+				activeId,
+				activeTitle: activeSummary?.title,
 				conversations: summaries,
 				query: filter.query, historyScope: filter.scope, workspaceOnly: filter.workspaceOnly,
 				total: result.total, nextOffset: result.nextOffset, append: offset > 0,
@@ -1719,6 +1737,9 @@ export class ChatSession {
 						if (command && typeof message.id === 'string') { await vscode.commands.executeCommand(command, message.id); }
 						break;
 					}
+					case 'resolveWorkspace':
+						await vscode.commands.executeCommand(vscode.workspace.workspaceFolders?.length ? 'workbench.trust.manage' : 'workbench.action.files.openFolder');
+						break;
 					case 'workflowCommand':
 						if (['sota.manageConversationHistory', 'sota.manageIntegrationProfiles', 'sota.integrationChanges', 'sota.serviceDiagnostics', 'sota.checkForIdeUpdates', 'sota.exportResponseFeedback', 'sota.findProviders', 'sota.refreshProviders', 'sota.compareConversations'].includes(message.command ?? '')) { await vscode.commands.executeCommand(message.command!); }
 						break;
@@ -3019,7 +3040,7 @@ export class ChatSession {
 			}
 			if (this.ownsTurn(turn)) {
 				this.webview.postMessage({ type: 'requestSettled', conversationId: turn.conversationId, requestId: turn.requestId, turnId: turn.turnId, cancelled: turn.controller.signal.aborted });
-				this.postProviderCatalog(false);
+				this.postProviderCatalog(turn.usedAcpTransport === true);
 				this.abortController = undefined; this.activeTurn = undefined;
 				if ((turn.failed || turn.controller.signal.aborted) && !redirected) { this.followupQueue.pause(turn.conversationId); }
 				this.dispatchNextQueued();
@@ -3116,6 +3137,10 @@ export class ChatSession {
 		this.currentSpecialistId = specialistId;
 		if (specialistId !== requestedSpecialistId) { this.postChatSelection(model, requestedSpecialistId); }
 		const usesAgentBridge = !!this.agentBridge && (this.agentBridge.hasAgent(specialistId) || ((approveOverride || rejectOverride) && this.agentBridge.hasAgent('anton')));
+		if (usesAgentBridge && !approveOverride && !rejectOverride && this.agentBridge?.getCapabilities?.(specialistId, model)?.transport === 'acp') {
+			if (!vscode.workspace.workspaceFolders?.length) { throw new Error(vscode.l10n.t('Open a project folder to use this ACP agent. Your prompt has not been sent.')); }
+			if (!vscode.workspace.isTrusted) { throw new Error(vscode.l10n.t('Review Workspace Trust before using this ACP agent. Your prompt has not been sent.')); }
+		}
 		if (!usesAgentBridge && !modelSupportsImages(model)) {
 			if (hasImages) { throw new Error(vscode.l10n.t('This model does not support image attachments. Select an image-capable model or remove the attachments.')); }
 			// Direct chat resends every user/assistant row below, including the
@@ -3950,6 +3975,7 @@ export class ChatSession {
 				});
 			} else {
 				// The selected mode and multimodal payload follow every specialist route.
+				owner.usedAcpTransport = this.agentBridge.getCapabilities?.(specialistId, model)?.transport === 'acp';
 				await this.agentBridge.runSpecialist(specialistId as AgentHandle, fullPrompt, emit, cancellationSource.token, model, workspaceContextSnapshot, owner.conversationId, executionOptions);
 			}
 		} catch (err) {
@@ -5332,6 +5358,7 @@ export class ChatSession {
 				<div class="prompt-restore-notice" id="unavailableModelNotice" role="status" hidden><span data-ui-text="modelUnavailable"></span></div>
 				<div class="prompt-restore-notice" id="promptRestoreNotice" role="status" hidden><span data-ui-text="promptRestored"></span><button type="button" id="undoPromptRestore" data-ui-text="undoPromptRestore"></button></div>
 				<div class="composer-shell">
+					<div id="workspaceGate" class="workspace-gate" role="status" hidden><span id="workspaceGateMessage"></span><button id="resolveWorkspace" type="button"></button></div>
 					<div id="agentCapabilitySummary" class="agent-capability-summary" role="status"></div>
 					<div id="followupQueue" class="followup-queue" aria-label="Queued Follow-ups" hidden></div>
 					<textarea class="composer-input" aria-label="Message Anton" id="messageInput" placeholder="Ask Anton anything…" rows="3"></textarea>
@@ -5670,6 +5697,7 @@ export function applyUnifiedDiff(originalContent: string, diffText: string): str
  */
 export class ChatPanel {
 	private static currentPanel: vscode.WebviewPanel | undefined;
+	private static currentSession: ChatSession | undefined;
 
 	static createOrShow(
 		context: vscode.ExtensionContext,
@@ -5687,6 +5715,7 @@ export class ChatPanel {
 	): void {
 		if (ChatPanel.currentPanel) {
 			ChatPanel.currentPanel.reveal(vscode.ViewColumn.Beside);
+			ChatPanel.currentSession?.showChat();
 			return;
 		}
 
@@ -5706,8 +5735,11 @@ export class ChatPanel {
 
 		const session = new ChatSession(panel.webview, context.extensionUri, conversationStore, llmClient, toolRegistry, agentBridge, workspaceContext, costReporter, undefined, checkpointManager, context.secrets, credentialBroker, taskBoardModel, writeSnapshotStore, hookRunner);
 
+		ChatPanel.currentSession = session;
+		session.showChat();
 		panel.onDidDispose(() => {
 			session.dispose();
+			ChatPanel.currentSession = undefined;
 			ChatPanel.currentPanel = undefined;
 		});
 

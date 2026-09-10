@@ -1009,19 +1009,22 @@
 			const activeId = snapshot && typeof snapshot.activeId === 'string' ? snapshot.activeId : '';
 			const active = conversations.find(conversation => conversation.id === activeId);
 			const heading = document.getElementById('conversationTitle');
-			heading.textContent = active?.title || uiText('newConversation');
+			if (typeof snapshot?.activeTitle === 'string' || active) {
+				heading.textContent = snapshot.activeTitle || active?.title || uiText('newConversation');
+			}
 			heading.title = heading.textContent;
 			const query = historySearch.value.trim().toLocaleLowerCase();
 			document.querySelectorAll('[data-history-scope]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.historyScope === historyScope)));
 			historyClearFilters.hidden = !query && historyScope === 'all';
 			const matches = conversations.filter(conversation => (historyScope === 'all' || conversation.inCurrentWorkspace || conversation.id === activeId) && [conversation.title, conversation.lastSpecialist, conversation.workspaceName, conversation.searchText].filter(Boolean).join(' ').toLocaleLowerCase().includes(query)).sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || b.updatedAt - a.updatedAt);
 			document.getElementById('historyResults').textContent = uiText(matches.length === 1 ? 'conversationResult' : 'conversationResults', matches.length.toLocaleString());
-			document.getElementById('historyNoResults').hidden = !conversations.length || matches.length > 0;
+			const filteredEmpty = matches.length === 0 && (!!query || historyScope !== 'all' || historyView.value !== 'active');
+			document.getElementById('historyNoResults').hidden = !filteredEmpty;
 			historyShowMore.hidden = matches.length <= historyLimit && snapshot?.nextOffset === undefined;
 			const focused = historyPaneList.contains(document.activeElement) ? { id: document.activeElement.dataset.conversationId, action: document.activeElement.dataset.action } : null;
 			historyPaneList.textContent = '';
 			if (conversations.length === 0) {
-				historyPaneEmpty.hidden = false;
+				historyPaneEmpty.hidden = filteredEmpty;
 				historyPaneList.hidden = true;
 				return;
 			}
@@ -2792,11 +2795,17 @@
 			return parsed.text;
 		}
 
+		let workspaceBlocked = false;
+		const workspaceGate = document.getElementById('workspaceGate');
+		const resolveWorkspaceButton = document.getElementById('resolveWorkspace');
+		resolveWorkspaceButton.addEventListener('click', () => vscode.postMessage({ type: 'resolveWorkspace' }));
+
 		function sendMessage(renderOnly = false, requestId) {
 			if (isStreaming) {
 				vscode.postMessage({ type: 'cancelRequest' });
 				return;
 			}
+			if (!renderOnly && workspaceBlocked) { resolveWorkspaceButton.focus(); return; }
 			if (!renderOnly && isCurrentModelUnavailable()) { modelChip.focus(); return; }
 			let text = messageInput.value.trim();
 
@@ -3207,16 +3216,16 @@
 		}
 		function updateModelLabel() {
 			const acpAgent = getCurrentAcpAgent();
-			modelLabel.textContent = acpAgent && !currentModel.startsWith('catalog:acp:') ? uiText('managedByAcp') : MODEL_LABELS.get(currentModel) || currentModel;
-			modelChip.disabled = Boolean(acpAgent) && !currentModel.startsWith('catalog:acp:');
+			modelLabel.textContent = acpAgent && !currentModel.startsWith('catalog:') && !(acpAgent === 'claude-acp' && currentModel.startsWith('claude-code-')) ? uiText('adapterDefault', acpAgent) : MODEL_LABELS.get(currentModel) || currentModel;
+			modelChip.disabled = false;
 			modelChip.title = acpAgent ? uiText('acpModelHelp', acpAgent) : '';
-			if (modelChip.disabled) { modelMenu.hidden = true; }
 			updateReasoningChipVisibility();
 			updateSendAffordance();
 		}
 
 		function getCurrentAcpAgent() {
-			if (currentModel.startsWith('catalog:') && !currentModel.startsWith('catalog:acp:')) return '';
+			if (currentModel.startsWith('catalog:acp:')) return discoveredModels.find(model => model.id === currentModel)?.acpAdapterId || '';
+			if (currentModel.startsWith('catalog:')) return '';
 			return SPECIALISTS.find(specialist => specialist.id === currentAgent)?.acpAgent || '';
 		}
 
@@ -3806,7 +3815,7 @@
 
 		// --- Event wiring ---
 
-		sendBtn.addEventListener('click', sendMessage);
+		sendBtn.addEventListener('click', () => sendMessage());
 
 		if (floatingStop) {
 			floatingStop.addEventListener('click', () => {
@@ -4126,6 +4135,10 @@
 			item.addEventListener('focus', () => showModelTooltip(item.dataset.model, item));
 			item.addEventListener('blur', hideModelTooltip);
 		}
+		function canSelectAdapterModel(id, adapter) {
+			return !adapter || id.startsWith('catalog:') || (adapter === 'claude-acp' && id.startsWith('claude-code-'));
+		}
+
 		function filterModels() {
 			renderDiscoveredModels(modelSearch.value.trim());
 			const query = modelSearch.value.trim().toLocaleLowerCase();
@@ -4133,7 +4146,7 @@
 			for (const node of modelMenu.children) {
 				if (node.classList.contains('popover-section-label')) { group = node; group.hidden = true; }
 				if (node.matches('[data-model]')) {
-					node.hidden = ![node.dataset.model, node.textContent, group?.textContent].join(' ').toLocaleLowerCase().includes(query);
+					node.hidden = !canSelectAdapterModel(node.dataset.model, getCurrentAcpAgent()) || ![node.dataset.model, node.textContent, group?.textContent].join(' ').toLocaleLowerCase().includes(query);
 					if (!node.hidden && group) group.hidden = false;
 				}
 			}
@@ -4155,7 +4168,7 @@
 		});
 		modelMenu.addEventListener('click', (e) => {
 			const target = e.target.closest('.popover-item');
-			if (!target) return;
+			if (!target || target.hidden) return;
 			currentModel = target.dataset.model;
 			vscode.postMessage({ type: 'selectModel', conversationId: activeConversationId, model: currentModel, specialistId: currentAgent });
 			persistDraft();
@@ -4518,6 +4531,10 @@
 				}
 				case 'agentCapabilities': {
 					const capability = message.capabilities;
+					workspaceBlocked = capability?.transport === 'acp' && ['empty', 'untrusted'].includes(message.workspaceState);
+					workspaceGate.hidden = !workspaceBlocked;
+					document.getElementById('workspaceGateMessage').textContent = uiText(message.workspaceState === 'empty' ? 'acpOpenWorkspace' : 'acpTrustWorkspace');
+					resolveWorkspaceButton.textContent = uiText(message.workspaceState === 'empty' ? 'openFolder' : 'reviewWorkspaceTrust');
 					const label = value => value === true ? uiText('supported') : value === false ? uiText('unsupported') : uiText('unknown');
 					document.getElementById('agentCapabilitySummary').textContent = capability ? `${capability.transport.toUpperCase()} · ${uiText('images')}: ${label(capability.images)} · Plan: ${label(capability.plan)} · ${uiText('billing')}: ${capability.metering}` : '';
 					break;
@@ -7429,10 +7446,10 @@
 		// model menu so users at-a-glance see what each provider gives them.
 		const PROVIDER_TAGLINES = {
 			anthropic: 'Claude Opus, Sonnet, Haiku — direct API or Claude Code subscription.',
-			openai: 'GPT-5, GPT-4.1, GPT-4o, o1/o3/o4 reasoning families. Or sign in via Codex CLI.',
+			openai: uiText('openAiProviderDescription'),
 			foundry: 'Azure-hosted GPT, Claude, Mistral, Llama, Phi deployments.',
 			bedrock: 'AWS-hosted Claude, Llama, Mistral, Cohere, Nova.',
-			google: 'Gemini 2.5/2.0/1.5 Pro and Flash families.',
+			google: uiText('googleProviderDescription'),
 			openrouter: 'Single API key, hundreds of upstream models.',
 			ollama: 'Local llama.cpp server. Offline / privacy-friendly.',
 			lmstudio: 'Local model server with a friendly UI.',
@@ -8499,6 +8516,16 @@
 			return [...groups.values(), ...readBundledModelOptions().map(group => ({ ...group, label: uiText('bundledModelGroup', group.label) }))];
 		}
 
+		/** Restore saved choices without reintroducing ineffective ACP overrides. */
+		function restoreSettingsModelSelection(select, value, label) {
+			if (value && !canSelectAdapterModel(value, select.dataset.acpAgent)) {
+				select.value = '';
+				return;
+			}
+			if (value && ![...select.options].some(option => option.value === value)) select.add(new Option(label, value));
+			select.value = value;
+		}
+
 		function refreshSettingsModelOptions() {
 			const defaults = document.getElementById('settingsDefaultModel');
 			const selects = [defaults, ...document.querySelectorAll('#specialistModelsList select.specialist-row-model:not(:disabled)')].filter(Boolean);
@@ -8506,12 +8533,11 @@
 				const value = select.value;
 				const selectedLabel = select.selectedOptions[0]?.textContent || value;
 				const defaultLabel = select.querySelector('option[value=""]')?.textContent;
-				select.innerHTML = buildSpecialistModelOptions('sonnet');
+				select.innerHTML = buildSpecialistModelOptions('sonnet', select.dataset.acpAgent);
 				const defaultOption = select.querySelector('option[value=""]');
 				if (select === defaults) defaultOption?.remove();
 				else if (defaultLabel && defaultOption) defaultOption.textContent = defaultLabel;
-				if (value && ![...select.options].some(option => option.value === value)) select.add(new Option(selectedLabel, value));
-				select.value = value;
+				restoreSettingsModelSelection(select, value, selectedLabel);
 				select.dataset.modelsReady = 'true';
 			}
 		}
@@ -8523,14 +8549,14 @@
 		 * override. Below that, options are grouped by provider via
 		 * `<optgroup>` so the long list stays scannable.
 		 */
-		function buildSpecialistModelOptions(defaultModel) {
+		function buildSpecialistModelOptions(defaultModel, acpAgent) {
 			const groups = readSpecialistModelOptions();
-			const escDefault = escapeHtml(defaultModel || 'default');
+			const escDefault = escapeHtml(acpAgent ? uiText('adapterDefault', acpAgent) : defaultModel || 'default');
 			let html = '<option value="">Default (' + escDefault + ')</option>';
 			groups.forEach((group) => {
 				if (!group.options.length) return;
 				html += '<optgroup label="' + escapeHtml(group.label) + '">';
-				group.options.forEach((opt) => {
+				group.options.filter(opt => canSelectAdapterModel(opt.id, acpAgent)).forEach((opt) => {
 					html += '<option value="' + escapeHtml(opt.id) + '">' + escapeHtml(opt.label) + '</option>';
 				});
 				html += '</optgroup>';
@@ -8558,31 +8584,31 @@
 				const pinned = Boolean(entry.pinned);
 				const statusClass = pinned ? 'is-pinned' : 'is-default';
 				const acpAgent = typeof entry.acpAgent === 'string' ? entry.acpAgent : '';
-				const statusLabel = acpAgent ? uiText('managedByAcp') : pinned ? 'Pinned' : 'Default';
-				const options = buildSpecialistModelOptions(defaultModel);
+				const statusLabel = acpAgent ? escapeHtml(uiText('adapterRoute', acpAgent)) : pinned ? 'Pinned' : 'Default';
+				const options = buildSpecialistModelOptions(defaultModel, acpAgent);
 				return ''
 					+ '<div class="specialist-row" data-handle="' + escapeHtml(handle) + '" role="listitem">'
 					+ '<div class="specialist-row-name">'
 					+ '<span class="specialist-row-handle">@' + escapeHtml(handle) + '</span>'
 					+ '<span class="specialist-row-display">' + escapeHtml(display) + '</span>'
 					+ '</div>'
-					+ '<select ' + (acpAgent ? 'disabled title="' + escapeHtml(uiText('acpModelHelp', acpAgent)) + '" ' : '') + 'class="specialist-row-model" data-handle="' + escapeHtml(handle) + '" aria-label="Model for @' + escapeHtml(handle) + '">'
-					+ (acpAgent ? '<option value="">' + escapeHtml(acpAgent) + '</option>' : options)
+					+ '<select ' + (acpAgent ? 'data-acp-agent="' + escapeHtml(acpAgent) + '" title="' + escapeHtml(uiText('acpModelHelp', acpAgent)) + '" ' : '') + 'class="specialist-row-model" data-handle="' + escapeHtml(handle) + '" aria-label="Model for @' + escapeHtml(handle) + '">'
+					+ options
 					+ '</select>'
 					+ '<span class="specialist-row-status ' + statusClass + '" data-handle="' + escapeHtml(handle) + '">' + statusLabel + '</span>'
 					+ '</div>';
 			});
 			list.innerHTML = rows.join('');
-			// Apply the selected value after the markup is in the DOM —
-			// setting `select.value` directly is more reliable than
-			// emitting `selected` attributes inline, since unknown values
-			// (e.g. a model id removed from the menu) cleanly fall back to
-			// the empty default rather than rendering as an orphan option.
+			// Restore selectable saved values after the markup is in the DOM.
+			// Ineffective ACP overrides display the adapter default without
+			// rewriting the user's persisted setting during rendering.
 			entries.forEach((entry) => {
 				const handle = typeof entry.handle === 'string' ? entry.handle : '';
 				const value = typeof entry.value === 'string' ? entry.value : '';
 				const sel = list.querySelector('select.specialist-row-model[data-handle="' + handle + '"]');
-				if (sel) sel.value = entry.acpAgent ? '' : value;
+				if (sel) {
+					restoreSettingsModelSelection(sel, value, MODEL_LABELS.get(value) || value);
+				}
 			});
 		}
 

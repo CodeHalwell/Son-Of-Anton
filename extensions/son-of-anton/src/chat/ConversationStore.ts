@@ -376,6 +376,19 @@ export class ConversationStore implements vscode.Disposable {
 		return completion;
 	}
 
+	/** Read one summary independently of history filters, without rescanning disk or loading the transcript. */
+	async getSummaryAsync(id: string, cancellation?: AbortSignal): Promise<ConversationSummary | undefined> {
+		const signal = cancellation ? AbortSignal.any([cancellation, this.searchLifetime.signal]) : this.searchLifetime.signal;
+		signal.throwIfAborted();
+		if (!this.isVisibleInList(id)) { return undefined; }
+		if (this.pendingRecords.has(id)) { return this.pendingRecords.get(id)?.summary; }
+		const summary = this.disk ? await this.disk.getSummaryAsync(id, signal) : this.mementoIndex().find(entry => entry.id === id);
+		signal.throwIfAborted();
+		if (!this.isVisibleInList(id)) { return undefined; }
+		// A local save or deletion can supersede the manifest while its read is in flight.
+		return this.pendingRecords.has(id) ? this.pendingRecords.get(id)?.summary : summary;
+	}
+
 	/** Returns the conversation summaries, newest-first by `updatedAt`. */
 	list(): ReadonlyArray<ConversationSummary> {
 		return this.search({ limit: Number.MAX_SAFE_INTEGER }).items;

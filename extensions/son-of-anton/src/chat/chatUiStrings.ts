@@ -7,6 +7,10 @@ import * as vscode from 'vscode';
 /** Localized labels shared with the isolated chat webview. */
 export function getChatUiStrings(): Record<string, string> {
 	return {
+		acpOpenWorkspace: vscode.l10n.t('Open a project folder to use this ACP agent.'),
+		acpTrustWorkspace: vscode.l10n.t('Review workspace trust to use this ACP agent.'),
+		openFolder: vscode.l10n.t('Open Folder'),
+		reviewWorkspaceTrust: vscode.l10n.t('Review Workspace Trust'),
 		includeSource: vscode.l10n.t('Include {0}'),
 		estimatedTokens: vscode.l10n.t('estimated text tokens'),
 		sourceExcluded: vscode.l10n.t('This source is excluded from the next message.'),
@@ -39,10 +43,14 @@ export function getChatUiStrings(): Record<string, string> {
 		thisWorkspace: vscode.l10n.t('This Workspace'),
 		clearHistoryFilters: vscode.l10n.t('Clear Filters'),
 		historyWorkspaceUnknown: vscode.l10n.t('Earlier conversation'),
+		openAiProviderDescription: vscode.l10n.t('OpenAI chat, reasoning and coding models. Or sign in via Codex CLI.'),
+		googleProviderDescription: vscode.l10n.t('Google Gemini models discovered from your account.'),
 		providerConfigured: vscode.l10n.t('Configured'),
 		providerUnconfigured: vscode.l10n.t('Not configured'),
 		managedByAcp: vscode.l10n.t('Managed by ACP'),
-		acpModelHelp: vscode.l10n.t('Model selection is managed by the configured ACP agent: {0}'),
+		acpModelHelp: vscode.l10n.t('Choose an advertised model for {0} or switch to a discovered provider. Adapter models appear after connecting in a trusted workspace.'),
+		adapterDefault: vscode.l10n.t('{0} · Default Model'),
+		adapterRoute: vscode.l10n.t('ACP: {0}'),
 		integrations: vscode.l10n.t('Integrations'),
 		integrationsHelp: vscode.l10n.t('Skills, plugins, and MCP servers discovered from Claude, Codex, Cursor, and shared agent folders. Skills load on demand. Connect MCP servers to make their tools available; source applications keep their own authentication and plugin UI.'),
 		searchIntegrations: vscode.l10n.t('Search Integrations…'),

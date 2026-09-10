@@ -51,7 +51,7 @@ suite('Chat checkpoint index recovery', () => {
 			const prototype = ChatSession.prototype as unknown as Record<string, unknown>;
 			const overrides = { getHtmlContent: () => '<html>Chat</html>', refreshConnectionState: async () => {}, refreshWorkspaceIndex: async () => {}, migrateLegacyAutoApprove: async () => {}, postProviderCatalog: () => {} };
 			const previous = Object.fromEntries(Object.keys(overrides).map(key => [key, prototype[key]])); Object.assign(prototype, overrides);
-			const eventNames = ['onDidChangeConfiguration', 'onDidCreateFiles', 'onDidDeleteFiles', 'onDidRenameFiles'] as const;
+			const eventNames = ['onDidGrantWorkspaceTrust', 'onDidChangeWorkspaceFolders', 'onDidChangeConfiguration', 'onDidCreateFiles', 'onDidDeleteFiles', 'onDidRenameFiles'] as const;
 			const events = Object.fromEntries(eventNames.map(key => [key, vscode.workspace[key]])); for (const key of eventNames) { Object.assign(vscode.workspace, { [key]: () => ({ dispose() {} }) }); }
 			const vscodeModule = require('vscode') as typeof vscode; const Disposable = vscodeModule.Disposable; Object.assign(vscodeModule, { Disposable: class { private readonly close: () => void; constructor(close: () => void) { this.close = close; } dispose() { this.close(); } } });
 			const messages: Array<{ type: string; conversationId?: string; checkpoints?: Array<{ checkpointId: string }>; reset?: boolean; [key: string]: unknown }> = [];

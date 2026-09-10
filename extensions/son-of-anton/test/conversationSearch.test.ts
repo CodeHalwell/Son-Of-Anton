@@ -41,6 +41,58 @@ async function messagePage(directory: string, id = 'conversation'): Promise<stri
 }
 
 suite('Bounded conversation text search', () => {
+	test('active-title lookup reads only its manifest asynchronously without scanning history or loading transcript pages', async () => {
+		await fixture(async (store, storage, directory) => {
+			await storage.save(imageRecord()); await storage.save(record('unrelated', [text('Other history')]));
+			const page = await messagePage(directory); const manifest = path.join(path.dirname(page), 'manifest.json');
+			const nativePromises = createRequire(import.meta.url)('node:fs/promises') as typeof fsp;
+			const original = { readFileSync: nativeFs.readFileSync, readdirSync: nativeFs.readdirSync, readFile: nativePromises.readFile };
+			const reads: string[] = [];
+			Object.assign(nativeFs, {
+				readdirSync: () => assert.fail('Summary lookup must not enumerate history'),
+				readFileSync: (file: fs.PathOrFileDescriptor, ...args: object[]) => {
+					if (String(file).endsWith('manifest.json') || String(file) === page) { assert.fail('Summary lookup must not synchronously read manifests or transcripts'); }
+					return Reflect.apply(original.readFileSync, nativeFs, [file, ...args]);
+				},
+			});
+			Object.assign(nativePromises, { readFile: (file: fs.PathLike, ...args: object[]) => {
+				reads.push(String(file)); return Reflect.apply(original.readFile, nativePromises, [file, ...args]);
+			} });
+			try { assert.deepEqual({ title: (await store.getSummaryAsync('conversation'))?.title, reads }, { title: 'conversation', reads: [manifest] }); }
+			finally { Object.assign(nativeFs, { readFileSync: original.readFileSync, readdirSync: original.readdirSync }); Object.assign(nativePromises, { readFile: original.readFile }); }
+		});
+	});
+
+	test('active-title lookup includes pending saves, cross-window renames and permanent deletions', async () => {
+		await fixture(async (store, storage) => {
+			const created = store.create([{ role: 'user', content: 'Pending title', timestamp: 1 }]);
+			const pending = (await store.getSummaryAsync(created.summary.id))?.title; await store.flush();
+			const saved = storage.load(created.summary.id)!;
+			await storage.save(attachConversationWriteToken({ ...saved, summary: { ...saved.summary, title: 'Renamed elsewhere' } }, saved.writeToken!));
+			const renamed = (await store.getSummaryAsync(created.summary.id))?.title;
+			await storage.delete(created.summary.id);
+			assert.deepEqual({ pending, renamed, deleted: await store.getSummaryAsync(created.summary.id), missing: await store.getSummaryAsync('missing') }, { pending: 'Pending title', renamed: 'Renamed elsewhere', deleted: undefined, missing: undefined });
+			await assert.rejects(store.getSummaryAsync('missing', AbortSignal.abort(new Error('Superseded title lookup'))), /Superseded title lookup/);
+		});
+	});
+
+	test('damaged active metadata retains recovery notices without failing healthy history queries', async () => {
+		await fixture(async (store, storage, directory) => {
+			await storage.save(record('healthy', [text('Readable history')]));
+			const damagedPaths: string[] = [];
+			for (const kind of ['manifest', 'lifecycle']) {
+				const id = `damaged-${kind}`;
+				await storage.save(record(id, []));
+				const hash = createHash('sha256').update(id).digest('hex');
+				const file = path.join(directory, 'conversations-v2', ...(kind === 'manifest' ? [hash, 'manifest.json'] : ['.lifecycle', hash, 'deletion.json']));
+				damagedPaths.push(file);
+				await fsp.mkdir(path.dirname(file), { recursive: true }); await fsp.writeFile(file, '{broken');
+				assert.equal(await store.getSummaryAsync(id), undefined);
+			}
+			assert.deepEqual({ matches: (await store.searchAsync({ query: 'healthy' })).items.map(item => item.id), reported: damagedPaths.every(file => store.recoveryIssues.some(issue => issue.path === file)) }, { matches: ['healthy'], reported: true });
+		});
+	});
+
 	test('reopened body queries read text indexes without synchronous transcript loads or image bytes', async () => {
 		await fixture(async (store, storage, directory) => {
 			await storage.save(imageRecord()); const page = await messagePage(directory);

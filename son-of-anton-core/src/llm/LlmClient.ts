@@ -2795,24 +2795,20 @@ export class LlmClient {
 
 			while (true) {
 				const { done, value } = await reader.read();
-				if (done) {
-					break;
-				}
+				buffer += done ? decoder.decode() + '\n\n' : decoder.decode(value, { stream: true });
 
-				buffer += decoder.decode(value, { stream: true });
-
-				let boundary = buffer.indexOf('\n\n');
-				while (boundary !== -1) {
-					const rawEvent = buffer.slice(0, boundary);
-					buffer = buffer.slice(boundary + 2);
-					boundary = buffer.indexOf('\n\n');
+				let boundary = /\r?\n\r?\n/.exec(buffer);
+				while (boundary) {
+					const rawEvent = buffer.slice(0, boundary.index);
+					buffer = buffer.slice(boundary.index + boundary[0].length);
+					boundary = /\r?\n\r?\n/.exec(buffer);
 
 					// An SSE event may have multiple lines; we only care about
 					// the `data:` line(s). Concatenate any data lines per event.
 					let dataPayload = '';
-					for (const line of rawEvent.split('\n')) {
+					for (const line of rawEvent.split(/\r?\n/)) {
 						if (line.startsWith('data:')) {
-							dataPayload += line.slice(5).trimStart();
+							dataPayload += (dataPayload ? '\n' : '') + line.slice(5).trimStart();
 						}
 					}
 					if (!dataPayload) {
@@ -2824,6 +2820,10 @@ export class LlmClient {
 
 					try {
 						const event = JSON.parse(dataPayload);
+						if (event.error || event.promptFeedback?.blockReason) {
+							yield { type: 'error', error: 'Google Gemini could not produce a response. Check the selected model and provider configuration.' };
+							return;
+						}
 						const candidate = event.candidates?.[0];
 						const parts = candidate?.content?.parts;
 						if (Array.isArray(parts)) {
@@ -2864,9 +2864,16 @@ export class LlmClient {
 							}
 						}
 					} catch {
-						// Skip malformed JSON payloads in the stream.
+						yield { type: 'error', error: 'Google Gemini returned an invalid streaming response. Please retry.' };
+						return;
 					}
 				}
+				if (done) { break; }
+			}
+
+			if (!fullText.trim() && !sawFunctionCall) {
+				yield { type: 'error', error: 'Google Gemini returned no text or tool calls. Please retry or select another model.' };
+				return;
 			}
 
 			// Gemini exposes no cached-token signal on the consumer endpoint —
