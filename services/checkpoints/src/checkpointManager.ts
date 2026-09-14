@@ -5,7 +5,7 @@
 
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
+import { workspacePath, readWorkspaceFile, writeWorkspaceFile, removeWorkspaceFile } from '../_shared/auth/dist/workspaceFs.js';
 import type { Checkpoint, CheckpointCreateRequest, CheckpointFile, RetentionPolicy } from './types.js';
 import { CheckpointStorage } from './storage.js';
 
@@ -33,35 +33,13 @@ export class CheckpointManager {
 		await this.storage.ensureSessionDir(sessionId);
 
 		const files: CheckpointFile[] = [];
-		const workspaceRootResolved = path.resolve(this.workspaceRoot);
+		const workspaceRootResolved = await fs.realpath(this.workspaceRoot);
 
 		for (const filePath of request.filePaths) {
-			const absolutePath = path.resolve(workspaceRootResolved, filePath);
-			let content: string = '';
-			let exists = false;
-			let contentHash = '';
-
-			// Enforce that the resolved path stays within the workspace root to prevent path traversal.
-			const workspaceRootWithSep = workspaceRootResolved + path.sep;
-			if (!absolutePath.startsWith(workspaceRootWithSep) && absolutePath !== workspaceRootResolved) {
-				// Treat paths that escape the workspace as non-existent.
-				files.push({
-					path: filePath,
-					contentHash: '',
-					content: null, // Content stored separately via deduplication
-					exists: false,
-				});
-				continue;
-			}
-			try {
-				content = await fs.readFile(absolutePath, 'utf-8');
-				exists = true;
-				contentHash = crypto.createHash('sha256').update(content).digest('hex');
-				await this.storage.saveFileSnapshot(sessionId, contentHash, content);
-			} catch {
-				exists = false;
-				contentHash = '';
-			}
+			const content = await readWorkspaceFile(workspaceRootResolved, filePath);
+			const exists = content !== undefined;
+			const contentHash = exists ? crypto.createHash('sha256').update(content).digest('hex') : '';
+			if (exists) { await this.storage.saveFileSnapshot(sessionId, contentHash, content); }
 
 			files.push({
 				path: filePath,
@@ -80,6 +58,7 @@ export class CheckpointManager {
 			toolCall: request.toolCall,
 			files,
 			metadata: request.metadata ?? {},
+			workspaceRoot: workspaceRootResolved,
 		};
 
 		await this.storage.saveCheckpoint(sessionId, checkpoint);
@@ -93,33 +72,28 @@ export class CheckpointManager {
 
 	async restoreCheckpoint(sessionId: string, checkpointId: string): Promise<void> {
 		const checkpoint = await this.storage.loadCheckpoint(sessionId, checkpointId);
-		const workspaceRootResolved = path.resolve(this.workspaceRoot);
-		const workspaceRootWithSep = workspaceRootResolved + path.sep;
-
-		for (const file of checkpoint.files) {
-			const absolutePath = path.resolve(workspaceRootResolved, file.path);
-
-			// Enforce that the resolved path stays within the workspace root to
-			// prevent a checkpoint whose file paths escape the workspace (via
-			// `..`) from writing or deleting files elsewhere on restore. This
-			// mirrors the containment check in createCheckpoint.
-			if (absolutePath !== workspaceRootResolved && !absolutePath.startsWith(workspaceRootWithSep)) {
-				continue;
+		const root = await fs.realpath(this.workspaceRoot);
+		if (checkpoint.workspaceRoot !== root) {
+			throw new Error('Checkpoint has no matching workspace identity');
+		}
+		// Validate the complete plan and load every snapshot before any writes.
+		const plan = await Promise.all(checkpoint.files.map(async file => ({
+			path: await workspacePath(root, file.path),
+			content: file.exists ? await this.storage.loadFileSnapshot(sessionId, file.contentHash) : undefined,
+		})));
+		const recovery = await Promise.all(plan.map(async file => ({
+			path: file.path, content: await readWorkspaceFile(root, file.path),
+		})));
+		const apply = async (files: typeof plan): Promise<void> => {
+			for (const file of files) {
+				if (file.content === undefined) { await removeWorkspaceFile(root, file.path); }
+				else { await writeWorkspaceFile(root, file.path, file.content); }
 			}
-
-			if (file.exists && file.contentHash) {
-				const content = await this.storage.loadFileSnapshot(sessionId, file.contentHash);
-				const dir = path.dirname(absolutePath);
-				await fs.mkdir(dir, { recursive: true });
-				await fs.writeFile(absolutePath, content, 'utf-8');
-			} else {
-				// File did not exist at checkpoint time — remove it
-				try {
-					await fs.unlink(absolutePath);
-				} catch {
-					// File already absent, nothing to do
-				}
-			}
+		};
+		try { await apply(plan); }
+		catch (error) {
+			await apply(recovery);
+			throw error;
 		}
 	}
 

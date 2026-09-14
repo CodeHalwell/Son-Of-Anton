@@ -66,10 +66,10 @@ export async function memoryQuery(
 	const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 	const limitClause = params.limit ? `LIMIT ${params.limit}` : 'LIMIT 50';
 
-	const query = `MATCH (e) ${whereClause} RETURN e ORDER BY e.createdAt DESC ${limitClause}`;
+	const query = `MATCH (e) ${whereClause} RETURN properties(e) AS entry ORDER BY e.createdAt DESC ${limitClause}`;
 
 	const result = await db.query(query, queryParams);
-	return result.rows;
+	return result.rows.flatMap(row => row.map(cell => cell.entry));
 }
 
 /**
@@ -128,9 +128,9 @@ export async function memoryHistory(
 	db: FalkorDBClient,
 	params: MemoryHistoryParams,
 ): Promise<unknown[]> {
-	const query = `MATCH (e) WHERE $topic IN e.topics RETURN e ORDER BY e.createdAt ASC`;
+	const query = `MATCH (e) WHERE $topic IN e.topics RETURN properties(e) AS entry ORDER BY e.createdAt ASC`;
 	const result = await db.query(query, {
 		topic: params.topic,
 	});
-	return result.rows;
+	return result.rows.flatMap(row => row.map(cell => cell.entry));
 }

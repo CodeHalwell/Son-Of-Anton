@@ -1,3 +1,4 @@
+import { parameterizedQuery, decodeCompactResult } from '../../_shared/cypher/dist/index.js';
 // Son of Anton — FalkorDB Client (LSIF service)
 // Identical interface to the indexer's FalkorDB client.
 
@@ -56,13 +57,7 @@ export class FalkorDBClient {
 			throw new Error('FalkorDB client not connected');
 		}
 
-		let fullQuery = cypher;
-		if (params && Object.keys(params).length > 0) {
-			const paramStr = Object.entries(params)
-				.map(([key, value]) => `${key}=${JSON.stringify(value)}`)
-				.join(' ');
-			fullQuery = `CYPHER ${paramStr} ${cypher}`;
-		}
+		const fullQuery = parameterizedQuery(cypher, params);
 
 		const result = await this.client.sendCommand([
 			'GRAPH.QUERY',
@@ -91,8 +86,9 @@ export class FalkorDBClient {
 
 		if (raw.length >= 1 && Array.isArray(raw[0])) {
 			if (raw.length >= 2 && Array.isArray(raw[1])) {
-				result.headers = (raw[0] as unknown[]).map(String);
-				result.rows = raw[1] as unknown[][];
+				const decoded = decodeCompactResult(raw);
+				result.headers = decoded.headers;
+				result.rows = decoded.rows;
 			}
 		}
 

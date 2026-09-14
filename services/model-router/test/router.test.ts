@@ -303,6 +303,11 @@ describe('calculateCost', () => {
 		assert.strictEqual(cost, 0);
 	});
 
+	test('counts cache creation separately and does not treat unknown cache pricing as free', () => {
+		assert.equal(calculateCost('claude-sonnet-4-20250514', 1000, 0, 200, 100), (700 * 3 + 200 * 0.3 + 100 * 3.75) / 1_000_000);
+		assert.equal(calculateCost('gpt-4o', 1000, 0, 200), 0.0025);
+	});
+
 	test('handles model without cache pricing', () => {
 		// gpt-4o: input $2.5/M, output $10/M, no cache pricing
 		const cost = calculateCost('gpt-4o', 1000, 500, 0);

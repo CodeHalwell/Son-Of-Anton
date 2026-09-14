@@ -1,3 +1,4 @@
+import { workspacePath } from '../_shared/auth/dist/workspaceFs.js';
 // Copyright (c) Son of Anton Contributors. All rights reserved.
 // Licensed under the MIT License.
 //
@@ -75,14 +76,12 @@ function assertImageAllowed(image: string): void {
  * Validate that `projectPath` resolves inside the configured workspace root.
  * Returns the resolved absolute path.
  */
-function assertProjectPathAllowed(projectPath: string): string {
-	const resolved = path.resolve(projectPath);
-	if (resolved !== WORKSPACE_ROOT && !resolved.startsWith(WORKSPACE_ROOT + path.sep)) {
-		throw new BadRequestError(
-			`projectPath "${projectPath}" must be inside BACKGROUND_TASK_WORKSPACE_ROOT (${WORKSPACE_ROOT}).`
-		);
-	}
-	return resolved;
+async function assertProjectPathAllowed(projectPath: string): Promise<string> {
+	try {
+		const resolved = await workspacePath(WORKSPACE_ROOT, projectPath, true);
+		if (!(await fs.stat(resolved)).isDirectory()) { throw new Error('Project must be a directory'); }
+		return resolved;
+	} catch (error) { throw new BadRequestError(error instanceof Error ? error.message : String(error)); }
 }
 
 /**
@@ -129,7 +128,7 @@ class BackgroundTaskManager {
 		assertImageAllowed(requestedImage);
 
 		const requestedProjectPath = config.projectPath ?? WORKSPACE_ROOT;
-		const resolvedProjectPath = assertProjectPathAllowed(requestedProjectPath);
+		const resolvedProjectPath = await assertProjectPathAllowed(requestedProjectPath);
 
 		const id = `bg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 		const limits = { ...DEFAULT_RESOURCE_LIMITS, ...config.resourceLimits };

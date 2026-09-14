@@ -1,14 +1,5 @@
-// Fast, deterministic transpile for the container image and local builds.
-//
-// We use esbuild rather than `tsc` because tsc must resolve and instantiate the
-// MCP SDK's deeply-nested Zod tool-schema types, which pushes its heap past 4 GB
-// (SIGABRT / exit 134) in the CI Docker builder even with `skipLibCheck`.
-// esbuild strips types without resolving the declaration graph. Type-checking
-// stays available out-of-band via `npm run typecheck`.
-//
-// Per-file output (not a bundle) mirrors the previous tsc layout, so `dist/`
-// keeps the same shape and relative `require` paths (including the vendored
-// `../_lib` / `../_shared` code) resolve exactly as before.
+// Fast per-file transpilation after `npm run build` checks TypeScript.
+// Watch mode keeps transpilation fast; release builds always check types.
 import { build, context } from 'esbuild';
 
 /** @type {import('esbuild').BuildOptions} */

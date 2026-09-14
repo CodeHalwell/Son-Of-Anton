@@ -90,7 +90,7 @@ interface ResponsesFunctionCallOutput {
 	output: string;
 }
 
-type ResponsesInputItem = ResponsesInputMessage | ResponsesFunctionCallOutput;
+type ResponsesInputItem = ResponsesInputMessage | ResponsesFunctionCallOutput | { type: 'function_call'; call_id: string; name: string; arguments: string };
 
 interface ResponsesTool {
 	type: 'function';
@@ -260,6 +260,9 @@ export class ChatGPTOAuthAdapter implements ProviderAdapter {
 				retryable: true,
 			};
 			yield { type: 'message_stop', stopReason: 'error' };
+		} finally {
+			await reader.cancel().catch(() => {});
+			reader.releaseLock();
 		}
 	}
 }
@@ -318,6 +321,9 @@ function toResponsesInput(messages: readonly UniformMessage[]): ResponsesInputIt
 		for (const block of m.content) {
 			if (block.type === 'text') {
 				textParts.push({ type: textPartType(m.role), text: block.text });
+			} else if (block.type === 'tool_use') {
+				if (textParts.length) { out.push({ type: 'message', role: m.role, content: textParts.splice(0) }); }
+				out.push({ type: 'function_call', call_id: block.toolUseId, name: block.name, arguments: JSON.stringify(block.input) });
 			} else if (block.type === 'tool_result') {
 				// Flush any text buffered before this tool result so ordering is preserved.
 				if (textParts.length > 0) {

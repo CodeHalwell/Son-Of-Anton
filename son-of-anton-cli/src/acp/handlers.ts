@@ -3,333 +3,186 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { randomUUID } from 'crypto';
-import type { AgentEvent } from 'son-of-anton-core/dist/agents/agentEvents';
+import { randomUUID } from 'node:crypto';
+import { realpath, stat } from 'node:fs/promises';
+import { isAbsolute } from 'node:path';
+import { ACP_VERSION, AcpError, object, type AcpMcpServer, type AcpPermissionResult, type AcpPromptResult, type AcpUpdate } from 'son-of-anton-core/dist/acp/protocol';
 import type { AgentStack } from 'son-of-anton-core/dist/agents/AgentStackFactory';
-import type { ChatContextLike, ChatRequestLike, ChatStreamLike } from 'son-of-anton-core/dist/chatStream';
+import type { AgentHandle } from 'son-of-anton-core/dist/agents/types';
+import type { ChatRequestLike, ChatStreamLike } from 'son-of-anton-core/dist/chatStream';
+import type { ApprovalGate } from '../approval';
 import { CliCancellation } from '../cancellation';
-import {
-	JsonRpcErrorCode,
-	type AuthenticateRequestParams,
-	type ContentBlock,
-	type InitializeRequestParams,
-	type InitializeResult,
-	type NewSessionRequestParams,
-	type NewSessionResult,
-	type PromptRequestParams,
-	type PromptResult,
-	type PromptStopReason,
-	type SessionNotificationParams,
-	type SessionUpdate,
-} from './protocol';
 
-/** Protocol version this build implements. The public ACP spec is at v1. */
-export const PROTOCOL_VERSION = 1;
-
-/**
- * Handler-side error so the dispatcher can map domain failures onto JSON-RPC
- * error responses without leaking thrown native errors to the client.
- */
-export class AcpError extends Error {
-	constructor(readonly code: number, message: string, readonly data?: unknown) {
-		super(message);
-	}
+interface Session {
+	id: string;
+	cwd: string;
+	mode: AgentHandle | 'council-review';
+	built: { stack?: AgentStack; review?(text: string, signal: AbortSignal, onText: (text: string) => void): Promise<void>; dispose(): void };
+	history: Array<{ role: string; content: string }>;
+	active?: { cancellation: CliCancellation; controller: AbortController };
 }
-
-/**
- * Active prompt state — only one is live at a time per spec. We keep the
- * cancellation token here so `session/cancel` can flip it without the
- * dispatcher having to thread it through every handler.
- */
-interface ActivePrompt {
-	readonly sessionId: string;
-	readonly cancellation: CliCancellation;
-}
-
-interface SessionState {
-	readonly sessionId: string;
-	readonly cwd: string;
-	readonly history: Array<{ role: 'user' | 'assistant'; content: string }>;
-}
-
-/**
- * Dependencies the handlers need. `sendNotification` is wired by the server
- * loop — handlers call it for streaming updates while a prompt runs.
- *
- * `hasAnyApiKey` is checked at startup (env vars are mirrored into the secret
- * store by `bootstrapCredentials`) but we keep it as a callback so future
- * iterations can refresh it without restarting the process.
- */
 export interface HandlerDeps {
-	readonly stack: AgentStack;
-	readonly sendNotification: (method: string, params: unknown) => void;
-	readonly hasAnyApiKey: () => boolean;
-	readonly defaultCwd: string;
+	createSession(cwd: string, servers: AcpMcpServer[], approvalGate: ApprovalGate): Promise<Session['built']>;
+	sendNotification(method: string, params: unknown): void;
+	requestPermission(params: unknown, signal: AbortSignal): Promise<AcpPermissionResult>;
+	hasCredentials(): Promise<boolean>;
+	defaultAgent?: string;
+	maxSessions?: number;
 }
 
-/**
- * Handler set for the public ACP method surface. Each handler returns the
- * `result` portion of the JSON-RPC response (or void for notifications);
- * the dispatcher wraps it in a JSON-RPC envelope.
- */
+/** Independent stacks keep cwd, plans, memory and approvals isolated for each ACP session. */
 export class AcpHandlers {
-	private session: SessionState | null = null;
-	private active: ActivePrompt | null = null;
+	private initialized = false;
+	private disposed = false;
+	private creating = 0;
+	private readonly sessions = new Map<string, Session>();
+	constructor(private readonly deps: HandlerDeps) {}
 
-	constructor(private readonly deps: HandlerDeps) { }
-
-	// -----------------------------------------------------------------------
-	// initialize
-	// -----------------------------------------------------------------------
-
-	async initialize(params: InitializeRequestParams | undefined): Promise<InitializeResult> {
-		const requested = params?.protocolVersion;
-		// Spec: respond with the client's requested version if we support it,
-		// otherwise the highest version we do support. We only speak v1 today.
-		const negotiated = requested === PROTOCOL_VERSION ? requested : PROTOCOL_VERSION;
-		return {
-			protocolVersion: negotiated,
-			agentCapabilities: {
-				promptCapabilities: {
-					image: false,
-					audio: false,
-					embeddedContext: false,
-				},
-				loadSession: false,
-			},
-			// CLI v1 reads keys from env vars at startup; no interactive auth.
-			authMethods: [],
-		};
-	}
-
-	// -----------------------------------------------------------------------
-	// authenticate
-	// -----------------------------------------------------------------------
-
-	async authenticate(_params: AuthenticateRequestParams | undefined): Promise<Record<string, never>> {
-		if (!this.deps.hasAnyApiKey()) {
-			throw new AcpError(
-				JsonRpcErrorCode.AuthRequired,
-				'no API key configured. Set ANTHROPIC_API_KEY (or another supported provider env var) before launching the ACP server.',
-			);
+	async invoke(method: string, params: unknown): Promise<unknown> {
+		if (this.disposed) { throw new AcpError(-32600, 'ACP server is closing'); }
+		if (method === 'initialize') {
+			if (!object(params) || !Number.isInteger(params.protocolVersion)) { throw new AcpError(-32602, 'initialize requires protocolVersion'); }
+			this.initialized = params.protocolVersion === ACP_VERSION;
+			return { protocolVersion: ACP_VERSION, agentInfo: { name: 'son-of-anton', version: '1.0.0' }, agentCapabilities: { loadSession: false, promptCapabilities: { image: false, audio: false, embeddedContext: true } }, authMethods: [] };
 		}
-		// Spec: response is an empty object on success.
-		return {};
-	}
-
-	// -----------------------------------------------------------------------
-	// session/new
-	// -----------------------------------------------------------------------
-
-	async newSession(params: NewSessionRequestParams | undefined): Promise<NewSessionResult> {
-		// v1 supports a single live session per process. Replacing it
-		// invalidates any in-flight prompt — the spec doesn't forbid this and
-		// it keeps the server from leaking history across reconnects.
-		if (this.active) {
-			this.active.cancellation.cancel();
-			this.active = null;
-		}
-		const sessionId = randomUUID();
-		this.session = {
-			sessionId,
-			cwd: params?.cwd ?? this.deps.defaultCwd,
-			history: [],
-		};
-		return { sessionId };
-	}
-
-	// -----------------------------------------------------------------------
-	// session/prompt
-	// -----------------------------------------------------------------------
-
-	async prompt(params: PromptRequestParams | undefined): Promise<PromptResult> {
-		if (!params) {
-			throw new AcpError(JsonRpcErrorCode.InvalidParams, 'session/prompt requires params');
-		}
-		const session = this.session;
-		if (!session || session.sessionId !== params.sessionId) {
-			throw new AcpError(
-				JsonRpcErrorCode.SessionNotFound,
-				`unknown session id: ${params.sessionId}`,
-			);
-		}
-		if (this.active) {
-			throw new AcpError(
-				JsonRpcErrorCode.InvalidRequest,
-				'a prompt is already in flight for this session',
-			);
-		}
-
-		const text = extractText(params.prompt);
-		if (!text) {
-			throw new AcpError(JsonRpcErrorCode.InvalidParams, 'prompt has no text content');
-		}
-
-		const cancellation = new CliCancellation();
-		this.active = { sessionId: session.sessionId, cancellation };
-
-		try {
-			const stopReason = await this.runOrchestrator(session, text, cancellation);
-			return { stopReason };
-		} finally {
-			this.active = null;
-		}
-	}
-
-	// -----------------------------------------------------------------------
-	// session/cancel (notification — no response)
-	// -----------------------------------------------------------------------
-
-	cancel(params: { sessionId: string } | undefined): void {
-		if (!params || !this.active || params.sessionId !== this.active.sessionId) {
-			return;
-		}
-		this.active.cancellation.cancel();
-	}
-
-	// -----------------------------------------------------------------------
-	// Internal: orchestrator driver
-	// -----------------------------------------------------------------------
-
-	private async runOrchestrator(
-		session: SessionState,
-		userText: string,
-		cancellation: CliCancellation,
-	): Promise<PromptStopReason> {
-		const sessionId = session.sessionId;
-		const send = (update: SessionUpdate): void => {
-			const params: SessionNotificationParams = { sessionId, update };
-			this.deps.sendNotification('session/update', params);
-		};
-
-		// Buffer assistant text so we can append it to the in-process history
-		// once the turn completes. (Conversational continuity is best-effort —
-		// the orchestrator currently treats each `handleChatRequest` call as a
-		// fresh turn; the history is here so a future hook can lift it into
-		// the request context.)
-		let assistantText = '';
-
-		// `markdown()` is the only method the orchestrator actually calls into.
-		// We capture text into the same chunk stream so editors that listen
-		// solely for `agent_message_chunk` still see the response prose.
-		const stream: ChatStreamLike = {
-			markdown: (value: string) => {
-				if (!value) {
-					return;
-				}
-				assistantText += value;
-				send({
-					sessionUpdate: 'agent_message_chunk',
-					content: { type: 'text', text: value },
-				});
-			},
-			progress: () => { /* surfaced via session/update if needed in v2 */ },
-		};
-
-		const request: ChatRequestLike = { prompt: userText };
-		const context: ChatContextLike = { history: session.history };
-
-		const onEvent = (event: AgentEvent): void => {
-			mapAgentEventToUpdate(event, send);
-			if (event.type === 'token') {
-				assistantText += event.token;
+		if (!this.initialized) { throw new AcpError(-32600, 'Initialize the ACP connection first'); }
+		switch (method) {
+			case 'authenticate':
+				if (!await this.deps.hasCredentials()) { throw new AcpError(-32000, 'Configure provider credentials using sota auth or environment variables before starting this agent'); }
+				return {};
+			case 'session/new': return this.newSession(params);
+			case 'session/prompt': return this.prompt(params);
+			case 'session/cancel': this.cancel(params); return null;
+			case 'session/set_mode': {
+				const session = this.requireSession(params);
+				if (session.active) { throw new AcpError(-32600, 'Cannot change agent during a prompt'); }
+				const mode = (params as { modeId?: string }).modeId;
+				if (!mode || (session.built.review ? mode !== 'council-review' : mode !== 'anton' && !session.built.stack?.specialists.has(mode as AgentHandle))) { throw new AcpError(-32602, 'Unknown agent mode'); }
+				session.mode = mode as Session['mode'];
+				return {};
 			}
-		};
+			default: throw new AcpError(-32601, `Unsupported ACP method: ${method}`);
+		}
+	}
 
+	cancel(params: unknown): void {
+		if (!object(params) || typeof params.sessionId !== 'string') { return; }
+		const active = this.sessions.get(params.sessionId)?.active;
+		active?.controller.abort(); active?.cancellation.cancel();
+	}
+
+	dispose(): void {
+		this.disposed = true;
+		for (const session of this.sessions.values()) { this.cancel({ sessionId: session.id }); session.built.dispose(); }
+		this.sessions.clear();
+	}
+
+	private async newSession(params: unknown): Promise<unknown> {
+		if (!object(params) || typeof params.cwd !== 'string' || !isAbsolute(params.cwd) || !Array.isArray(params.mcpServers)) { throw new AcpError(-32602, 'session/new requires absolute cwd and mcpServers array'); }
+		const servers = parseServers(params.mcpServers);
+		if (this.sessions.size + this.creating >= (this.deps.maxSessions ?? 16)) { throw new AcpError(-32004, 'ACP session limit reached; open a new agent process'); }
+		this.creating++;
 		try {
-			await this.deps.stack.orchestrator.handleChatRequest(
-				request,
-				context,
-				stream,
-				cancellation,
-				onEvent,
-			);
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			send({ sessionUpdate: 'error', message });
-			throw new AcpError(JsonRpcErrorCode.InternalError, message);
-		}
-
-		// Append to history regardless of cancellation so a partially streamed
-		// reply isn't entirely lost from the in-process record.
-		session.history.push({ role: 'user', content: userText });
-		if (assistantText) {
-			session.history.push({ role: 'assistant', content: assistantText });
-		}
-
-		return cancellation.isCancellationRequested ? 'cancelled' : 'end_turn';
+			const cwd = await realpath(params.cwd);
+			if (!(await stat(cwd)).isDirectory()) { throw new AcpError(-32602, 'cwd must be a directory'); }
+			const id = randomUUID();
+			const approvalGate: ApprovalGate = async request => {
+				const active = this.sessions.get(id)?.active;
+				if (!active || active.controller.signal.aborted) { return { approved: false, reason: 'ACP turn cancelled' }; }
+				const toolCallId = randomUUID();
+				const toolCall = { toolCallId, title: request.detail, kind: request.kind === 'write' ? 'edit' : 'execute', status: 'pending' };
+				this.send(id, { sessionUpdate: 'tool_call', ...toolCall });
+				const result = await this.deps.requestPermission({ sessionId: id, toolCall, options: [
+					{ optionId: 'allow', name: 'Allow Once', kind: 'allow_once' },
+					{ optionId: 'reject', name: 'Reject', kind: 'reject_once' },
+				] }, active.controller.signal);
+				const approved = !active.controller.signal.aborted && result?.outcome?.outcome === 'selected' && result.outcome.optionId === 'allow';
+				this.send(id, { sessionUpdate: 'tool_call_update', toolCallId, status: approved ? 'completed' : 'failed', rawOutput: { permission: approved ? 'allowed' : 'denied' } });
+				return { approved, reason: approved ? undefined : 'ACP permission declined or cancelled' };
+			};
+			const built = await this.deps.createSession(cwd, servers, approvalGate);
+			if (this.disposed) { built.dispose(); throw new AcpError(-32600, 'ACP server is closing'); }
+			const mode = built.review ? 'council-review' : this.deps.defaultAgent ?? 'anton';
+			if (mode !== 'council-review' && mode !== 'anton' && !built.stack?.specialists.has(mode as AgentHandle)) { built.dispose(); throw new AcpError(-32602, `Unknown agent: ${mode}`); }
+			this.sessions.set(id, { id, cwd, mode: mode as Session['mode'], built, history: [] });
+			return { sessionId: id, modes: { currentModeId: mode, availableModes: [
+				...(built.review ? [{ id: 'council-review', name: 'Council Review', description: 'Review supplied evidence without tools, files, commands, or memory' }] : [{ id: 'anton', name: 'Anton', description: 'Plan and coordinate specialist work' }, ...[...built.stack!.specialists].map(([id, agent]) => ({ id, name: agent.displayName }))]),
+			] } };
+		} finally { this.creating--; }
 	}
+
+	private async prompt(params: unknown): Promise<AcpPromptResult> {
+		const session = this.requireSession(params);
+		if (session.active) { throw new AcpError(-32600, 'A prompt is already running in this session'); }
+		const text = extractPrompt((params as { prompt?: unknown }).prompt);
+		const active = { cancellation: new CliCancellation(), controller: new AbortController() };
+		session.active = active;
+		let response = '';
+		let reportedError: string | undefined;
+		const send = (update: AcpUpdate) => { if (!active.controller.signal.aborted) { this.send(session.id, update); } };
+		const stream: ChatStreamLike = { markdown: chunk => {
+			if (active.controller.signal.aborted) { return; }
+			response += chunk;
+			if (Buffer.byteLength(response) > 4 * 1024 * 1024) { this.cancel({ sessionId: session.id }); throw new AcpError(-32004, 'Response exceeds byte limit'); }
+			send({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: chunk } });
+		} };
+		try {
+			const history = session.history.length ? `Previous conversation (context):\n${JSON.stringify(session.history)}` : undefined;
+			if (session.mode === 'council-review') {
+				await session.built.review!(text, active.controller.signal, chunk => stream.markdown(chunk));
+			} else if (session.mode === 'anton') {
+				const slash = /^\/(plan|approve|reject|status|metrics)\b\s*/.exec(text);
+				const request: ChatRequestLike = { prompt: slash ? text.slice(slash[0].length) : text, command: slash?.[1], conversationId: session.id, workspaceContextSnapshot: history };
+				await session.built.stack!.orchestrator.handleChatRequest(request, { history: session.history }, stream, active.cancellation, event => {
+					if (event.type === 'error') { reportedError = event.message; }
+					if (event.type === 'plan-proposed') { send({ sessionUpdate: 'plan', entries: event.plan.subtasks.map(task => ({ content: `@${task.assignee}: ${task.instruction}`, priority: 'medium', status: 'pending' })) }); }
+					if (event.type === 'subtask-started') { send({ sessionUpdate: 'tool_call', toolCallId: event.subtaskId, title: `@${event.assignee}: ${event.instruction}`, kind: 'think', status: 'in_progress' }); }
+					if (event.type === 'subtask-completed' || event.type === 'subtask-failed') { send({ sessionUpdate: 'tool_call_update', toolCallId: event.subtaskId, status: event.type === 'subtask-completed' ? 'completed' : 'failed' }); }
+				});
+			} else {
+				await session.built.stack!.specialists.get(session.mode)!.runAgenticTurn(text, event => {
+					if (event.type === 'token') { stream.markdown(event.token); }
+					else { send({ sessionUpdate: event.status === 'running' ? 'tool_call' : 'tool_call_update', toolCallId: event.id, title: event.name, kind: 'other', status: event.status === 'running' ? 'in_progress' : event.status === 'done' ? 'completed' : 'failed', rawInput: event.input, rawOutput: event.output }); }
+				}, active.cancellation, { conversationId: session.id, workspaceContextSnapshot: history });
+			}
+			if (reportedError && !active.controller.signal.aborted) { throw new AcpError(-32603, reportedError); }
+			return { stopReason: active.controller.signal.aborted ? 'cancelled' : 'end_turn' };
+		} catch (error) { if (active.controller.signal.aborted) { return { stopReason: 'cancelled' }; } throw error; }
+		finally {
+			session.history.push({ role: 'user', content: text });
+			if (response) { session.history.push({ role: 'assistant', content: response }); }
+			while (session.history.length > 2 && (session.history.length > 40 || Buffer.byteLength(JSON.stringify(session.history)) > 256 * 1024)) { session.history.splice(0, 2); }
+			if (session.active === active) { session.active = undefined; }
+		}
+	}
+
+	private requireSession(params: unknown): Session {
+		if (!object(params) || typeof params.sessionId !== 'string') { throw new AcpError(-32602, 'sessionId is required'); }
+		const session = this.sessions.get(params.sessionId);
+		if (!session) { throw new AcpError(-32002, 'Session not found'); }
+		return session;
+	}
+	private send(sessionId: string, update: AcpUpdate): void { if (!this.disposed) { this.deps.sendNotification('session/update', { sessionId, update }); } }
 }
 
-/**
- * Concatenate any `text`-typed content blocks in the prompt array. Non-text
- * blocks are skipped because v1 advertises `image`/`audio`/`embeddedContext`
- * as `false` in `agentCapabilities.promptCapabilities`.
- */
-function extractText(blocks: ReadonlyArray<ContentBlock>): string {
-	let out = '';
-	for (const block of blocks) {
-		if (block.type === 'text' && typeof (block as { text?: unknown }).text === 'string') {
-			out += (block as { text: string }).text;
-		}
-	}
-	return out.trim();
+function extractPrompt(prompt: unknown): string {
+	if (!Array.isArray(prompt) || prompt.length > 1024) { throw new AcpError(-32602, 'prompt must be a content block array'); }
+	const text = prompt.map(block => {
+		if (!object(block)) { throw new AcpError(-32602, 'Invalid content block'); }
+		if (block.type === 'text' && typeof block.text === 'string') { return block.text; }
+		if (block.type === 'resource_link' && typeof block.uri === 'string') { return `Referenced resource: ${block.uri}`; }
+		if (block.type === 'resource' && object(block.resource) && typeof block.resource.text === 'string') { return `Resource ${block.resource.uri ?? ''}:\n${block.resource.text}`; }
+		throw new AcpError(-32602, 'Unsupported prompt content; this agent accepts text and text resources');
+	}).join('\n');
+	if (!text.trim()) { throw new AcpError(-32602, 'Prompt is empty'); }
+	return text;
 }
-
-/**
- * Map a core `AgentEvent` onto an ACP `session/update` notification. The
- * orchestrator emits richer events than the spec defines; we collapse them
- * onto the closest spec-defined kind and drop the rest. (Subtask events get
- * surfaced through `markdown()` already, so swallowing them here keeps the
- * client surface focused.)
- */
-function mapAgentEventToUpdate(event: AgentEvent, send: (u: SessionUpdate) => void): void {
-	switch (event.type) {
-		case 'token':
-			// Token already fed via stream.markdown(); avoid double-streaming.
-			return;
-		case 'plan-proposed':
-			send({
-				sessionUpdate: 'plan',
-				entries: event.plan.subtasks.map(s => ({
-					content: `@${s.assignee}: ${s.instruction}`,
-					priority: 'medium',
-					status: 'pending',
-				})),
-			});
-			return;
-		case 'subtask-started':
-			send({
-				sessionUpdate: 'tool_call',
-				toolCallId: event.subtaskId,
-				title: `@${event.assignee}: ${event.instruction}`,
-				status: 'in_progress',
-				kind: 'think',
-			});
-			return;
-		case 'subtask-completed':
-			send({
-				sessionUpdate: 'tool_call_update',
-				toolCallId: event.subtaskId,
-				status: 'completed',
-				rawOutput: { summary: event.summary },
-			});
-			return;
-		case 'subtask-failed':
-			send({
-				sessionUpdate: 'tool_call_update',
-				toolCallId: event.subtaskId,
-				status: 'failed',
-				rawOutput: { error: event.error },
-			});
-			return;
-		case 'error':
-			send({ sessionUpdate: 'error', message: event.message });
-			return;
-		default:
-			// Includes subtask-token / subtask-ready / subtask-reassigned /
-			// subtask-blocked / final — already echoed via markdown chunks
-			// or otherwise not represented in the public ACP surface.
-			return;
+function parseServers(value: unknown[]): AcpMcpServer[] {
+	if (value.length > 32) { throw new AcpError(-32602, 'Too many MCP servers'); }
+	const names = new Set<string>();
+	for (const server of value) {
+		if (!object(server) || typeof server.name !== 'string' || names.has(server.name) || typeof server.command !== 'string' || !server.command || !Array.isArray(server.args) || !server.args.every(arg => typeof arg === 'string') || !Array.isArray(server.env) || !server.env.every(env => object(env) && typeof env.name === 'string' && typeof env.value === 'string')) { throw new AcpError(-32602, 'Only named MCP stdio servers with command, args and env are supported'); }
+		names.add(server.name);
 	}
+	return value as AcpMcpServer[];
 }

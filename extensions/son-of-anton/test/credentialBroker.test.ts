@@ -5,6 +5,9 @@
 import * as assert from 'assert';
 import * as net from 'net';
 import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { randomUUID } from 'crypto';
 import { CredentialBroker } from 'son-of-anton-core/auth/CredentialBroker';
 import { BrokerServer } from 'son-of-anton-core/auth/BrokerServer';
 import type { SecretStore, TokenRecord, ProviderConfig } from 'son-of-anton-core/auth/types';
@@ -259,6 +262,7 @@ async function brokerRpc(
 }
 
 suite('BrokerServer', () => {
+	let fixtureDir: string;
 	let brokerServer: BrokerServer;
 	let socketPath: string;
 	let sessionToken: string;
@@ -270,14 +274,26 @@ suite('BrokerServer', () => {
 		const broker = new CredentialBroker(store, () => Promise.resolve(true));
 		broker.registerProvider(FAKE_PROVIDER);
 
-		brokerServer = new BrokerServer(broker);
+		fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sota-broker-test-'));
+		const testSocketPath = process.platform === 'win32' ? `\\\\.\\pipe\\sota-test-${randomUUID()}` : path.join(fixtureDir, 'broker.sock');
+		brokerServer = new BrokerServer(broker, { socketPath: testSocketPath, tokenFilePath: path.join(fixtureDir, 'broker.token') });
 		const info = await brokerServer.start();
 		socketPath = info.socketPath;
 		sessionToken = fs.readFileSync(info.tokenFilePath, 'utf-8').trim();
 	});
 
 	teardown(() => {
-		brokerServer.stop();
+		brokerServer?.stop();
+		if (fixtureDir) { fs.rmSync(fixtureDir, { recursive: true, force: true }); }
+	});
+
+	test('a second broker cannot replace the active socket or token', async () => {
+		const other = new BrokerServer(new CredentialBroker(store, () => Promise.resolve(true)), { socketPath, tokenFilePath: path.join(fixtureDir, 'broker.token') });
+		try {
+			await assert.rejects(other.start(), { code: 'EADDRINUSE' });
+			assert.strictEqual(fs.readFileSync(path.join(fixtureDir, 'broker.token'), 'utf8'), sessionToken);
+			assert.ok((await brokerRpc(socketPath, sessionToken, { method: 'status', requestId: 'owner' }))['result']);
+		} finally { other.stop(); }
 	});
 
 	test('auth handshake succeeds with valid session token', async () => {
@@ -369,12 +385,7 @@ suite('BrokerServer', () => {
 		if (process.platform === 'win32') {
 			this.skip();
 		}
-		const info = await (async () => {
-			// Re-check the token file permissions from setup
-			const tokenDir = process.env['XDG_RUNTIME_DIR'] ?? require('os').tmpdir();
-			const tokenFilePath = require('path').join(tokenDir, 'son-of-anton-broker.token');
-			return fs.statSync(tokenFilePath);
-		})();
+		const info = fs.statSync(path.join(fixtureDir, 'broker.token'));
 		// 0o600 = rw------- — only owner can read/write
 		assert.strictEqual(info.mode & 0o777, 0o600);
 	});

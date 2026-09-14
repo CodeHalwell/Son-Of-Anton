@@ -28,8 +28,14 @@ npm run package:windows-x64  # dist-bundle/sota-windows-x64.exe
 npm run package:all
 ```
 
-Outputs land in `dist-bundle/` alongside `THIRD_PARTY_LICENSES.txt`. The
-whole directory and the generated `sea-config.json` are git-ignored.
+Outputs land in `dist-bundle/` alongside `THIRD_PARTY_LICENSES.txt`. Set
+`SOTA_CLI_PACKAGE_OUTPUT` to keep a target in a different output directory.
+The packager stages a complete candidate and runs applicable smoke checks
+before replacing the prior output. A failed build preserves the last working
+CLI. `package:all` builds every target in isolation and replaces the full
+three-platform set only after all targets succeed; a missing binary or license
+manifest fails the run. Its temporary `sea-config.json` is removed after blob
+generation.
 
 ## Pipeline (ten steps)
 
@@ -40,23 +46,28 @@ For each target the pipeline runs:
     `dist-bundle/cli.cjs`. Everything (commander, ink, react,
     marked-terminal, the AWS Bedrock SDK, `son-of-anton-core/dist/**`)
     is inlined; no `node_modules` resolution happens at runtime.
-2.  **Vendor install** — `npm install --no-save --no-package-lock
-    --prefix dist-bundle/vendor --os <target-os> --cpu <target-cpu>
-    @anthropic-ai/claude-code@<pin> @openai/codex@<pin>` populates
-    `dist-bundle/vendor/node_modules/` with the **target** platform's
-    optional-dep binaries (ripgrep, tree-sitter, etc.). The `--os` /
-    `--cpu` flags drive npm's optional-dep resolver so this works even
-    when the build host is a different OS/arch.
+2.  **Vendor install** — install the pinned upstream CLIs and their target
+    native packages as required dependencies. Use `--os` / `--cpu`, plus
+    `--libc glibc` for the Linux release. `--ignore-scripts` prevents
+    upstream postinstall from selecting the build host instead of the
+    target. The packager places Claude's target executable explicitly and
+    checks native headers and CPU architecture for Claude, Codex, its code
+    mode host, and ripgrep. Missing downloads or placeholder launchers fail
+    packaging before publication. Cross-builds pass `--force` only to work
+    around npm 10's host-only required-dependency platform check; the
+    packager independently rejects incorrect target executable headers.
 3.  **Shim rewrite** — replaces every launcher shim under
     `vendor/node_modules/.bin/` with a small wrapper that re-enters the
     SEA binary via its trampoline mode (`sota --sota-run-node …`).
-    Posix targets get an `sh` wrapper; Windows gets a `.cmd` wrapper and
+    Native launchers execute directly; script paths come from each package's
+    own manifest, including on cross-builds. Posix targets get an `sh` wrapper; Windows gets a `.cmd` wrapper and
     a posix wrapper (for MSYS / git-bash). The actual SEA-binary path
     is templated as `__SOTA_BIN__` and resolved at first-run extraction
     time (we don't know the user's install path at build time).
 4.  **Archive** — tar+gzip the vendor tree into
     `dist-bundle/vendor.tgz` so the SEA only carries one asset blob
-    instead of thousands of individual files.
+    instead of thousands of individual files. macOS AppleDouble metadata is
+    excluded so it does not leak into Linux or Windows installations.
 5.  **Licenses** — walk every package under
     `vendor/node_modules/`, concatenate each LICENSE file into
     `dist-bundle/THIRD_PARTY_LICENSES.txt` with name/version/license
@@ -68,10 +79,11 @@ For each target the pipeline runs:
     keyed to the producing platform; embedding a host-built cache
     would crash a cross-target SEA at startup).
 7.  **SEA blob** — `node --experimental-sea-config sea-config.json`
-    produces the blob via a SEA-fuse-capable Node binary (cached
-    per-target under `~/.cache/sota-sea/`). Homebrew strips the fuse
-    sentinel, so the script falls back to an official tarball when
-    `process.execPath` is unusable.
+    produces the blob with the pinned official Node 22.23.2 release
+    (cached per target under `~/.cache/sota-sea/`). Archives are checked
+    against committed SHA-256 values before extraction, including on cache
+    reuse. The producer and target use that same release; the Node running
+    the packager is never substituted for the pinned producer.
 8.  **Copy & inject** — copy the target's official Node binary to
     `dist-bundle/<binary>`, then `npx postject` injects the blob into
     the `NODE_SEA` segment. On Mach-O we pass `--macho-segment-name
@@ -84,9 +96,7 @@ For each target the pipeline runs:
     + notarisation; see [Signing](#signing) below). On Windows,
     signing is likewise gated on `SOTA_WINDOWS_*` env vars and runs
     from the same hook. Skipped wholesale on Linux.
-10. **Smoke** — `./dist-bundle/<binary> --version` must exit 0. Only
-    runs when the build host matches the target; cross-builds skip
-    this and rely on the consumer-machine validation in CI.
+10. **Smoke** — copy into a clean temporary installation with spaces in its path and a separate cache. Verify version/help, CJS/ESM trampoline arguments, actual bundled Claude/Codex `--version` launches, ACP initialization/session creation, and relocation to a different executable path. Only runs when the build host matches the target. The ACP test deadline is 20 seconds by default; explicit `packageSmoke` callers may supply `handshakeTimeoutMs` for emulated environments and must report that difference. This does not change application timeouts. Pull-request CI builds and checks macOS arm64, Linux x64 and Windows x64 without publishing a release.
 
 ## What is bundled
 
@@ -100,22 +110,21 @@ For each target the pipeline runs:
 - **Stage 2 additions**: the upstream `@anthropic-ai/claude-code` and
   `@openai/codex` CLIs with their **target-platform** optional-dep
   binaries, as a `vendor.tgz` SEA asset. Extracted at first run into
-  `~/.sota/cache/<sota-version>/`; subsequent runs reuse the extracted
+  `~/.sota/cache/<sota-version>-<executable-identity>/`; subsequent runs reuse the extracted
   tree.
 
 ## Vendor extraction at runtime
 
-On first invocation for a given `sota` version, the SEA entrypoint:
+The cache identity includes the executable's path, size and modification time, so moving or replacing a binary does not reuse launchers pointing at an old installation. `SOTA_CACHE_DIR` can select a different absolute cache root. On first invocation, the SEA entrypoint:
 
-1.  Looks for `~/.sota/cache/<sota-version>/.extracted`; if present,
+1.  Looks for `<cache-root>/<version>-<identity>/.extracted`; if present,
     short-circuits.
 2.  Otherwise extracts the `vendor.tgz` asset via the system `tar`
     binary (available on macOS, Linux, and Windows 10+) into a sibling
-    temp directory, then atomically renames into the final cache path
-    so concurrent `sota` invocations don't race on a half-written tree.
+    temporary directory on the destination filesystem.
 3.  Rewrites the `__SOTA_BIN__` placeholder in every shim under
     `vendor/node_modules/.bin/` with `process.execPath` (the absolute
-    path of the running SEA binary).
+    path of the running SEA binary), with platform-appropriate escaping. Publishes the fully patched tree and sentinel by atomic rename only after extraction succeeds; concurrent invocations cannot see a half-written cache.
 4.  Prepends `<cache>/node_modules/.bin/` to `process.env.PATH`. The
     existing `isClaudeCodeAvailable` / `isCodexAvailable` probes (in
     `son-of-anton-core/src/llm/{claudeCodeRunner,codexRunner}.ts`) walk
@@ -125,7 +134,7 @@ On first invocation for a given `sota` version, the SEA entrypoint:
 The cache directory layout:
 
 ```
-~/.sota/cache/0.1.0/
+~/.sota/cache/0.1.0-<identity>/
 ├── .extracted                                # sentinel ISO timestamp
 └── node_modules/
     ├── .bin/
@@ -217,7 +226,8 @@ Linux, and Windows. On Windows that resolves to
 
 ## Approximate binary sizes
 
-Measured with `claude-code@2.1.138` + `codex@0.130.0`, Node 22.20.0:
+Historical measurements with `claude-code@2.1.138` + `codex@0.130.0`, Node 22.20.0
+(these are not measurements of the current pins):
 
 | Binary                                 | vendor.tgz  | Final binary |
 |----------------------------------------|-------------|--------------|
@@ -238,29 +248,24 @@ ninth-step extension (`signBinary` in `scripts/lib/sea-pipeline.mjs`). It
 is **entirely env-var driven** — with no env vars set the local dev flow
 is unchanged (ad-hoc Mach-O signature, unsigned ELF, unsigned PE). The
 release GitHub Actions workflow (`.github/workflows/release-sota.yml`)
-sets the env vars from repository secrets on a per-runner basis.
+sets the env vars from repository secrets on a per-runner basis. Tagged releases require signing; manual runs can disable `require_signing` for a development artifact. Set `SOTA_REQUIRE_SIGNING=true` to enforce the same gate locally.
 
 ### macOS — Developer ID + notarisation
 
 | Env var                            | Meaning                                                                                |
 |------------------------------------|----------------------------------------------------------------------------------------|
 | `SOTA_MACOS_SIGNING_IDENTITY`      | Common name of the Developer ID Application identity in the login keychain.            |
+| `SOTA_MACOS_SIGNING_KEYCHAIN`     | Optional keychain containing the identity; CI imports its P12 into a temporary keychain. |
 | `SOTA_MACOS_NOTARY_KEY_ID`         | App Store Connect API key ID (10-char alphanumeric).                                   |
 | `SOTA_MACOS_NOTARY_KEY_ISSUER`     | Issuer UUID for the API key.                                                           |
 | `SOTA_MACOS_NOTARY_KEY_PATH`       | Path to the `AuthKey_<id>.p8` file on disk.                                            |
 
 Behaviour:
 
-- If `SOTA_MACOS_SIGNING_IDENTITY` is set, the binary is re-signed
-  with `codesign --force --options runtime --timestamp --sign <identity>`
-  *after* the existing ad-hoc signature. The `--options runtime`
-  flag enables the hardened runtime, which is a prerequisite for
-  notarisation.
-- If all three `SOTA_MACOS_NOTARY_KEY_*` vars are also set, the
-  packager zips the binary, submits to `xcrun notarytool submit --wait`,
-  then `xcrun stapler staple`s the result. The zip is cleaned up
-  afterwards. Notarisation typically takes 1–5 minutes.
-- Either step is a silent no-op when its env vars are absent.
+- Developer ID signing enables the hardened runtime with only the JIT entitlement needed by Node. The signature is verified before notarization.
+- Notarization requires all three notary settings and a signing identity. Partial configuration fails before signing. The packager submits a temporary ZIP, waits up to 30 minutes, requires an accepted result, and verifies the executable's notarized code requirement.
+- Raw command-line executables cannot carry a stapled ticket. Gatekeeper retrieves their ticket online on first use. See [Apple's notarization workflow explanation](https://developer.apple.com/videos/play/wwdc2019/703/). The temporary ZIP is removed on success or failure.
+- CI imports `MACOS_SIGNING_CERT_P12` using `MACOS_SIGNING_CERT_PASSWORD`, uses `MACOS_SIGNING_IDENTITY`, and decodes the `MACOS_NOTARY_KEY_BASE64` key with its `MACOS_NOTARY_KEY_ID` and `MACOS_NOTARY_KEY_ISSUER`. The import action deletes its temporary keychain after the job; decoded key files are explicitly cleaned up.
 
 ### Windows — Authenticode
 
@@ -268,19 +273,14 @@ Behaviour:
 |-----------------------------------------------|------------------------------------------------------------------------|
 | `SOTA_WINDOWS_SIGNING_CERT`                   | Path to a `.pfx` (PKCS#12) certificate file.                           |
 | `SOTA_WINDOWS_SIGNING_PASSWORD`               | Password for the `.pfx`. Use this OR…                                  |
-| `SOTA_WINDOWS_SIGNING_CERT_PASSWORD_FILE`     | Path to a file whose contents are the password. Preferred for CI.      |
+| `SOTA_WINDOWS_SIGNING_CERT_PASSWORD_FILE`     | Path to a file whose contents are the password.      |
+| `SOTA_WINDOWS_SIGNTOOL` | Optional explicit path to `signtool.exe`. |
 
 Behaviour:
 
-- If `SOTA_WINDOWS_SIGNING_CERT` is set AND `signtool.exe` is on
-  PATH, the binary is signed with an RFC3161 timestamp from
-  `http://timestamp.digicert.com` and a SHA-256 file digest.
-- If `signtool` is not on PATH (typical on macOS / Linux build
-  hosts), signing is skipped silently. The release workflow runs the
-  Windows cross-build on `windows-2022`, where the Windows SDK ships
-  `signtool` on PATH out of the box.
-- Reading the password from a file is preferred: it stays out of
-  the process environment table and out of `ps`/audit logs.
+- Configured signing uses an RFC3161 timestamp and SHA-256 file digest, then verifies the Authenticode signature.
+- The tool is resolved from the explicit path, PATH, or the installed Windows SDK. Missing credentials, unavailable tools and failed verification stop the build when signing is configured or required.
+- A password file avoids an environment variable, but `signtool` still receives the password as a process argument. Signing failures do not include arguments in diagnostics.
 
 ### Direct invocation from the release workflow
 
@@ -293,19 +293,7 @@ the right helper based on `target.exeFormat`.
 
 ### Local testing without real certs
 
-You don't need a real Developer ID or Authenticode cert to verify the
-wiring works:
-
-- **macOS**: set `SOTA_MACOS_SIGNING_IDENTITY=bogus-identity` and
-  run a packaging command. `codesign` will print "no identity found"
-  and the build will fail — which proves the env var is consumed and
-  the codesign call is reached.
-- **Windows**: on a Windows host with the SDK installed, set
-  `SOTA_WINDOWS_SIGNING_CERT` to any `.pfx` (e.g. one generated by
-  `New-SelfSignedCertificate` + `Export-PfxCertificate`) and a
-  matching password. `signtool sign` will succeed and `signtool verify
-  /pa` will warn that the cert chain doesn't terminate at a trusted
-  root — fine for testing the pipeline.
+Run `node --test scripts/lib/signing.test.mjs` from the CLI directory. The tests exercise required/partial credentials, accepted/rejected notarization, cleanup, missing Windows tools and signature-verification failures using command fixtures. These tests do not establish that a release is signed. Actual signing and clean-machine Gatekeeper/Authenticode verification still require the production certificates and native runners.
 
 ## Self-update
 
@@ -322,17 +310,13 @@ The SEA flow:
 1. Maps `process.platform` + `process.arch` to one of the three release
    artefact names produced by the release workflow (`sota-macos-arm64`,
    `sota-linux-x64`, `sota-windows-x64.exe`).
-2. Calls `GET /repos/<owner>/<repo>/releases` and picks the most recent
-   non-draft release tagged `sota-v*`.
+2. Paginates `GET /repos/<owner>/<repo>/releases` and picks the highest stable CLI version, ignoring IDE, draft and prerelease entries. An incomplete or failed catalog check does not claim a latest version.
 3. Downloads `SHA256SUMS.txt` from the release and reads the expected
    digest for the artefact. **A release without `SHA256SUMS.txt` is
    refused.**
 4. Streams the artefact to a temp file while computing SHA256, then
    compares against the expected digest.
-5. Atomically swaps the running binary:
-   - `rename(<runningBinary>, <runningBinary>.old)`
-   - `rename(<tempBinary>, <runningBinary>)`
-   - `chmod +x <runningBinary>` (POSIX)
+5. Copies the download to an exclusive staging file beside the installed executable, verifies its checksum again and sets its executable mode before replacement. Renames the old binary to a unique `.old` backup, then renames the staged file into place. A failed second rename rolls back the first. Staging on the destination volume avoids cross-device rename failures. Backups remain available until the user removes them.
 
    The OS keeps the still-running process pointed at the now-renamed
    `.old` file via its open file descriptor, so the current invocation
@@ -343,9 +327,7 @@ The SEA flow:
 On Windows, file handles to running executables prevent some rename
 operations. The current implementation lets the OS surface the error
 ("Access is denied" or `EBUSY`) when it can't perform the swap; the
-user is expected to re-run from a different shell window or after
-closing other `sota` processes. This is documented in the post-update
-output and in `update.ts` itself.
+installed binary is preserved. Close running processes and use an external installer if the operating system prevents self-replacement. The update tests cover locked targets and failed swaps; they do not claim Windows allows replacing every running executable.
 
 ### Dry-run
 
@@ -358,7 +340,7 @@ against a release that hasn't been promoted yet.
 
 `sota update` and the background `maybeNagAboutUpdate` helper share a
 cache file at `~/.son-of-anton/data/update-check.json` so the registry
-isn't hit on every invocation. The cache TTL is 24 hours.
+isn't hit on every invocation. Standalone builds check GitHub releases, and cache entries distinguish standalone from npm installations. The cache TTL is 24 hours.
 
 ## Known limitations
 
@@ -373,11 +355,11 @@ isn't hit on every invocation. The cache TTL is 24 hours.
 - **No `--inspect`**: the SEA flow disables the Node inspector by
   default (see `useCodeCache: true` on host builds). For debugging,
   run `node dist/cli.js` instead.
-- **Binary is not portable across major Node versions**: the SEA blob
-  format is keyed to the host Node major. The build pins
-  `NODE_VERSION = v22.20.0` in `scripts/lib/sea-pipeline.mjs`; bump
-  that constant in lockstep with the esbuild `target` field if you
-  migrate.
+- **Producer and target must match the pinned release**: the build pins
+  `NODE_VERSION = v22.23.2` in `scripts/lib/sea-pipeline.mjs` and archive
+  checksums in `scripts/lib/node-archive.mjs`. Update both together; a major
+  version migration also requires updating the esbuild target and rerunning
+  all native smoke tests. This pin includes the [July 2026 security release](https://nodejs.org/en/blog/release/v22.23.2).
 - **Signing is opt-in** — production Authenticode signing on Windows
   and Developer ID + notarisation on macOS are bolted onto the
   pipeline via env vars (see [Signing](#signing)). Local builds with
@@ -388,7 +370,8 @@ isn't hit on every invocation. The cache TTL is 24 hours.
 
 | Symptom                                                    | Fix                                                                                                                                       |
 |------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------|
-| `Could not find the sentinel NODE_SEA_FUSE_...`            | Your running Node lacks the SEA fuse (Homebrew strips it). The script will auto-download an official Node tarball into `~/.cache/sota-sea/`. |
+| `Could not find the sentinel NODE_SEA_FUSE_...`            | Check that the packager is using its pinned official Node archive; the producer and target are validated before injection. |
+| `Node archive SHA-256 does not match its pinned release` | Do not bypass verification. Check the Node version and committed archive hashes against the official release's SHASUMS256.txt. |
 | `code signature in ... not valid for use`                  | The re-sign step was skipped — re-run `npm run package:macos-arm64`.                                                                      |
 | `Failed to load agent prompt for "..."`                    | A new prompt file was added to `son-of-anton-core/src/agents/prompts/` without rebuilding core. Run `npm --prefix ../son-of-anton-core run build` first. |
 | Bundle size jumps by >20 MiB                               | Check what new transitive dep got pulled in — `npx esbuild --analyze src/seaEntry.ts > /tmp/analyze.txt` shows the per-import cost.       |

@@ -67,6 +67,8 @@ export function instrumentToolExecutionContext(
 	hookRunner: HookRunner,
 ): ToolExecutionContext {
 	return {
+		signal: ctx.signal,
+		requestMcpApproval: ctx.requestMcpApproval,
 		workspaceRoot: ctx.workspaceRoot,
 
 		// Forward the host config accessor unchanged — hooks have no need to

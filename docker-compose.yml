@@ -1,29 +1,28 @@
 # Son of Anton — Backend Services
-# Start all services: docker compose up -d
-# Tear down everything: docker compose down -v
+# Start optional services: docker compose --profile services up -d
+# Stop optional services, preserving data: docker compose --profile services down
 #
 # SECURITY: every published port is bound to 127.0.0.1 so the services (and the
 # FalkorDB/Qdrant data stores) are reachable only from the local host, not from
 # other machines on the network. Inter-service traffic is unaffected — it flows
 # over the internal Docker network via service names (e.g. `model-router:3200`).
-# This closes the LAN / remote-host exposure; per-service authentication and
-# DB passwords are still required to defend against other local processes and
-# DNS-rebinding, and remain TODO for most services (background-tasks already
-# requires a bearer token and stays unpublished).
+# Generate a private .env with `node scripts/configure-services.mjs` before use.
+# All datastores require credentials and HTTP services require bearer auth.
 
 services:
   falkordb:
+    profiles: [services]
     image: falkordb/falkordb:latest
     container_name: soa-falkordb
     environment:
-      # Require a password only when FALKORDB_PASSWORD is set; empty leaves FalkorDB open (dev default).
-      - REDIS_ARGS=${FALKORDB_PASSWORD:+--requirepass ${FALKORDB_PASSWORD}}
+      - REDIS_ARGS=--requirepass ${FALKORDB_PASSWORD:?Run node scripts/configure-services.mjs}
+      - REDISCLI_AUTH=${FALKORDB_PASSWORD:?Run node scripts/configure-services.mjs}
     ports:
       - "127.0.0.1:${FALKORDB_PORT:-6379}:6379"
     volumes:
       - falkordb-data:/data
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli ping 2>&1 | grep -qE 'PONG|NOAUTH'"]
+      test: ["CMD-SHELL", "redis-cli ping | grep -qx PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -35,11 +34,11 @@ services:
     restart: unless-stopped
 
   qdrant:
+    profiles: [services]
     image: qdrant/qdrant:latest
     container_name: soa-qdrant
     environment:
-      # Require an API key on data endpoints only when QDRANT_API_KEY is set; /readyz stays open for probes.
-      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY:-}
+      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY:?Run node scripts/configure-services.mjs}
     ports:
       - "127.0.0.1:${QDRANT_REST_PORT:-6333}:6333"
       - "127.0.0.1:${QDRANT_GRPC_PORT:-6334}:6334"
@@ -54,14 +53,21 @@ services:
     restart: unless-stopped
 
   postgres:
+    profiles: [services]
     image: postgres:16
     container_name: soa-postgres
     environment:
       - POSTGRES_DB=${DB_NAME:-son_of_anton}
-      - POSTGRES_USER=${DB_USER:-readonly}
-      - POSTGRES_HOST_AUTH_METHOD=trust
+      - POSTGRES_USER=sota_admin
+      - POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256
+      - POSTGRES_PASSWORD=${POSTGRES_ADMIN_PASSWORD:?Run node scripts/configure-services.mjs}
+      - DB_USER=${DB_USER:-readonly}
+      - DB_PASSWORD=${DB_PASSWORD:?Run node scripts/configure-services.mjs}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./services/postgres/init-readonly.sql:/docker-entrypoint-initdb.d/10-readonly.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U readonly -d son_of_anton"]
+      test: ["CMD-SHELL", 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
       interval: 10s
       timeout: 5s
       retries: 5
@@ -69,6 +75,7 @@ services:
     restart: unless-stopped
 
   indexer:
+    profiles: [services]
     build:
       context: ./services/indexer
       dockerfile: Dockerfile
@@ -85,10 +92,10 @@ services:
       - QDRANT_REST_PORT=${QDRANT_REST_PORT:-6333}
       - QDRANT_GRPC_PORT=${QDRANT_GRPC_PORT:-6334}
       - PROJECT_PATH=/workspace
-      - LANGUAGES=${LANGUAGES:-typescript,python,rust,csharp,cpp}
-      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
-      - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:-}
-      - QDRANT_API_KEY=${QDRANT_API_KEY:-}
+      - LANGUAGES=${LANGUAGES:-typescript,tsx,javascript,python}
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:?Run node scripts/configure-services.mjs}
+      - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:?Run node scripts/configure-services.mjs}
+      - QDRANT_API_KEY=${QDRANT_API_KEY:?Run node scripts/configure-services.mjs}
       # Embedding settings — must match mcp-gateway (same variables) so
       # stored document vectors and query vectors come from the same model.
       - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-mock}
@@ -109,6 +116,7 @@ services:
     restart: unless-stopped
 
   lsif:
+    profiles: [services]
     build:
       context: ./services/lsif
       dockerfile: Dockerfile
@@ -120,10 +128,10 @@ services:
       - FALKORDB_HOST=${FALKORDB_HOST:-falkordb}
       - FALKORDB_PORT=${FALKORDB_PORT:-6379}
       - PROJECT_PATH=/workspace
-      - LANGUAGES=${LANGUAGES:-typescript,python,rust,csharp,cpp}
+      - LANGUAGES=${LANGUAGES:-typescript,tsx,javascript,python}
       - PREFER_SCIP=${PREFER_SCIP:-false}
-      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
-      - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:-}
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:?Run node scripts/configure-services.mjs}
+      - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:?Run node scripts/configure-services.mjs}
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:ro
       - lsif-snapshots:/data/lsif-snapshots
@@ -136,6 +144,10 @@ services:
     restart: unless-stopped
 
   mcp-gateway:
+    networks:
+      - default
+      - sandbox-net
+    profiles: [services]
     build:
       context: ./services/mcp-gateway
       dockerfile: Dockerfile
@@ -155,9 +167,9 @@ services:
       - QDRANT_GRPC_PORT=${QDRANT_GRPC_PORT:-6334}
       - MCP_PORT=${MCP_PORT:-3100}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
-      - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:-}
-      - QDRANT_API_KEY=${QDRANT_API_KEY:-}
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:?Run node scripts/configure-services.mjs}
+      - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:?Run node scripts/configure-services.mjs}
+      - QDRANT_API_KEY=${QDRANT_API_KEY:?Run node scripts/configure-services.mjs}
       # Embedding settings — must match the indexer (same variables) so
       # stored document vectors and query vectors come from the same model.
       - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-mock}
@@ -178,6 +190,7 @@ services:
     restart: unless-stopped
 
   mcp-database:
+    profiles: [services]
     build:
       context: ./son-of-anton-mcp/servers/database
       dockerfile: Dockerfile
@@ -192,9 +205,9 @@ services:
       - DB_PORT=${DB_PORT:-5432}
       - DB_NAME=${DB_NAME:-son_of_anton}
       - DB_USER=${DB_USER:-readonly}
-      - DB_PASSWORD=${DB_PASSWORD:-}
+      - DB_PASSWORD=${DB_PASSWORD:?Run node scripts/configure-services.mjs}
       - MCP_DATABASE_PORT=3102
-      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:?Run node scripts/configure-services.mjs}
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:3102/health"]
       interval: 15s
@@ -204,6 +217,7 @@ services:
     restart: unless-stopped
 
   mcp-deployment:
+    profiles: [services]
     build:
       context: ./son-of-anton-mcp/servers/deployment
       dockerfile: Dockerfile
@@ -214,7 +228,7 @@ services:
       - GITHUB_REPOSITORY=${GITHUB_REPOSITORY:-CodeHalwell/Son-Of-Anton}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - MCP_DEPLOYMENT_PORT=3103
-      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:?Run node scripts/configure-services.mjs}
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:3103/health"]
       interval: 15s
@@ -224,6 +238,7 @@ services:
     restart: unless-stopped
 
   mcp-tickets:
+    profiles: [services]
     build:
       context: ./son-of-anton-mcp/servers/tickets
       dockerfile: Dockerfile
@@ -234,7 +249,7 @@ services:
       - GITHUB_REPOSITORY=${GITHUB_REPOSITORY:-CodeHalwell/Son-Of-Anton}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - MCP_TICKETS_PORT=3104
-      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:?Run node scripts/configure-services.mjs}
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:3104/health"]
       interval: 15s
@@ -282,8 +297,8 @@ services:
       - FALKORDB_PORT=${FALKORDB_PORT:-6379}
       - MAX_REQUESTS_PER_TEST=${MAX_REQUESTS_PER_TEST:-100}
       - TEST_TIMEOUT_MS=${TEST_TIMEOUT_MS:-60000}
-      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
-      - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:-}
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:?Run node scripts/configure-services.mjs}
+      - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:?Run node scripts/configure-services.mjs}
     networks:
       - sandbox-net
     healthcheck:
@@ -295,6 +310,7 @@ services:
     restart: unless-stopped
 
   spec-pipeline:
+    profiles: [services]
     build:
       context: ./services/spec-pipeline
       dockerfile: Dockerfile
@@ -304,7 +320,7 @@ services:
     environment:
       - SPEC_PIPELINE_PORT=${SPEC_PIPELINE_PORT:-8090}
       - SPECS_DIR=${SPECS_DIR:-.son-of-anton/specs}
-      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:?Run node scripts/configure-services.mjs}
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:ro
     healthcheck:
@@ -316,6 +332,7 @@ services:
     restart: unless-stopped
 
   mcp-playwright:
+    profiles: [services]
     build:
       context: ./son-of-anton-mcp/servers/playwright
       dockerfile: Dockerfile
@@ -325,7 +342,7 @@ services:
     environment:
       - MCP_PLAYWRIGHT_PORT=3105
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-localhost,127.0.0.1}
-      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:?Run node scripts/configure-services.mjs}
     networks:
       - sandbox-net
     healthcheck:
@@ -341,6 +358,7 @@ services:
     restart: unless-stopped
 
   background-tasks:
+    profiles: [services]
     build:
       context: ./services/background-tasks
       dockerfile: Dockerfile
@@ -358,13 +376,13 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - MCP_GATEWAY_URL=http://mcp-gateway:3100
       # SECURITY: Required. The service refuses to start without it.
-      - BACKGROUND_TASK_API_TOKEN=${BACKGROUND_TASK_API_TOKEN:-}
+      - BACKGROUND_TASK_API_TOKEN=${BACKGROUND_TASK_API_TOKEN:?Run node scripts/configure-services.mjs}
       # SECURITY: Comma-separated list of additional container images allowed for tasks
       # (beyond the built-in default `soa-background-agent:latest`).
       - BACKGROUND_TASK_ALLOWED_IMAGES=${BACKGROUND_TASK_ALLOWED_IMAGES:-}
       # SECURITY: Bind-mount sources from POST /tasks must be inside this prefix.
       - BACKGROUND_TASK_WORKSPACE_ROOT=${BACKGROUND_TASK_WORKSPACE_ROOT:-/workspace}
-      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:?Run node scripts/configure-services.mjs}
     networks:
       - sandbox-net
     volumes:
@@ -380,6 +398,7 @@ services:
     restart: unless-stopped
 
   visual-regression:
+    profiles: [services]
     build:
       context: ./services/visual-regression
       dockerfile: Dockerfile
@@ -390,7 +409,7 @@ services:
       - VISUAL_REGRESSION_PORT=${VISUAL_REGRESSION_PORT:-8094}
       - BASELINES_DIR=/workspace/.son-of-anton/visual-baselines
       - DIFF_THRESHOLD=${DIFF_THRESHOLD:-0.01}
-      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:?Run node scripts/configure-services.mjs}
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:rw
     healthcheck:
@@ -402,13 +421,14 @@ services:
     restart: unless-stopped
 
   model-router:
+    profiles: [services]
     build:
       context: ./services/model-router
       dockerfile: Dockerfile
     container_name: soa-model-router
     ports:
       - "127.0.0.1:${MODEL_ROUTER_PORT:-3200}:3200"
-    env_file: .env
+    env_file: ${SOTA_ENV_FILE:-.env}
     volumes:
       - ./services/model-router/config/model-routes.json:/app/config/routes.json:ro
     healthcheck:
@@ -420,6 +440,7 @@ services:
     restart: unless-stopped
 
   checkpoints:
+    profiles: [services]
     build:
       context: ./services/checkpoints
       dockerfile: Dockerfile
@@ -430,7 +451,7 @@ services:
       - CHECKPOINT_PORT=${CHECKPOINT_PORT:-3201}
       - WORKSPACE_ROOT=/workspace
       - CHECKPOINT_STORAGE_PATH=/workspace/.son-of-anton/checkpoints
-      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:?Run node scripts/configure-services.mjs}
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:rw
     healthcheck:
@@ -442,6 +463,7 @@ services:
     restart: unless-stopped
 
   walkthrough:
+    profiles: [services]
     build:
       context: ./services/walkthrough
       dockerfile: Dockerfile
@@ -455,7 +477,7 @@ services:
       - WALKTHROUGH_PORT=${WALKTHROUGH_PORT:-3202}
       - MODEL_ROUTER_URL=${MODEL_ROUTER_URL:-http://model-router:3200}
       - WALKTHROUGH_BASE_PATH=/workspace/.son-of-anton/walkthroughs
-      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:?Run node scripts/configure-services.mjs}
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:rw
     healthcheck:
@@ -467,6 +489,7 @@ services:
     restart: unless-stopped
 
   acp-client:
+    profiles: [services]
     build:
       context: ./services/acp-client
       dockerfile: Dockerfile
@@ -474,10 +497,13 @@ services:
     ports:
       - "127.0.0.1:${ACP_PORT:-3300}:3300"
     environment:
-      - ACP_PORT=${ACP_PORT:-3300}
-      - ACP_CONFIG_PATH=/workspace/.son-of-anton/agents/acp-agents.json
-      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
+      - ACP_PORT=3300
+      - ACP_HOST=0.0.0.0
       - PROJECT_PATH=/workspace
+      - ACP_MAX_PROCESSES=${ACP_MAX_PROCESSES:-4}
+      - ACP_MAX_QUEUE=${ACP_MAX_QUEUE:-32}
+      - ACP_CONFIG_PATH=/workspace/.son-of-anton/agents/acp-agents.json
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:?Run node scripts/configure-services.mjs}
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:ro
     healthcheck:
@@ -489,6 +515,7 @@ services:
     restart: unless-stopped
 
   build-dag:
+    profiles: [services]
     build:
       context: ./services/build-dag
       dockerfile: Dockerfile
@@ -500,8 +527,8 @@ services:
       - "127.0.0.1:${BUILD_DAG_PORT:-3301}:3301"
     environment:
       - BUILD_DAG_PORT=${BUILD_DAG_PORT:-3301}
-      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
-      - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:-}
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:?Run node scripts/configure-services.mjs}
+      - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:?Run node scripts/configure-services.mjs}
       - PROJECT_PATH=/workspace
       - FALKORDB_HOST=${FALKORDB_HOST:-falkordb}
       - FALKORDB_PORT=${FALKORDB_PORT:-6379}
@@ -516,6 +543,7 @@ services:
     restart: unless-stopped
 
   context-sanitiser:
+    profiles: [services]
     build:
       context: ./services/context-sanitiser
       dockerfile: Dockerfile
@@ -524,7 +552,7 @@ services:
       - "127.0.0.1:${SANITISER_PORT:-3302}:3302"
     environment:
       - SANITISER_PORT=${SANITISER_PORT:-3302}
-      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:-}
+      - SOTA_SERVICE_TOKEN=${SOTA_SERVICE_TOKEN:?Run node scripts/configure-services.mjs}
       - PROJECT_PATH=/workspace
     volumes:
       - ${PROJECT_PATH:-.}:/workspace:ro
@@ -563,6 +591,8 @@ networks:
     driver: bridge
 
 volumes:
+  postgres-data:
+    driver: local
   falkordb-data:
     driver: local
   qdrant-data:

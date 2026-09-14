@@ -11,9 +11,9 @@ use tokio::task::JoinHandle;
 
 use crate::embed::Embedder;
 use crate::error::CodeGraphError;
-use crate::parse::{detect_language, parse_file, ParsedFile, RawEdge};
+use crate::parse::{detect_language, parse_file, ParsedFile};
 use crate::store::sqlite::SqliteStore;
-use crate::types::{Edge, FileId, FileNode, NodeId, SymbolId, SymbolNode};
+use crate::types::{FileId, FileNode, SymbolId, SymbolNode};
 
 /// Summary statistics returned by `bulk_index`.
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -22,6 +22,8 @@ pub struct IndexStats {
     pub symbols: usize,
     pub edges: usize,
     pub skipped_unchanged: usize,
+    pub total_files: usize,
+    pub total_symbols: usize,
 }
 
 /// Index every supported source file under `root` into `store`.
@@ -29,211 +31,315 @@ pub struct IndexStats {
 /// Files whose `content_hash` already matches what's in the database are
 /// skipped. Parsing fans out across rayon's thread pool; persistence runs on
 /// the caller's thread because `SqliteStore` is single-writer.
-pub fn bulk_index(
-    store: &mut SqliteStore,
-    root: &Path,
-) -> Result<IndexStats, CodeGraphError> {
-    let paths = collect_source_files(root);
+pub fn bulk_index(store: &mut SqliteStore, root: &Path) -> Result<IndexStats, CodeGraphError> {
+    let root = std::fs::canonicalize(root)?;
+    bind_workspace(store, &root)?;
+    let paths = collect_source_files(&root)?;
     let existing_hashes = load_existing_hashes(store)?;
-
-    // Parallelise hashing across rayon so the initial scan doesn't block on
-    // the main thread for large repositories.
-    let to_parse: Vec<PathBuf> = paths
+    // Propagate read/parse failures: a partial scan must never delete good data.
+    let parsed: Vec<Option<ParsedFile>> = paths
         .par_iter()
-        .filter_map(|p| {
-            let source = std::fs::read(p).ok()?;
+        .map(|p| {
+            let source = std::fs::read(p)?;
             let hash = xxhash_rust::xxh3::xxh3_64(&source);
-            let unchanged = existing_hashes
-                .get(&p.to_string_lossy().to_string())
-                .is_some_and(|existing| *existing == hash);
-            if unchanged { None } else { Some(p.clone()) }
-        })
-        .collect();
-
-    let skipped_unchanged = paths.len() - to_parse.len();
-
-    let parsed: Vec<ParsedFile> = to_parse
-        .par_iter()
-        .filter_map(|p| parse_file(p).ok())
-        .collect();
-
-    let mut stats = IndexStats {
-        skipped_unchanged,
-        ..Default::default()
-    };
-
-    // Persist files + symbols, building a name → symbol_id index for edge resolution.
-    // Wrap everything in a single transaction so we don't pay a disk sync per row.
-    let mut symbol_by_name: HashMap<String, Vec<SymbolId>> = HashMap::new();
-    let mut deferred_edges: Vec<(FileId, RawEdge)> = Vec::new();
-    let mut required_names: HashSet<String> = HashSet::new();
-
-    let tx = store.conn.transaction()?;
-    for pf in parsed {
-        let file_id = upsert_file_tx(&tx, &pf.file)?;
-        stats.files += 1;
-
-        for mut sym in pf.symbols {
-            let name = sym.name.clone();
-            sym.file_id = file_id;
-            let sid = upsert_symbol_tx(&tx, &sym)?;
-            symbol_by_name.entry(name).or_default().push(sid);
-            stats.symbols += 1;
-        }
-
-        for raw in pf.edges {
-            required_names.insert(raw.target_name.clone());
-            deferred_edges.push((file_id, raw));
-        }
-    }
-
-    // Pull only the symbol names referenced by this batch of edges, instead of
-    // loading the entire symbols table into memory.
-    if !required_names.is_empty() {
-        extend_symbol_lookup_scoped(&tx, &mut symbol_by_name, &required_names)?;
-    }
-
-    for (file_id, raw) in deferred_edges {
-        let from_node = NodeId(file_id.0);
-        if let Some(targets) = symbol_by_name.get(&raw.target_name) {
-            for sid in targets {
-                upsert_edge_tx(
-                    &tx,
-                    Edge {
-                        from_node,
-                        to_node: NodeId(sid.0),
-                        kind: raw.kind.clone(),
-                    },
-                )?;
-                stats.edges += 1;
+            if existing_hashes.get(&p.to_string_lossy().to_string()) == Some(&hash) {
+                Ok(None)
+            } else {
+                parse_file(p).map(Some)
             }
+        })
+        .collect::<Result<_, CodeGraphError>>()?;
+    let mut stats = IndexStats::default();
+    let present: HashSet<_> = paths
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    if parsed.iter().all(Option::is_none) && existing_hashes.keys().all(|p| present.contains(p)) {
+        return Ok(IndexStats {
+            skipped_unchanged: paths.len(),
+            total_files: paths.len(),
+            total_symbols: store
+                .conn
+                .query_row("SELECT COUNT(*) FROM symbols", [], |row| row.get(0))?,
+            ..Default::default()
+        });
+    }
+    let tx = store.conn.transaction()?;
+    for old in existing_hashes.keys().filter(|p| !present.contains(*p)) {
+        tx.execute("DELETE FROM files WHERE path = ?1", [old])?;
+    }
+    for parsed in parsed {
+        if let Some(pf) = parsed {
+            stats.files += 1;
+            stats.symbols += pf.symbols.len();
+            replace_file_tx(&tx, pf)?;
+        } else {
+            stats.skipped_unchanged += 1;
         }
     }
+    stats.edges = resolve_edges_tx(&tx)?;
+    stats.total_files = paths.len();
+    stats.total_symbols = tx.query_row("SELECT COUNT(*) FROM symbols", [], |row| row.get(0))?;
     tx.commit()?;
-
     Ok(stats)
 }
 
-/// Index a single file. Used by the watcher when a file change event arrives.
+/// A database belongs to exactly one canonical workspace. Legacy databases are
+/// adopted only if every stored file belongs to that workspace.
+fn bind_workspace(store: &SqliteStore, root: &Path) -> Result<(), CodeGraphError> {
+    use rusqlite::OptionalExtension;
+    let owner: Option<String> = store
+        .conn
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'workspace'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let root = root.to_string_lossy().to_string();
+    if owner.as_ref().is_some_and(|p| p != &root)
+        || load_existing_hashes(store)?
+            .keys()
+            .any(|p| !Path::new(p).starts_with(&root))
+    {
+        return Err(CodeGraphError::Parse(
+            "database belongs to another workspace; use a separate database".into(),
+        ));
+    }
+    store.conn.execute(
+        "INSERT OR IGNORE INTO metadata(key,value) VALUES ('workspace',?1)",
+        [&root],
+    )?;
+    Ok(())
+}
+
+/// Validate even removed paths before using them for incremental deletion.
+pub(crate) fn checked_index_path(
+    store: &SqliteStore,
+    path: &Path,
+) -> Result<PathBuf, CodeGraphError> {
+    use rusqlite::OptionalExtension;
+    let owner: Option<String> = store
+        .conn
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'workspace'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let root = match owner {
+        Some(p) => PathBuf::from(p),
+        None => {
+            let parent = std::fs::canonicalize(
+                path.parent()
+                    .ok_or_else(|| CodeGraphError::Parse("file has no parent".into()))?,
+            )?;
+            bind_workspace(store, &parent)?;
+            parent
+        }
+    };
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    let alias = candidate
+        .ancestors()
+        .find(|p| std::fs::canonicalize(p).is_ok_and(|p| p == root));
+    let relative = candidate
+        .strip_prefix(&root)
+        .or_else(|_| candidate.strip_prefix(alias.as_ref().unwrap_or(&root.as_path())))
+        .map_err(|_| CodeGraphError::Parse("file outside workspace".into()))?;
+    let mut checked = root.clone();
+    for part in relative.components() {
+        if !matches!(part, std::path::Component::Normal(_)) {
+            return Err(CodeGraphError::Parse("invalid workspace path".into()));
+        }
+        checked.push(part);
+        match std::fs::symlink_metadata(&checked) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(CodeGraphError::Parse("symlink indexing is disabled".into()))
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(checked)
+}
+
+/// Index a change or remove a deleted file, then resolve references again.
 pub fn index_one_file(
     store: &mut SqliteStore,
     path: &Path,
 ) -> Result<Option<FileId>, CodeGraphError> {
-    if detect_language(path).is_none() {
+    let path = checked_index_path(store, path)?;
+    if !path.exists() {
+        let tx = store.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM files WHERE path = ?1",
+            [path.to_string_lossy().as_ref()],
+        )?;
+        resolve_edges_tx(&tx)?;
+        tx.commit()?;
         return Ok(None);
     }
-    let parsed = match parse_file(path) {
-        Ok(p) => p,
-        Err(_) => return Ok(None),
-    };
-    persist_parsed_file(store, parsed)
+    if detect_language(&path).is_none() {
+        return Ok(None);
+    }
+    persist_parsed_file(store, parse_file(&path)?)
 }
 
-/// Persist an already-parsed file's symbols and edges. Used by the watcher's
-/// debounce loop so that tree-sitter parsing happens *outside* the
-/// `SqliteStore` mutex.
 pub fn persist_parsed_file(
     store: &mut SqliteStore,
-    parsed: ParsedFile,
+    mut parsed: ParsedFile,
 ) -> Result<Option<FileId>, CodeGraphError> {
-    let mut symbol_by_name: HashMap<String, Vec<SymbolId>> = HashMap::new();
-    let mut required_names: HashSet<String> = HashSet::new();
-    for raw in &parsed.edges {
-        required_names.insert(raw.target_name.clone());
-    }
-
+    parsed.file.path = checked_index_path(store, &parsed.file.path)?;
     let tx = store.conn.transaction()?;
-    let file_id = upsert_file_tx(&tx, &parsed.file)?;
-
-    for mut sym in parsed.symbols {
-        let name = sym.name.clone();
-        sym.file_id = file_id;
-        let sid = upsert_symbol_tx(&tx, &sym)?;
-        symbol_by_name.entry(name).or_default().push(sid);
-    }
-
-    if !required_names.is_empty() {
-        extend_symbol_lookup_scoped(&tx, &mut symbol_by_name, &required_names)?;
-    }
-
-    for raw in parsed.edges {
-        if let Some(targets) = symbol_by_name.get(&raw.target_name) {
-            for sid in targets {
-                upsert_edge_tx(
-                    &tx,
-                    Edge {
-                        from_node: NodeId(file_id.0),
-                        to_node: NodeId(sid.0),
-                        kind: raw.kind.clone(),
-                    },
-                )?;
-            }
-        }
-    }
+    let id = replace_file_tx(&tx, parsed)?;
+    resolve_edges_tx(&tx)?;
     tx.commit()?;
-    Ok(Some(file_id))
+    Ok(Some(id))
 }
 
-/// Compute embeddings for every symbol in the store that doesn't already have one.
-/// The embedding text is `"{kind} {name}\n{docstring?}"`.
+fn replace_file_tx(
+    tx: &rusqlite::Transaction<'_>,
+    parsed: ParsedFile,
+) -> Result<FileId, CodeGraphError> {
+    let file_id = upsert_file_tx(tx, &parsed.file)?;
+    // Keep identity for surviving symbols, but invalidate every embedding in a
+    // changed file, including body-only edits that leave symbol names intact.
+    tx.execute(
+        "DELETE FROM embeddings WHERE symbol_id IN (SELECT id FROM symbols WHERE file_id=?1)",
+        [file_id.0],
+    )?;
+    let mut retained = HashSet::new();
+    for mut sym in parsed.symbols {
+        sym.file_id = file_id;
+        retained.insert(upsert_symbol_tx(tx, &sym)?.0);
+    }
+    let old: Vec<i64> = tx
+        .prepare("SELECT id FROM symbols WHERE file_id=?1")?
+        .query_map([file_id.0], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    for id in old.into_iter().filter(|id| !retained.contains(id)) {
+        tx.execute("DELETE FROM symbols WHERE id=?1", [id])?;
+    }
+    tx.execute("DELETE FROM raw_edges WHERE file_id=?1", [file_id.0])?;
+    for edge in parsed.edges {
+        tx.execute(
+            "INSERT OR IGNORE INTO raw_edges(file_id,target_name,kind) VALUES (?1,?2,?3)",
+            rusqlite::params![file_id.0, edge.target_name, format!("{:?}", edge.kind)],
+        )?;
+    }
+    Ok(file_id)
+}
+
+/// Retaining unresolved names allows unchanged callers to follow renamed/moved
+/// targets and removes both incoming and outgoing obsolete edges atomically.
+fn resolve_edges_tx(tx: &rusqlite::Transaction<'_>) -> Result<usize, CodeGraphError> {
+    tx.execute("DELETE FROM edges", [])?;
+    Ok(tx.execute(
+        "INSERT OR IGNORE INTO edges(from_node,to_node,kind)
+        SELECT r.file_id,s.id,r.kind FROM raw_edges r JOIN symbols s ON s.name=r.target_name",
+        [],
+    )?)
+}
+
+/// Embed the current symbol body along with its name and documentation. A file
+/// hash guards each write against edits that race an asynchronous provider call.
 pub async fn embed_pending(
     store: &Arc<Mutex<SqliteStore>>,
     embedder: &dyn Embedder,
     batch_size: usize,
 ) -> Result<usize, CodeGraphError> {
-    // Snapshot rows that need embedding.
-    let pending: Vec<(SymbolId, String)> = {
+    let pending: Vec<(SymbolId, String, i64)> = {
         let guard = store.lock();
         let mut stmt = guard.conn.prepare(
-            "SELECT s.id, s.kind, s.name, s.docstring
-             FROM symbols s
-             LEFT JOIN embeddings e ON e.symbol_id = s.id
-             WHERE e.symbol_id IS NULL",
+            "SELECT s.id,s.kind,s.name,s.docstring,f.path,s.start_byte,s.end_byte,f.content_hash
+             FROM symbols s JOIN files f ON f.id=s.file_id
+             LEFT JOIN embeddings e ON e.symbol_id=s.id WHERE e.symbol_id IS NULL",
         )?;
-        let rows = stmt.query_map([], |row| {
-            let id: i64 = row.get(0)?;
-            let kind: String = row.get(1)?;
-            let name: String = row.get(2)?;
-            let doc: Option<String> = row.get(3)?;
-            let text = match doc {
-                Some(d) => format!("{kind} {name}\n{d}"),
-                None => format!("{kind} {name}"),
-            };
-            Ok((SymbolId(id), text))
-        })?;
-        rows.collect::<Result<Vec<_>, _>>()?
+        let rows = stmt
+            .query_map([], |row| {
+                let id: i64 = row.get(0)?;
+                let kind: String = row.get(1)?;
+                let name: String = row.get(2)?;
+                let doc: Option<String> = row.get(3)?;
+                let path: String = row.get(4)?;
+                let start: usize = row.get(5)?;
+                let end: usize = row.get(6)?;
+                let hash: i64 = row.get(7)?;
+                Ok((id, kind, name, doc, path, start, end, hash))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut pending = Vec::new();
+        for (id, kind, name, doc, path, start, end, hash) in rows {
+            let checked = checked_index_path(&guard, Path::new(&path))?;
+            let source = std::fs::read_to_string(checked)?;
+            if xxhash_rust::xxh3::xxh3_64(source.as_bytes()) as i64 != hash {
+                continue;
+            }
+            let body: String = source
+                .get(start..end)
+                .unwrap_or("")
+                .chars()
+                .take(8000)
+                .collect();
+            pending.push((
+                SymbolId(id),
+                format!("{kind} {name}\n{}\n{body}", doc.unwrap_or_default()),
+                hash,
+            ));
+        }
+        pending
     };
-
     let mut written = 0;
-    for chunk in pending.chunks(batch_size.max(1)) {
-        let texts: Vec<String> = chunk.iter().map(|(_, t)| t.clone()).collect();
+    for chunk in pending.chunks(batch_size.clamp(1, 256)) {
+        let texts: Vec<String> = chunk.iter().map(|(_, text, _)| text.clone()).collect();
         let vectors = embedder.embed(&texts).await?;
-
+        if vectors.len() != chunk.len()
+            || vectors
+                .iter()
+                .any(|v| v.len() != embedder.dimensions() || v.iter().any(|x| !x.is_finite()))
+        {
+            return Err(CodeGraphError::Parse(
+                "embedding provider returned invalid vectors".into(),
+            ));
+        }
         let mut guard = store.lock();
-        for ((sid, _), vec) in chunk.iter().zip(vectors) {
-            guard.upsert_embedding(*sid, &vec)?;
-            written += 1;
+        for ((sid, _, hash), vector) in chunk.iter().zip(vectors) {
+            let current: bool = guard.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM symbols s JOIN files f ON f.id=s.file_id WHERE s.id=?1 AND f.content_hash=?2)",
+                rusqlite::params![sid.0, hash], |r| r.get(0),
+            )?;
+            if current {
+                guard.upsert_embedding(*sid, &vector)?;
+                written += 1;
+            }
         }
     }
     Ok(written)
 }
 
-fn collect_source_files(root: &Path) -> Vec<PathBuf> {
-    walkdir::WalkDir::new(root)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .map(|e| e.into_path())
-        .filter(|p| detect_language(p).is_some())
-        .collect()
+fn collect_source_files(root: &Path) -> Result<Vec<PathBuf>, CodeGraphError> {
+    let mut paths = Vec::new();
+    for entry in ignore::WalkBuilder::new(root)
+        .hidden(false)
+        .follow_links(false)
+        .build()
+    {
+        let entry = entry.map_err(|e| CodeGraphError::Parse(format!("scan: {e}")))?;
+        if entry.file_type().is_some_and(|t| t.is_file()) && detect_language(entry.path()).is_some()
+        {
+            paths.push(entry.into_path());
+        }
+    }
+    Ok(paths)
 }
 
-fn load_existing_hashes(
-    store: &SqliteStore,
-) -> Result<HashMap<String, u64>, CodeGraphError> {
-    let mut stmt = store
-        .conn
-        .prepare("SELECT path, content_hash FROM files")?;
+fn load_existing_hashes(store: &SqliteStore) -> Result<HashMap<String, u64>, CodeGraphError> {
+    let mut stmt = store.conn.prepare("SELECT path, content_hash FROM files")?;
     let rows = stmt.query_map([], |row| {
         let path: String = row.get(0)?;
         let hash: i64 = row.get(1)?;
@@ -246,40 +352,6 @@ fn load_existing_hashes(
     }
     Ok(out)
 }
-
-/// Look up only the named symbols we actually need for edge resolution, rather
-/// than slurping the entire `symbols` table into memory on every save.
-fn extend_symbol_lookup_scoped(
-    tx: &rusqlite::Transaction<'_>,
-    map: &mut HashMap<String, Vec<SymbolId>>,
-    names: &HashSet<String>,
-) -> Result<(), CodeGraphError> {
-    if names.is_empty() {
-        return Ok(());
-    }
-    let placeholders = vec!["?"; names.len()].join(",");
-    let sql = format!("SELECT id, name FROM symbols WHERE name IN ({placeholders})");
-    let mut stmt = tx.prepare(&sql)?;
-    let rows = stmt.query_map(rusqlite::params_from_iter(names.iter()), |row| {
-        let id: i64 = row.get(0)?;
-        let name: String = row.get(1)?;
-        Ok((SymbolId(id), name))
-    })?;
-    for r in rows {
-        let (sid, name) = r?;
-        let entry = map.entry(name).or_default();
-        if !entry.contains(&sid) {
-            entry.push(sid);
-        }
-    }
-    Ok(())
-}
-
-// ──────────────────────────── Transaction-bound upserts ────────────────────────────
-//
-// These mirror the `GraphStore` implementations on `SqliteStore` but operate
-// inside a `rusqlite::Transaction` so that batch persistence can wrap the entire
-// loop in a single transaction (a single fsync, instead of one per row).
 
 fn upsert_file_tx(
     tx: &rusqlite::Transaction<'_>,
@@ -343,21 +415,6 @@ fn upsert_symbol_tx(
     Ok(SymbolId(id))
 }
 
-fn upsert_edge_tx(tx: &rusqlite::Transaction<'_>, edge: Edge) -> Result<(), CodeGraphError> {
-    let from_node = edge.from_node.0;
-    let to_node = edge.to_node.0;
-    let kind = format!("{:?}", edge.kind);
-    // Edges have a composite primary key — ON CONFLICT DO NOTHING is enough,
-    // there's no mutable column to update.
-    tx.execute(
-        "INSERT INTO edges (from_node, to_node, kind)
-         VALUES (?1, ?2, ?3)
-         ON CONFLICT(from_node, to_node, kind) DO NOTHING",
-        rusqlite::params![from_node, to_node, kind],
-    )?;
-    Ok(())
-}
-
 // ──────────────────────────────── File watcher ────────────────────────────────
 
 /// Live indexer: holds a `notify` watcher and a debounce task that re-indexes
@@ -377,7 +434,7 @@ impl Indexer {
         let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
 
         let watcher = spawn_watcher(&root, path_tx)?;
-        let handle = tokio::spawn(debounce_loop(path_rx, shutdown_rx, store));
+        let handle = tokio::spawn(debounce_loop(path_rx, shutdown_rx, store, root));
 
         Ok(Self {
             _watcher: watcher,
@@ -423,6 +480,7 @@ async fn debounce_loop(
     mut rx: mpsc::Receiver<PathBuf>,
     mut shutdown_rx: mpsc::Receiver<()>,
     store: Arc<Mutex<SqliteStore>>,
+    root: PathBuf,
 ) {
     let mut pending: HashSet<PathBuf> = HashSet::new();
     let debounce = Duration::from_millis(200);
@@ -434,7 +492,7 @@ async fn debounce_loop(
             maybe = rx.recv() => {
                 match maybe {
                     Some(p) => {
-                        if detect_language(&p).is_some() {
+                        if detect_language(&p).is_some() || p.extension().is_none() || p.file_name().is_some_and(|name| name == ".gitignore" || name == "index") {
                             pending.insert(p);
                             deadline = Some(tokio::time::Instant::now() + debounce);
                         }
@@ -445,17 +503,14 @@ async fn debounce_loop(
             _ = tokio::time::sleep_until(deadline.unwrap_or_else(tokio::time::Instant::now)),
                 if deadline.is_some() => {
                 if !pending.is_empty() {
-                    let batch: Vec<PathBuf> = pending.drain().collect();
-                    // Parse outside the store lock — tree-sitter is CPU-bound
-                    // and blocking the store mutex blocks every IDE-side query.
-                    let parsed: Vec<ParsedFile> = batch
-                        .iter()
-                        .filter_map(|p| parse_file(p).ok())
-                        .collect();
-                    let mut guard = store.lock();
-                    for pf in parsed {
-                        let _ = persist_parsed_file(&mut guard, pf);
-                    }
+                    pending.clear();
+                    let store = store.clone();
+                    let root = root.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if let Err(error) = bulk_index(&mut store.lock(), &root) {
+                            tracing::warn!(%error, "workspace reconciliation failed");
+                        }
+                    }).await;
                 }
                 deadline = None;
             }
@@ -479,10 +534,7 @@ mod tests {
             &dir.path().join("a.rs"),
             "fn alpha() {}\nfn beta() { alpha(); }\n",
         );
-        write(
-            &dir.path().join("b.py"),
-            "def gamma():\n    pass\n",
-        );
+        write(&dir.path().join("b.py"), "def gamma():\n    pass\n");
         write(&dir.path().join("ignored.txt"), "not source\n");
 
         let db = dir.path().join("graph.db");
@@ -563,6 +615,95 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    fn count(store: &SqliteStore, table: &str) -> i64 {
+        store
+            .conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn reconcile_edits_moves_removals_and_incoming_references() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("target.rs");
+        let caller = dir.path().join("caller.rs");
+        write(&target, "fn alpha() {}\n");
+        write(&caller, "fn caller() { alpha(); }\n");
+        let mut store = SqliteStore::new(":memory:").unwrap();
+        bulk_index(&mut store, dir.path()).unwrap();
+        assert_eq!(count(&store, "edges"), 1);
+        let sid = store
+            .conn
+            .query_row("SELECT id FROM symbols WHERE name='alpha'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        store.upsert_embedding(SymbolId(sid), &[1.0, 0.0]).unwrap();
+        write(&target, "// moved offset\nfn alpha() { let x = 1; }\n");
+        index_one_file(&mut store, &target).unwrap();
+        assert_eq!(
+            (
+                count(&store, "symbols"),
+                count(&store, "edges"),
+                count(&store, "embeddings")
+            ),
+            (2, 1, 0)
+        );
+        std::fs::rename(&target, dir.path().join("moved.rs")).unwrap();
+        bulk_index(&mut store, dir.path()).unwrap();
+        assert_eq!(
+            (
+                count(&store, "files"),
+                count(&store, "symbols"),
+                count(&store, "edges")
+            ),
+            (2, 2, 1)
+        );
+        write(&caller, "fn caller() {}\n");
+        index_one_file(&mut store, &caller).unwrap();
+        assert_eq!(count(&store, "edges"), 0);
+        std::fs::remove_file(dir.path().join("moved.rs")).unwrap();
+        index_one_file(&mut store, &dir.path().join("moved.rs")).unwrap();
+        assert_eq!((count(&store, "files"), count(&store, "symbols")), (1, 1));
+        write(&caller, "fn renamed() {}\n");
+        bulk_index(&mut store, dir.path()).unwrap();
+        assert_eq!(count(&store, "symbols WHERE name='caller'"), 0);
+    }
+
+    #[test]
+    fn rejects_other_workspace_and_ignores_dependencies() {
+        let a = tempfile::TempDir::new().unwrap();
+        let b = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(a.path().join(".git")).unwrap();
+        write(&a.path().join(".gitignore"), "node_modules/\n");
+        std::fs::create_dir(a.path().join("node_modules")).unwrap();
+        write(
+            &a.path().join("node_modules/dependency.rs"),
+            "fn ignored() {}\n",
+        );
+        write(&a.path().join("a.rs"), "fn alpha() {}\n");
+        write(&b.path().join("b.rs"), "fn beta() {}\n");
+        let mut store = SqliteStore::new(":memory:").unwrap();
+        bulk_index(&mut store, a.path()).unwrap();
+        assert!(bulk_index(&mut store, b.path()).is_err());
+        assert!(index_one_file(&mut store, &b.path().join("b.rs")).is_err());
+        assert_eq!(count(&store, "symbols"), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_symlink_indexing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        write(&outside.path().join("secret.rs"), "fn secret() {}\n");
+        let link = dir.path().join("link.rs");
+        std::os::unix::fs::symlink(outside.path().join("secret.rs"), &link).unwrap();
+        let mut store = SqliteStore::new(":memory:").unwrap();
+        bulk_index(&mut store, dir.path()).unwrap();
+        assert!(index_one_file(&mut store, &link).is_err());
+        assert_eq!(count(&store, "symbols"), 0);
     }
 
     #[allow(dead_code)]

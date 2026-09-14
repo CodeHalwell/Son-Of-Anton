@@ -4,8 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 import type { LlmMessage } from '../llm/LlmClient';
-import { BUILTIN_TOOLS } from '../tools/registry';
-import type { Tool, ToolExecutionContext } from '../tools/types';
+import type { ToolRegistry } from '../tools/registry';
+import type { ToolExecutionContext } from '../tools/types';
 import { BaseAgent, AgentContext } from './BaseAgent';
 import { loadAgentPrompt } from './promptLoader';
 import { FileChange, SubtaskResult, TokenUsage } from './types';
@@ -63,11 +63,13 @@ export class CodeGeneratorAgent extends BaseAgent {
 			// Inherit the shared default tool surface from `BaseAgent` so the
 			// agentic chat-turn path and the specialist `execute` path stay
 			// converged on a single source of truth.
-			const tools = this.getAgenticToolDefinitions();
+			const registry = await this.createAgenticToolRegistry(context.signal);
+			const tools = registry.definitions();
 
 			let liveText = '';
 			const result = await this.runToolLoop({
 				taskId: task.id,
+				signal: context.signal,
 				model: this.resolveModel(context.orchestratorModelHint),
 				systemPrompt,
 				systemPromptParts,
@@ -84,7 +86,7 @@ export class CodeGeneratorAgent extends BaseAgent {
 					context.onToken?.(tok);
 				},
 				executeTool: async (call) => {
-					return await this.executeToolCall(call.name, call.input, toolExecutionContext);
+					return await this.executeToolCall(call.name, call.input, { ...toolExecutionContext, signal: context.signal }, registry);
 				},
 			});
 
@@ -140,8 +142,9 @@ export class CodeGeneratorAgent extends BaseAgent {
 		name: string,
 		input: Record<string, unknown>,
 		ctx: ToolExecutionContext,
+		registry: ToolRegistry,
 	): Promise<{ result: string; isError?: boolean }> {
-		const tool = BUILTIN_TOOLS.find((t: Tool) => t.definition.name === name);
+		const tool = registry.get(name);
 		if (!tool) {
 			return { result: `Unknown tool: ${name}`, isError: true };
 		}

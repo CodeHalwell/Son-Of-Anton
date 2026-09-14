@@ -5,7 +5,7 @@
 import type { Disposable } from '../host';
 import { McpClient, McpToolListing } from './McpClient';
 import type { McpToolAnnotations } from './McpServerConnection';
-import { Tool, ToolDefinition, ToolExecutionContext, ToolExecutionResult } from '../tools/types';
+import { Tool, ToolDefinition, ToolExecutionContext, ToolExecutionResult, ToolInputSchema } from '../tools/types';
 import { ToolRegistry } from '../tools/registry';
 
 const MCP_TOOL_PREFIX = 'mcp__';
@@ -23,6 +23,7 @@ const MCP_TOOL_PREFIX = 'mcp__';
 export async function bridgeMcpToolsIntoRegistry(
 	mcpClient: McpClient,
 	registry: ToolRegistry,
+	options: { requireApproval?: boolean } = {},
 ): Promise<{ registered: number; failed: boolean; reason?: string }> {
 	let listed: Awaited<ReturnType<McpClient['listTools']>>;
 	try {
@@ -40,7 +41,7 @@ export async function bridgeMcpToolsIntoRegistry(
 	let registered = 0;
 	for (const entry of listed) {
 		try {
-			const tool = createBridgedTool(mcpClient, entry);
+			const tool = createBridgedTool(mcpClient, entry, options.requireApproval);
 			registry.register(tool);
 			registered += 1;
 		} catch (err) {
@@ -115,19 +116,14 @@ function toolNameFor(entry: McpToolListing): string {
 function createBridgedTool(
 	mcpClient: McpClient,
 	entry: McpToolListing,
+	requireApproval = false,
 ): Tool {
 	const namespacedName = toolNameFor(entry);
 
 	const definition: ToolDefinition = {
 		name: namespacedName,
 		description: `[MCP/${entry.server}] ${entry.description ?? entry.tool}`,
-		inputSchema: {
-			// MCP tool input schemas aren't surfaced by the simple listTools
-			// shape used here. Accept arbitrary properties; the MCP server
-			// validates per-tool when callTool runs.
-			type: 'object',
-			properties: {},
-		},
+		inputSchema: toolInputSchema(entry.inputSchema),
 		// Derive the approval gate from the server-declared annotations: a tool
 		// that advertises `readOnlyHint: true` is safe to run unattended, while
 		// a destructive tool — or one that declares nothing at all — requires
@@ -143,12 +139,20 @@ function createBridgedTool(
 
 	return {
 		definition,
-		async execute(input: Record<string, unknown>, _ctx: ToolExecutionContext): Promise<ToolExecutionResult> {
+		async execute(input: Record<string, unknown>, ctx: ToolExecutionContext): Promise<ToolExecutionResult> {
 			try {
+				ctx.signal?.throwIfAborted();
+				// Existing chat surfaces gate the registry themselves; native agent
+				// loops opt into this boundary so they cannot bypass host approval.
+				if (requireApproval && definition.riskLevel === 'requiresApproval' && !await ctx.requestMcpApproval?.(definition, input, ctx.signal)) {
+					return { content: `MCP tool '${entry.server}/${entry.tool}' was not approved.`, isError: true };
+				}
+				ctx.signal?.throwIfAborted();
 				const result = await mcpClient.callTool({
 					server: entry.server,
 					tool: entry.tool,
 					inputs: input,
+					signal: ctx.signal,
 				});
 				return { content: result.content, isError: result.isError };
 			} catch (err) {
@@ -157,6 +161,17 @@ function createBridgedTool(
 			}
 		},
 	};
+}
+
+/** Preserve the server's JSON Schema, including nested constraints and required fields. */
+function toolInputSchema(raw: object | undefined): ToolInputSchema {
+	if (!raw || Array.isArray(raw)) { return { type: 'object', properties: {} }; }
+	const schema = raw as Record<string, unknown>;
+	if (schema.type !== 'object') { throw new Error('MCP tool input schema must describe an object'); }
+	if (schema.properties !== undefined && (!schema.properties || typeof schema.properties !== 'object' || Array.isArray(schema.properties))) {
+		throw new Error('MCP tool input schema has invalid properties');
+	}
+	return { ...schema, type: 'object', properties: schema.properties ?? {} } as ToolInputSchema;
 }
 
 function sanitiseNameSegment(s: string): string {

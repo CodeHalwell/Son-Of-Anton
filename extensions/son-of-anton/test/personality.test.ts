@@ -85,10 +85,12 @@ suite('Personality', () => {
 
 	suite('Command palette branding', () => {
 		let packageJson: { contributes: { commands: Array<{ command: string; title: string }> } };
+		let labels: Record<string, string>;
 
 		suiteSetup(() => {
 			const raw = fs.readFileSync(path.join(_dir, '..', 'package.json'), 'utf-8');
 			packageJson = JSON.parse(raw);
+			labels = JSON.parse(fs.readFileSync(path.join(_dir, '..', 'package.nls.json'), 'utf-8'));
 		});
 
 		test('all sota.* commands use "Anton:" prefix', () => {
@@ -96,8 +98,9 @@ suite('Personality', () => {
 				.filter(c => c.command.startsWith('sota.') && !c.command.startsWith('sota.konami'));
 
 			for (const cmd of commands) {
+				const title = cmd.title.startsWith('%') && cmd.title.endsWith('%') ? labels[cmd.title.slice(1, -1)] : cmd.title;
 				assert.ok(
-					cmd.title.startsWith('Anton:'),
+					title?.startsWith('Anton:'),
 					`Command "${cmd.command}" has title "${cmd.title}" — expected "Anton:" prefix`,
 				);
 			}

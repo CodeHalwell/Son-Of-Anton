@@ -201,8 +201,7 @@ export class SetupWizardPanel {
 		}
 		.card.connected { border-color: var(--vscode-charts-green, var(--vscode-focusBorder)); }
 		.card.connected .badge { background: var(--vscode-charts-green, var(--vscode-badge-background)); }
-		form { display: none; flex-direction: column; gap: var(--gap); margin-top: 12px; }
-		form.active { display: flex; }
+		form { display: flex; flex-direction: column; gap: var(--gap); margin-top: 12px; }
 		label { display: flex; flex-direction: column; gap: 4px; font-size: 0.9em; }
 		label span.hint { color: var(--muted); font-size: 0.85em; }
 		input, select {
@@ -245,6 +244,8 @@ export class SetupWizardPanel {
 		.back:hover { color: var(--vscode-foreground); }
 		.section { display: none; }
 		.section.active { display: block; }
+		:where(button, input, select):focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
+		button:disabled { opacity: 0.6; cursor: wait; }
 	</style>
 </head>
 <body>
@@ -322,9 +323,16 @@ export class SetupWizardPanel {
 		const cards = document.querySelectorAll('.card');
 		const sections = document.querySelectorAll('.section');
 		const badges = document.querySelectorAll('[data-badge]');
+		let selectedProvider = '';
 
 		function show(sectionId) {
 			sections.forEach(s => s.classList.toggle('active', s.id === sectionId));
+			if (sectionId.startsWith('form-')) {
+				selectedProvider = sectionId.slice(5);
+				document.getElementById(sectionId).querySelector('input, select')?.focus();
+			} else {
+				document.querySelector('.card[data-provider="' + selectedProvider + '"]')?.focus();
+			}
 		}
 
 		cards.forEach(c => {
@@ -351,6 +359,9 @@ export class SetupWizardPanel {
 		document.querySelectorAll('form[data-provider]').forEach(form => {
 			form.addEventListener('submit', ev => {
 				ev.preventDefault();
+				if (form.dataset.saving === 'true') { return; }
+				form.dataset.saving = 'true';
+				form.querySelector('button[type="submit"]').disabled = true;
 				const provider = form.getAttribute('data-provider');
 				const status = form.querySelector('.status');
 				status.className = 'status pending';
@@ -367,6 +378,8 @@ export class SetupWizardPanel {
 			if (msg.type === 'save-result') {
 				const form = document.querySelector('form[data-provider="' + msg.provider + '"]');
 				if (!form) return;
+				form.dataset.saving = 'false';
+				form.querySelector('button[type="submit"]').disabled = false;
 				const status = form.querySelector('.status');
 				status.className = 'status ' + (msg.ok ? 'ok' : 'err');
 				status.textContent = msg.message;
@@ -409,7 +422,7 @@ export class SetupWizardPanel {
 		helpLink: string,
 		fields: ReadonlyArray<FormField>,
 	): string {
-		const inputs = fields.map(f => this.renderField(f)).join('\n');
+		const inputs = fields.map(f => this.renderField(f, provider)).join('\n');
 		return `<section id="form-${provider}" class="section">
 			<button class="back" type="button" data-target="picker">← Back to providers</button>
 			<h2>${escapeHtml(title)}</h2>
@@ -422,13 +435,13 @@ export class SetupWizardPanel {
 					<button class="primary" type="submit">Save and validate</button>
 					<button class="secondary back" type="button">Cancel</button>
 				</div>
-				<div class="status"></div>
+				<div class="status" role="status" aria-live="polite"></div>
 			</form>
 		</section>`;
 	}
 
-	private renderField(field: FormField): string {
-		const id = `f-${field.name}`;
+	private renderField(field: FormField, provider: ProviderId): string {
+		const id = `f-${provider}-${field.name}`;
 		const hint = field.hint ? `<span class="hint">${escapeHtml(field.hint)}</span>` : '';
 		if (field.type === 'select') {
 			const options = (field.options ?? []).map(o => `<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`).join('');

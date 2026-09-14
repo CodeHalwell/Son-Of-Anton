@@ -19,20 +19,17 @@
  *      tagged `sota-v*`, find the artefact matching `${platform}-${arch}`,
  *      verify its SHA256 against `SHA256SUMS.txt`, and atomically swap.
  *
- *      Atomic swap trick (POSIX):
- *        - rename(runningBinary, runningBinary + '.old')   // atomic
- *        - rename(downloaded,     runningBinary)           // atomic
- *        - chmod +x on runningBinary
+ *      Stage and chmod the verified download beside the installed binary,
+ *      rename the previous binary to a unique .old backup, then rename the
+ *      staged file into place. Roll back the first rename if the second fails.
  *        The OS keeps the still-running process pointed at the now-renamed
  *        `.old` file via its open file descriptor, so the current sota
  *        invocation continues to work until exit. The user re-runs `sota`
  *        to pick up the new binary.
  *
- *      On Windows: file locks prevent renaming a binary that is currently
- *      executing. The same rename pair often works anyway because the OS
- *      allows renaming the source (it tracks the open handle by file ID);
- *      if it fails we surface a clear error telling the user to retry from
- *      another shell.
+ *      On Windows, an executable lock can prevent replacement. Preserve the
+ *      installed binary and report the failure; an external installer may
+ *      be necessary after closing running processes.
  *
  * A `--dry-run` flag prints the planned actions without writing anything.
  */
@@ -84,7 +81,7 @@ interface GitHubRelease {
 async function fetchLatestVersion(): Promise<string | null> {
 	try {
 		const res = await fetch(REGISTRY_URL, {
-			headers: { Accept: 'application/vnd.npm.install-v1+json' },
+			headers: { Accept: 'application/vnd.npm.install-v1+json' }, signal: AbortSignal.timeout(5_000),
 		});
 		if (!res.ok) {
 			return null;
@@ -104,16 +101,18 @@ async function fetchLatestVersion(): Promise<string | null> {
  */
 export async function maybeNagAboutUpdate(): Promise<void> {
 	try {
+		const mode = isRunningUnderSea() ? 'sea' : 'npm';
 		const cached = readCache();
-		if (cached && Date.now() - cached.checkedAt < QUIET_CHECK_INTERVAL_MS) {
+		if (cached?.mode === mode && Date.now() - cached.checkedAt < QUIET_CHECK_INTERVAL_MS) {
 			return;
 		}
-		const latest = await fetchLatestVersion();
+		const release = mode === 'sea' ? await fetchLatestSeaRelease() : null;
+		const latest = mode === 'sea' ? release && tagToVersion(release.tag_name) : await fetchLatestVersion();
 		if (!latest) {
 			return;
 		}
 		const current = SOTA_VERSION;
-		writeCache({ checkedAt: Date.now(), latest });
+		writeCache({ checkedAt: Date.now(), latest, mode });
 		if (isStrictlyGreater(latest, current)) {
 			const cmd = isRunningUnderSea() ? 'sota update' : 'npm i -g son-of-anton-cli@latest';
 			process.stderr.write(
@@ -128,13 +127,14 @@ export async function maybeNagAboutUpdate(): Promise<void> {
 interface UpdateCache {
 	checkedAt: number;
 	latest: string;
+	mode: 'npm' | 'sea';
 }
 
 function readCache(): UpdateCache | null {
 	try {
 		const raw = fs.readFileSync(CACHE_FILE, 'utf8');
 		const parsed = JSON.parse(raw) as UpdateCache;
-		if (typeof parsed.checkedAt === 'number' && typeof parsed.latest === 'string') {
+		if (typeof parsed.checkedAt === 'number' && typeof parsed.latest === 'string' && (parsed.mode === 'npm' || parsed.mode === 'sea')) {
 			return parsed;
 		}
 		return null;
@@ -212,7 +212,7 @@ async function runNpmUpdateCheck(opts: UpdateOptions): Promise<void> {
 		mode: 'npm',
 	};
 
-	writeCache({ checkedAt: Date.now(), latest });
+	writeCache({ checkedAt: Date.now(), latest, mode: 'npm' });
 
 	if (opts.output === 'json') {
 		process.stdout.write(JSON.stringify(result, null, 2) + '\n');
@@ -275,23 +275,27 @@ function pickSeaArtefact(): SeaArtefactPick | null {
  * REST API. Returns the parsed release or null if the API is unreachable or
  * no matching release exists.
  */
-async function fetchLatestSeaRelease(): Promise<GitHubRelease | null> {
+export async function fetchLatestSeaRelease(): Promise<GitHubRelease | null> {
 	try {
-		const res = await fetch(`${RELEASES_API}?per_page=10`, {
-			headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
-		});
-		if (!res.ok) {
-			return null;
+		const candidates: GitHubRelease[] = [];
+		const signal = AbortSignal.timeout(10_000);
+		// IDE and CLI releases share a repository. A recent page may contain
+		// only IDE releases, or a patch to an older supported CLI version.
+		for (let page = 1; page <= 10; page++) {
+			const res = await fetch(`${RELEASES_API}?per_page=100&page=${page}`, {
+				headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }, signal,
+			});
+			if (!res.ok) { return null; }
+			const body = (await res.json()) as GitHubRelease[];
+			if (!Array.isArray(body)) { return null; }
+			candidates.push(...body.filter(r => r && !r.draft && !r.prerelease && /^sota-v\d+\.\d+\.\d+(?:\+[a-zA-Z0-9.-]+)?$/.test(r.tag_name)));
+			if (body.length < 100) {
+				candidates.sort((a, b) => compareSemver(tagToVersion(b.tag_name), tagToVersion(a.tag_name)));
+				return candidates[0] ?? null;
+			}
 		}
-		const body = (await res.json()) as GitHubRelease[];
-		// Sort by semver descending so the newest release is `candidates[0]`.
-		// A lexicographic sort on the raw tag would rank `sota-v0.9.0` above
-		// `sota-v0.10.0` (because the character '9' > '1'), silently offering
-		// the older release as the "latest".
-		const candidates = body
-			.filter((r) => !r.draft && r.tag_name?.startsWith('sota-v'))
-			.sort((a, b) => compareSemver(tagToVersion(b.tag_name), tagToVersion(a.tag_name)));
-		return candidates[0] ?? null;
+		// An incomplete catalog cannot establish the latest version.
+		return null;
 	} catch {
 		return null;
 	}
@@ -302,11 +306,14 @@ async function fetchLatestSeaRelease(): Promise<GitHubRelease | null> {
  * Returns the hex-encoded digest.
  */
 async function downloadWithHash(url: string, dest: string): Promise<string> {
-	const res = await fetch(url, { redirect: 'follow' });
+	if (new URL(url).protocol !== 'https:') { throw new Error('Update downloads require HTTPS'); }
+	const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(120_000) });
+	if (new URL(res.url).protocol !== 'https:') { throw new Error('Update redirected away from HTTPS'); }
 	if (!res.ok || !res.body) {
 		throw new Error(`download failed: HTTP ${res.status} for ${url}`);
 	}
 	const hash = crypto.createHash('sha256');
+	let bytes = 0;
 	const writer = fs.createWriteStream(dest, { mode: 0o755 });
 	// `Readable.fromWeb` is the supported bridge from the WHATWG body stream
 	// returned by `fetch` to a Node `Readable`. We pipe through a transform
@@ -321,6 +328,7 @@ async function downloadWithHash(url: string, dest: string): Promise<string> {
 		nodeReadable,
 		async function* (source: AsyncIterable<Buffer>): AsyncGenerator<Buffer> {
 			for await (const chunk of source) {
+				bytes += chunk.length; if (bytes > 512 * 1024 * 1024) { throw new Error('Update exceeds 512 MiB limit'); }
 				hash.update(chunk);
 				yield chunk;
 			}
@@ -358,51 +366,43 @@ async function fetchSha256Sums(release: GitHubRelease): Promise<Map<string, stri
 		return null;
 	}
 	try {
-		const res = await fetch(asset.browser_download_url, { redirect: 'follow' });
-		if (!res.ok) {
+		if (new URL(asset.browser_download_url).protocol !== 'https:') { return null; }
+		const res = await fetch(asset.browser_download_url, { redirect: 'follow', signal: AbortSignal.timeout(10_000) });
+		if (!res.ok || new URL(res.url).protocol !== 'https:') {
 			return null;
 		}
-		const body = await res.text();
-		return parseSha256Sums(body);
+		if (!res.body) { return null; }
+		const chunks: Uint8Array[] = []; let bytes = 0;
+		for await (const chunk of res.body) { bytes += chunk.length; if (bytes > 1024 * 1024) { return null; } chunks.push(chunk); }
+		return parseSha256Sums(Buffer.concat(chunks).toString('utf8'));
 	} catch {
 		return null;
 	}
 }
 
 /**
- * Replace the running SEA binary with `newBinaryPath` using the
- * rename-old / rename-new trick. Returns true on success.
+ * Stage a verified binary on the destination volume and return its retained backup path.
  *
- * The .old file is left behind on disk — most OSes will delete it as soon as
- * the current sota process exits and closes its file descriptor, but on
- * Windows it can linger if anything else has a handle. The next `sota`
- * invocation cleans up stale .old files (see `removeStaleOldBinary`).
+ * The .old file is left behind on disk — it is intentionally retained for rollback until the user removes it.
  */
-function swapBinary(runningPath: string, newBinaryPath: string): void {
-	const oldPath = runningPath + '.old';
-	// Remove any leftover .old from a prior swap. On Windows it may still be
-	// locked; ignore the error and let the next run handle it.
+export function installVerifiedBinary(runningPath: string, downloadedPath: string, expectedHash: string, renameFile: typeof fs.renameSync = fs.renameSync): string {
+	if (!/^[a-f0-9]{64}$/i.test(expectedHash)) { throw new Error('Invalid binary checksum'); }
+	const staged = `${runningPath}.${crypto.randomUUID()}.new`;
+	const backup = `${runningPath}.${crypto.randomUUID()}.old`;
 	try {
-		fs.rmSync(oldPath, { force: true });
-	} catch {
-		// best effort
-	}
-	fs.renameSync(runningPath, oldPath);
-	try {
-		fs.renameSync(newBinaryPath, runningPath);
-	} catch (err) {
-		// Try to roll back so the user isn't left with a missing binary.
-		try {
-			fs.renameSync(oldPath, runningPath);
-		} catch {
-			// If we can't roll back either, the .old file is the only copy.
-			throw new Error(`update failed mid-swap; previous binary is at ${oldPath}: ${String(err)}`);
+		// Stage on the destination filesystem: downloads in the OS temp directory may be on another volume.
+		fs.copyFileSync(downloadedPath, staged, fs.constants.COPYFILE_EXCL);
+		if (crypto.createHash('sha256').update(fs.readFileSync(staged)).digest('hex') !== expectedHash.toLowerCase()) { throw new Error('SHA256 mismatch; installed binary was not changed'); }
+		fs.chmodSync(staged, 0o755);
+		renameFile(runningPath, backup);
+		try { renameFile(staged, runningPath); }
+		catch (error) {
+			try { renameFile(backup, runningPath); }
+			catch { throw new Error(`Update interrupted; previous binary retained at ${backup}`); }
+			throw error;
 		}
-		throw err;
-	}
-	if (process.platform !== 'win32') {
-		fs.chmodSync(runningPath, 0o755);
-	}
+		return backup;
+	} finally { fs.rmSync(staged, { force: true }); }
 }
 
 /**
@@ -432,7 +432,7 @@ async function runSeaSelfUpdate(opts: UpdateOptions): Promise<void> {
 
 	const latest = tagToVersion(release.tag_name);
 	const upToDate = !isStrictlyGreater(latest, current);
-	writeCache({ checkedAt: Date.now(), latest });
+	writeCache({ checkedAt: Date.now(), latest, mode: 'sea' });
 
 	if (opts.output === 'json' && (upToDate || opts.check)) {
 		const result: UpdateCheckResult = {
@@ -464,7 +464,7 @@ async function runSeaSelfUpdate(opts: UpdateOptions): Promise<void> {
 		process.stdout.write(`[dry-run] Would update sota ${current} → ${latest}.\n`);
 		process.stdout.write(`[dry-run]   Source asset:   ${pick.binaryAssetName} from ${release.tag_name}\n`);
 		process.stdout.write(`[dry-run]   Target binary:  ${runningPath}\n`);
-		process.stdout.write(`[dry-run]   Atomic swap:    rename(${runningPath}, ${runningPath}.old) then rename(<tmp>, ${runningPath})\n`);
+		process.stdout.write(`[dry-run]   Replacement:   stage beside target, retain a unique .old backup, then replace with rollback on failure\n`);
 		return;
 	}
 
@@ -495,7 +495,8 @@ async function runSeaSelfUpdate(opts: UpdateOptions): Promise<void> {
 				`SHA256 mismatch for ${pick.binaryAssetName}: expected ${expectedHash}, got ${actualHash}`,
 			);
 		}
-		swapBinary(runningPath, tmpBinary);
+		const backup = installVerifiedBinary(runningPath, tmpBinary, expectedHash);
+		process.stderr.write(`Previous binary retained at ${backup}\n`);
 	} catch (err) {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
 		emitError(opts, err instanceof Error ? err.message : String(err));

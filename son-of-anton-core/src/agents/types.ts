@@ -61,6 +61,8 @@ export interface FileChange {
  * Token usage tracking for cost monitoring.
  */
 export interface TokenUsage {
+	/** External ACP agents do not guarantee a metered usage report. Zeroes are not a free invocation. */
+	accounting?: 'unavailable';
 	inputTokens: number;
 	outputTokens: number;
 	cachedTokens: number;
@@ -158,6 +160,8 @@ export interface ExecutionPlan {
 	 * the propagation policy.
 	 */
 	orchestratorModel?: ModelId;
+	/** Retain the original editor context across the separate approval turn. */
+	workspaceContextSnapshot?: string;
 }
 
 /**
@@ -217,6 +221,7 @@ export interface SlashCommandConfig {
  * Metrics tracked per specialist agent.
  */
 export interface AgentMetrics {
+	unmeteredInvocations?: number;
 	agentHandle: AgentHandle;
 	totalInvocations: number;
 	firstPassSuccessCount: number;

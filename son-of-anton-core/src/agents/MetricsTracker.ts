@@ -13,7 +13,6 @@ import { AgentHandle, AgentMetrics, TokenUsage } from './types';
  */
 export class MetricsTracker {
 	private readonly metrics: Map<AgentHandle, AgentMetrics> = new Map();
-	private readonly latencies: Map<AgentHandle, number[]> = new Map();
 
 	private ensureMetrics(handle: AgentHandle): AgentMetrics {
 		let m = this.metrics.get(handle);
@@ -31,7 +30,6 @@ export class MetricsTracker {
 				failureModes: new Map(),
 			};
 			this.metrics.set(handle, m);
-			this.latencies.set(handle, []);
 		}
 		return m;
 	}
@@ -43,9 +41,8 @@ export class MetricsTracker {
 		m.totalOutputTokens += tokenUsage.outputTokens;
 		m.totalNaiveInputTokens += tokenUsage.naiveInputTokens;
 
-		const latencyList = this.latencies.get(handle)!;
-		latencyList.push(latencyMs);
-		m.averageLatencyMs = latencyList.reduce((a, b) => a + b, 0) / latencyList.length;
+		m.averageLatencyMs += (latencyMs - m.averageLatencyMs) / m.totalInvocations;
+		if (tokenUsage.accounting === 'unavailable') { m.unmeteredInvocations = (m.unmeteredInvocations ?? 0) + 1; }
 	}
 
 	recordFirstPassSuccess(handle: AgentHandle): void {
@@ -104,6 +101,7 @@ export class MetricsTracker {
 		for (const [handle, m] of this.metrics) {
 			data[handle] = {
 				totalInvocations: m.totalInvocations,
+				unmeteredInvocations: m.unmeteredInvocations ?? 0,
 				firstPassSuccessRate: m.totalInvocations > 0
 					? (m.firstPassSuccessCount / m.totalInvocations * 100).toFixed(1) + '%'
 					: 'N/A',
@@ -138,6 +136,7 @@ export class MetricsTracker {
 
 			lines.push(`### ${m.agentHandle}`);
 			lines.push(`- Invocations: ${m.totalInvocations}`);
+			if (m.unmeteredInvocations) { lines.push(`- External ACP invocations without usage data: ${m.unmeteredInvocations}`); }
 			lines.push(`- First-pass success: ${successRate}%`);
 			lines.push(`- Avg retries: ${m.totalInvocations > 0 ? (m.totalRetries / m.totalInvocations).toFixed(2) : '0'}`);
 			lines.push(`- Escalations: ${m.escalationCount}`);

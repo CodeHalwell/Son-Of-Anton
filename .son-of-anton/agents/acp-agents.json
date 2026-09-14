@@ -1,31 +1,203 @@
 {
-	"agents": [
-		{
-			"id": "gemini-cli",
-			"name": "Gemini CLI",
-			"transport": "stdio",
-			"command": "gemini",
-			"args": ["--output-format", "stream-json"],
-			"capabilities": ["code-generation", "analysis", "search-grounding"],
-			"contextWindow": 1000000,
-			"costTier": "free"
-		},
-		{
-			"id": "codex-cli",
-			"name": "Codex CLI",
-			"transport": "stdio",
-			"command": "codex",
-			"args": [],
-			"capabilities": ["code-generation", "sandbox-execution"],
-			"costTier": "subscription"
-		},
-		{
-			"id": "custom-reviewer",
-			"name": "Custom Security Reviewer",
-			"transport": "http",
-			"url": "http://localhost:4200",
-			"capabilities": ["security-review"],
-			"costTier": "local"
-		}
-	]
+  "agents": [
+    {
+      "id": "anton",
+      "name": "Anton",
+      "transport": "stdio",
+      "command": "sota",
+      "args": [
+        "acp",
+        "--agent",
+        "anton"
+      ],
+      "capabilities": [
+        "analysis"
+      ],
+      "costTier": "pay-per-use"
+    },
+    {
+      "id": "anton-code",
+      "name": "Anton code",
+      "transport": "stdio",
+      "command": "sota",
+      "args": [
+        "acp",
+        "--agent",
+        "anton-code"
+      ],
+      "capabilities": [
+        "code-generation",
+        "refactoring"
+      ],
+      "costTier": "pay-per-use"
+    },
+    {
+      "id": "anton-test",
+      "name": "Anton test",
+      "transport": "stdio",
+      "command": "sota",
+      "args": [
+        "acp",
+        "--agent",
+        "anton-test"
+      ],
+      "capabilities": [
+        "testing"
+      ],
+      "costTier": "pay-per-use"
+    },
+    {
+      "id": "anton-security",
+      "name": "Anton security",
+      "transport": "stdio",
+      "command": "sota",
+      "args": [
+        "acp",
+        "--agent",
+        "anton-security"
+      ],
+      "capabilities": [
+        "security-review"
+      ],
+      "costTier": "pay-per-use"
+    },
+    {
+      "id": "anton-docs",
+      "name": "Anton docs",
+      "transport": "stdio",
+      "command": "sota",
+      "args": [
+        "acp",
+        "--agent",
+        "anton-docs"
+      ],
+      "capabilities": [
+        "documentation"
+      ],
+      "costTier": "pay-per-use"
+    },
+    {
+      "id": "anton-e2e",
+      "name": "Anton e2e",
+      "transport": "stdio",
+      "command": "sota",
+      "args": [
+        "acp",
+        "--agent",
+        "anton-e2e"
+      ],
+      "capabilities": [
+        "testing"
+      ],
+      "costTier": "pay-per-use"
+    },
+    {
+      "id": "anton-ci",
+      "name": "Anton ci",
+      "transport": "stdio",
+      "command": "sota",
+      "args": [
+        "acp",
+        "--agent",
+        "anton-ci"
+      ],
+      "capabilities": [
+        "analysis"
+      ],
+      "costTier": "pay-per-use"
+    },
+    {
+      "id": "anton-pr",
+      "name": "Anton pr",
+      "transport": "stdio",
+      "command": "sota",
+      "args": [
+        "acp",
+        "--agent",
+        "anton-pr"
+      ],
+      "capabilities": [
+        "documentation"
+      ],
+      "costTier": "pay-per-use"
+    },
+    {
+      "id": "anton-moderniser",
+      "name": "Anton moderniser",
+      "transport": "stdio",
+      "command": "sota",
+      "args": [
+        "acp",
+        "--agent",
+        "anton-moderniser"
+      ],
+      "capabilities": [
+        "refactoring"
+      ],
+      "costTier": "pay-per-use"
+    },
+    {
+      "id": "anton-review",
+      "name": "Anton review",
+      "transport": "stdio",
+      "command": "sota",
+      "args": [
+        "acp",
+        "--agent",
+        "anton-review"
+      ],
+      "capabilities": [
+        "analysis"
+      ],
+      "costTier": "pay-per-use"
+    },
+    {
+      "id": "gemini-cli",
+      "name": "Gemini CLI",
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "--yes",
+        "@google/gemini-cli@0.58.0",
+        "--acp"
+      ],
+      "capabilities": [
+        "code-generation",
+        "analysis",
+        "search-grounding"
+      ],
+      "costTier": "free"
+    },
+    {
+      "id": "codex-cli",
+      "name": "Codex ACP",
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "--yes",
+        "@agentclientprotocol/codex-acp@1.10.0"
+      ],
+      "capabilities": [
+        "code-generation",
+        "sandbox-execution"
+      ],
+      "costTier": "subscription"
+    },
+    {
+      "id": "claude-agent",
+      "name": "Claude Agent ACP",
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "--yes",
+        "@agentclientprotocol/claude-agent-acp@0.75.1"
+      ],
+      "capabilities": [
+        "code-generation",
+        "analysis",
+        "refactoring"
+      ],
+      "costTier": "subscription"
+    }
+  ]
 }

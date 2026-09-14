@@ -1,0 +1,115 @@
+{
+  "target": "darwin-arm64",
+  "packagedGraphTests": {
+    "passed": 13,
+    "failed": 0,
+    "skipped": 0
+  },
+  "localModel": {
+    "model": "BGE-small-en-v1.5",
+    "fixture": "local-paraphrase-v1",
+    "coldReadyMs": 10658.66025,
+    "warmReadyMs": 951.0007079999996,
+    "concurrent32Ms": 379.0313750000005,
+    "maxStatusLatencyMs": 28.639250000000175,
+    "recallAt1": 1,
+    "samples": [
+      {
+        "query": "calculate the shopping basket bill",
+        "expected": "cartTotal",
+        "retrieved": [
+          "cartTotal",
+          "scheduleRetry",
+          "exportCsv"
+        ],
+        "latencyMs": 125.34458300000006
+      },
+      {
+        "query": "securely hash a secret for authentication",
+        "expected": "passwordDigest",
+        "retrieved": [
+          "passwordDigest",
+          "createThumbnail",
+          "evictExpiredEntries"
+        ],
+        "latencyMs": 29.572541999999885
+      },
+      {
+        "query": "find the soonest upcoming meeting",
+        "expected": "nextAppointment",
+        "retrieved": [
+          "nextAppointment",
+          "scheduleRetry",
+          "evictExpiredEntries"
+        ],
+        "latencyMs": 16.734207999999853
+      },
+      {
+        "query": "make a small preview picture",
+        "expected": "createThumbnail",
+        "retrieved": [
+          "createThumbnail",
+          "nextAppointment",
+          "cartTotal"
+        ],
+        "latencyMs": 53.653416999999536
+      },
+      {
+        "query": "remove cached values whose lifetime has elapsed",
+        "expected": "evictExpiredEntries",
+        "retrieved": [
+          "evictExpiredEntries",
+          "exportCsv",
+          "nextAppointment"
+        ],
+        "latencyMs": 191.984457999999
+      },
+      {
+        "query": "save tabular records as comma separated text",
+        "expected": "exportCsv",
+        "retrieved": [
+          "exportCsv",
+          "evictExpiredEntries",
+          "cartTotal"
+        ],
+        "latencyMs": 53.05362499999865
+      }
+    ]
+  },
+  "capacity": {
+    "symbols": 2002,
+    "dimensions": 384,
+    "initialReadyMs": 12532.083709,
+    "concurrent100Ms": 222.04891700000007,
+    "maxStatusLatencyMs": 19.250082999998995,
+    "replacedFiles": 10
+  },
+  "stalledDownloadShutdownMs": 20,
+  "installerManifest": {
+    "version": 1,
+    "product": "Son of Anton IDE",
+    "ideVersion": "1.112.0",
+    "commit": "1dc6348acb53d23a012e93d503f39b1e0c47e3c7",
+    "target": "darwin-arm64",
+    "createdAt": "2026-09-14T14:13:12.808Z",
+    "signing": "ad-hoc",
+    "files": [
+      {
+        "name": "son-of-anton-1.112.0-darwin-arm64.zip",
+        "bytes": 221486873,
+        "sha256": "4a2a49eda588afce4d1f8164110364ea21261cfc708c42b38ae8e0e690247fc4"
+      },
+      {
+        "name": "son-of-anton-1.112.0-darwin-arm64.dmg",
+        "bytes": 277646266,
+        "sha256": "700ab6da365add1ff29da85984901685f171e96dc8f1d961163574cbc42a933e"
+      }
+    ]
+  },
+  "interactiveCheck": "Verified through native UI after the Mac became available: semantic search ready, restart via code graph actions returned to ready with two files and one symbol at 15:38:16, integrated terminal npm test passed 2/2, and saved Council report displayed Completed with 4 of 4 stages.",
+  "limitations": [
+    "Capacity vectors are generated; relevance measured separately on six real-model queries.",
+    "Long-duration testing and current Windows/Linux candidate installation remain open.",
+    "This macOS candidate uses local ad-hoc signing."
+  ]
+}

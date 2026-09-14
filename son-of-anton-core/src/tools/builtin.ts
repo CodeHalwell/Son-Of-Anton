@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { ShellExecutionMetadata, Tool, ToolExecutionContext, ToolExecutionResult, UiBlockMetadata, WriteFileMetadata } from './types';
+import { LIST_SKILLS_TOOL, READ_SKILL_TOOL } from '../integrations/skillTools';
 import { fetchUrlAsText } from '../util/urlFetch';
 
 const MAX_FILE_CHARS = 50_000;
@@ -759,6 +760,8 @@ export const EMIT_UI_BLOCK_TOOL: Tool = {
 };
 
 export const BUILTIN_TOOLS: ReadonlyArray<Tool> = [
+	LIST_SKILLS_TOOL,
+	READ_SKILL_TOOL,
 	READ_FILE_TOOL,
 	LIST_DIRECTORY_TOOL,
 	SEARCH_WORKSPACE_TOOL,

@@ -2,6 +2,7 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
+import { BoardTaskRunner } from './board/BoardTaskRunner';
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import { globalScopedConfig, liveConfig } from './chat/globalScopedConfig';
@@ -10,28 +11,33 @@ import { ChatPanel } from './chat/ChatPanel';
 import { ChatViewProvider } from './chat/ChatViewProvider';
 import { WriteSnapshotStore } from './chat/WriteSnapshotStore';
 import { ConversationStore } from './chat/ConversationStore';
-import { ConversationListProvider, ConversationTreeItem } from './chat/ConversationListProvider';
+import { ConversationActions } from './chat/ConversationActions';
+import { ConversationListProvider } from './chat/ConversationListProvider';
 import { InlineEditProvider } from './inline/InlineEdit';
 import { CompletionProvider } from './inline/CompletionProvider';
 import { AgentStatusProvider } from './sidebar/AgentStatusProvider';
 import { AgentRosterProvider, formatLastActive } from './sidebar/AgentRosterProvider';
 import { TaskQueueProvider } from './sidebar/TaskQueueProvider';
 import { PERSONAS } from 'son-of-anton-core/chat/personas';
+import { importedMcpServers, registerSystemIntegrations } from './integrations/SystemIntegrations';
+import { registerImpactAnalysisCommand } from './impact/ImpactAnalysisCommand';
 import { TraceViewerPanel } from './trace/TraceViewerPanel';
 import { TraceExporter } from './trace/TraceExporter';
 import { LlmClient } from 'son-of-anton-core/llm/LlmClient';
 import { isCodexAvailable } from 'son-of-anton-core/llm/codexRunner';
 import { isClaudeCodeAvailable } from 'son-of-anton-core/llm/claudeCodeRunner';
-import { ToolRegistry, createInstrumentedWorkspaceToolContext, defaultModalApproval } from './tools/registry';
+import { ToolRegistry, createWorkspaceToolContext, createInstrumentedWorkspaceToolContext, defaultModalApproval } from './tools/registry';
 import { getActiveApproval } from './chat/approvalRegistry';
 import { HookRunner, hooksFilePath } from 'son-of-anton-core/persistence/HookRunner';
 import type { CoreHost } from 'son-of-anton-core/host';
 import * as fs from 'node:fs';
 import { AgentManager } from 'son-of-anton-core/agents/AgentManager';
+import type { AgentHandle } from 'son-of-anton-core/agents/types';
 import { McpClient, type McpClientDeps } from 'son-of-anton-core/mcp/McpClient';
 import { bridgeMcpToolsIntoRegistry, subscribeMcpToolBridge } from 'son-of-anton-core/mcp/McpToolBridge';
 import { StatusBarManager } from './sidebar/StatusBarManager';
 import { registerAgentParticipants } from './agents/AgentParticipants';
+import { diagnoseAcp } from 'son-of-anton-core/acp/AcpDiagnostics';
 import { createAgentStack } from 'son-of-anton-core/agents/AgentStackFactory';
 import { SessionBudget } from 'son-of-anton-core/agents/SessionBudget';
 import { readSpendLimits } from './monitoring/SpendGuard';
@@ -59,18 +65,17 @@ import { SetupWizardPanel } from './onboarding/SetupWizardPanel';
 import { CostReporter } from './monitoring/CostReporter';
 import { HealthMonitor } from './monitoring/HealthMonitor';
 import { CheckpointManager } from 'son-of-anton-core/checkpoint/CheckpointManager';
+import { registerAcpRegistryCommands } from './integrations/AcpRegistryCommands';
+import { CouncilController } from './council/CouncilController';
 import { TaskBoardModel, BoardTask, SubtaskState } from './board/TaskBoardModel';
 import { TaskBoardPanel } from './board/TaskBoardPanel';
 import { TaskBoardSidebarView } from './board/TaskBoardSidebarView';
 import { AgentEvent, AgentPlan } from './chat/agentEvents';
-import { CodeGraphController } from './services/CodeGraphController';
-import { CodeGraphStatusBarItem as DockerStackStatusBarItem } from './sidebar/CodeGraphStatusBarItem';
 import { CodeGraphBackend, type McpServerEntry as CodeGraphMcpEntry } from './codeGraph/CodeGraphBackend';
 import { CodeGraphStatusBarItem } from './status/CodeGraphStatusBarItem';
 import { CliStatusBarItem } from './cli/CliStatusBarItem';
 import { HarnessStatusBarItem } from './status/HarnessStatusBarItem';
 import { registerOpenCliInTerminalCommand } from './cli/openCliInTerminal';
-import * as cp from 'node:child_process';
 
 export function activate(context: vscode.ExtensionContext): void {
 	// Run a peripheral subsystem's setup in isolation so one throwing
@@ -98,12 +103,10 @@ export function activate(context: vscode.ExtensionContext): void {
 	});
 	context.subscriptions.push(...auth.disposables);
 
-	// One-direction sync: copy the IDE's SecretStorage entries into the
-	// CLI's file-backed secret store at `~/.son-of-anton/data/secrets.json`
-	// so users who configure providers in the IDE can run `sota chat` from
-	// a terminal without re-exporting env vars. Runs once at activation
-	// plus a watcher for live updates on every credential save.
-	void mirrorSecretsToCliStore(context.secrets);
+	// Share credentials through OS protection; never export to plaintext.
+	void mirrorSecretsToCliStore(context.secrets).catch(() => {
+		console.warn('[credentials] Protected CLI synchronization unavailable; use environment credentials or configure the OS credential store.');
+	});
 	context.subscriptions.push(watchSecretsForCliMirror(context.secrets));
 
 	// Cost meter for the chat surface header. Threaded into LlmClient so any
@@ -176,10 +179,16 @@ export function activate(context: vscode.ExtensionContext): void {
 	});
 	context.subscriptions.push(mcpTrustGate);
 
+	const integrationServerStates = new Map<string, string>();
+	registerSystemIntegrations(context, fireCodeGraphSettingChange, integrationServerStates);
 	const mcpClientDeps: McpClientDeps = {
-		readServersSetting: () => {
+		onServerState: (name, state, error) => { integrationServerStates.set(name, state); ChatPanel.notifySystemIntegrationsChanged(); if (name === 'code-graph') { codeGraphBackendRef.current?.connectionState(state, error); } },
+		onServerLog: (name, chunk) => { if (name === 'code-graph') { codeGraphBackendRef.current?.acceptLog(chunk); } },
+		readServersSetting: async () => {
+			// Restricted Mode exposes setup/history, but starts neither user nor bundled MCP processes.
+			if (!vscode.workspace.isTrusted) { return []; }
 			const userServers = vscode.workspace.getConfiguration().get<unknown>('sota.mcp.servers');
-			const rawUserList: unknown[] = Array.isArray(userServers) ? [...userServers] : [];
+			const rawUserList: unknown[] = [...(Array.isArray(userServers) ? userServers : []), ...await importedMcpServers()];
 			// Gate untrusted user-configured servers out before they reach the
 			// client. Untrusted entries are dropped and trigger an async
 			// confirmation prompt; approving one fires a reconcile so it connects.
@@ -209,6 +218,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			codeGraphSettingChangeListeners.push(listener);
 			const sub = vscode.workspace.onDidChangeConfiguration(e => {
 				if (
+					e.affectsConfiguration('sota.integrations') ||
 					e.affectsConfiguration('sota.mcp.servers') ||
 					e.affectsConfiguration('sota.mcp.trustedServers') ||
 					e.affectsConfiguration('sota.codeGraph')
@@ -228,6 +238,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		},
 	};
 	const mcpClient = new McpClient(mcpClientDeps);
+	context.subscriptions.push(vscode.workspace.onDidGrantWorkspaceTrust(() => fireCodeGraphSettingChange()));
 	context.subscriptions.push({ dispose: () => mcpClient.dispose() });
 
 	// Subscribe the registry to live MCP tool updates so adds / edits / removes
@@ -252,7 +263,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	const agentManager = new AgentManager(llmClient);
 	const agentStatusProvider = new AgentStatusProvider(agentManager);
 	const taskQueueProvider = new TaskQueueProvider(agentManager);
-	const statusBarManager = new StatusBarManager(agentManager, auth.broker);
+	const statusBarManager = new StatusBarManager(agentManager, auth.broker, context.secrets);
 
 	// --- Command execution model ---
 	// Agent shell commands run HOST-SIDE through the core `run_command` tool,
@@ -414,7 +425,18 @@ export function activate(context: vscode.ExtensionContext): void {
 		? new SessionBudget({ maxCostUsd: spendLimits.sessionCapUsd })
 		: undefined;
 
-	const agentStack = createAgentStack({
+	const stackDependencies: Parameters<typeof createAgentStack>[0] = {
+		canUseAcp: () => vscode.workspace.isTrusted,
+		acpPermission: async (request, signal) => {
+			if (signal.aborted || !vscode.workspace.isTrusted) { return { outcome: { outcome: 'cancelled' } }; }
+			const offered = request.options.filter(option => option.kind === 'allow_once' || option.kind === 'reject_once');
+			const picked = await vscode.window.showWarningMessage(
+				vscode.l10n.t("ACP Agent: {0}", request.toolCall.title ?? request.toolCall.toolCallId),
+				{ modal: true, detail: JSON.stringify(request.toolCall, null, 2).slice(0, 8000) },
+				...offered.map(option => ({ title: option.name, optionId: option.optionId, isCloseAffordance: option.kind === 'reject_once' })),
+			);
+			return signal.aborted || !picked ? { outcome: { outcome: 'cancelled' } } : { outcome: { outcome: 'selected', optionId: picked.optionId } };
+		},
 		llmClient,
 		mcpClient,
 		agentManager,
@@ -424,24 +446,37 @@ export function activate(context: vscode.ExtensionContext): void {
 		configStore: agentConfigStore,
 		spendGuard,
 		toolExecutionContext: workspacePath
-			? createInstrumentedWorkspaceToolContext(hookRunner, {
-				// Approval routing: consult the chat panel's webview-card
-				// flow when one is active (registered via
-				// `setActiveApproval` on chat-session construction); fall
-				// back to the modal `vscode.window.showInformationMessage`
-				// flow when no panel exists (palette commands,
-				// programmatic invocations). The lookup happens per call
-				// so panels opening / closing are picked up immediately.
-				requestApproval: async (request) => {
-					const handler = getActiveApproval();
-					if (handler) {
-						return handler(request);
-					}
-					return defaultModalApproval(request);
+			? {
+				...createInstrumentedWorkspaceToolContext(hookRunner, {
+					// Approval routing: consult the chat panel's webview-card
+					// flow when one is active (registered via
+					// `setActiveApproval` on chat-session construction); fall
+					// back to the modal `vscode.window.showInformationMessage`
+					// flow when no panel exists (palette commands,
+					// programmatic invocations). The lookup happens per call
+					// so panels opening / closing are picked up immediately.
+					requestApproval: async (request) => {
+						const handler = getActiveApproval();
+						if (handler) {
+							return handler(request);
+						}
+						return defaultModalApproval(request);
+					},
+				}),
+				requestMcpApproval: async (tool, input, signal) => {
+					if (signal?.aborted || !vscode.workspace.isTrusted) { return false; }
+					const allow = vscode.l10n.t("Allow Once");
+					const picked = await vscode.window.showWarningMessage(
+						vscode.l10n.t("Run MCP Tool: {0}", tool.name),
+						{ modal: true, detail: JSON.stringify(input, null, 2).slice(0, 8000) },
+						allow,
+					);
+					return !signal?.aborted && picked === allow;
 				},
-			})
+			}
 			: undefined,
-	});
+	};
+	const agentStack = createAgentStack(stackDependencies);
 	context.subscriptions.push({ dispose: () => agentStack.dispose() });
 	// Specialist memory is owned by the stack but pushed separately so
 	// future surfaces (e.g. UI listing what `@anton-code` remembers) can
@@ -457,13 +492,37 @@ export function activate(context: vscode.ExtensionContext): void {
 	const trustedFolders = new TrustedFolders(context.globalState);
 	context.subscriptions.push(trustedFolders);
 
-	const agentBridge = new AgentBridge(agentStack, trustedFolders);
+	const agentBridge = new AgentBridge(agentStack, trustedFolders, root => {
+		const isolatedMcp = new McpClient({ readServersSetting: () => [], getWorkspaceRoot: () => root, onSettingChange: () => ({ dispose() {} }) });
+		const state = new Map<string, unknown>();
+		const isolated = createAgentStack({ ...stackDependencies, workspaceRoot: root,
+			acpRuntime: agentStack.acpRuntime, persistMetrics: false, mcpClient: isolatedMcp, projectContext: undefined,
+			globalState: { get: <T>(key: string, fallback?: T) => (state.get(key) as T | undefined) ?? fallback, update: async (key, value) => { state.set(key, value); } },
+			toolExecutionContext: createWorkspaceToolContext({ workspaceRoot: vscode.Uri.file(root), requestApproval: request => request.kind === 'write' ? Promise.resolve({ action: 'approve' }) : defaultModalApproval(request) }),
+		});
+		return { ...isolated, dispose: async () => { try { await isolated.dispose(); } finally { isolatedMcp.dispose(); } } };
+	});
 	context.subscriptions.push({ dispose: () => agentBridge.dispose() });
+	context.subscriptions.push(vscode.commands.registerCommand('sota.diagnoseAcpAgents', async () => {
+		if (!await agentBridge.ensureWorkspaceTrust()) { return; }
+		await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: vscode.l10n.t('Check ACP Connections'), cancellable: true }, async (progress, token) => {
+			const abort = new AbortController(); const subscription = token.onCancellationRequested(() => abort.abort());
+			try {
+				const reports = [];
+				for (const agent of vscode.workspace.getConfiguration('sota').get<import('son-of-anton-core/acp/protocol').AcpAgentDefinition[]>('acp.agents', [])) {
+					if (token.isCancellationRequested) { break; } progress.report({ message: agent.id });
+					reports.push(await diagnoseAcp(agent, workspacePath, { signal: abort.signal }));
+				}
+				await vscode.window.showTextDocument(await vscode.workspace.openTextDocument({ language: 'json', content: JSON.stringify({ note: 'Session checks do not verify a billed model turn. Use sota acp-doctor --live for that check.', reports }, null, 2) }));
+			} finally { subscription.dispose(); }
+		});
+	}));
 
 	// Status bar lock that only surfaces when platform trust is granted but
 	// Son of Anton's consent has not been given.
-	const trustStatusBarItem = new TrustStatusBarItem(trustedFolders);
+	const trustStatusBarItem = new TrustStatusBarItem(trustedFolders, folderPath => agentBridge.isWorkspaceTrusted(folderPath));
 	context.subscriptions.push(trustStatusBarItem);
+	context.subscriptions.push(agentBridge.onDidChangeTrust(() => trustStatusBarItem.refresh()));
 
 	// Trust commands (palette + status-bar click target).
 	context.subscriptions.push(
@@ -479,17 +538,8 @@ export function activate(context: vscode.ExtensionContext): void {
 				);
 				return;
 			}
-			const choice = await vscode.window.showWarningMessage(
-				`Trust Son of Anton in '${folder.name}'?\n\nSon of Anton agents can read your files, run shell commands, and modify code. Grant trust only if you trust this workspace.`,
-				{ modal: true },
-				'Trust Forever',
-				'Cancel',
-			);
-			if (choice === 'Trust Forever') {
-				trustedFolders.grant(folder.uri.fsPath);
-				trustStatusBarItem.refresh();
-				vscode.window.showInformationMessage(`Son of Anton: granted trust for '${folder.name}'.`);
-			}
+			await agentBridge.ensureWorkspaceTrust();
+			trustStatusBarItem.refresh();
 		}),
 	);
 
@@ -588,8 +638,13 @@ export function activate(context: vscode.ExtensionContext): void {
 	// subtask events into a per-conversation kanban state. Wired to the
 	// AgentBridge's global event tap so the model updates regardless of which
 	// chat surface initiated the run.
+	context.subscriptions.push(registerAcpRegistryCommands());
 	const taskBoardModel = new TaskBoardModel();
+	const boardTaskRunner = new BoardTaskRunner(taskBoardModel, agentBridge);
 	context.subscriptions.push(taskBoardModel);
+	const council = workspacePath && agentStack.acpRuntime ? new CouncilController(context, workspacePath, llmClient, agentStack.acpRuntime, agentBridge, taskBoardModel, conversationStore) : undefined;
+	if (council) { context.subscriptions.push(council); }
+	else { for (const command of ['sota.reviewWithCouncil', 'sota.councilHistory']) { context.subscriptions.push(vscode.commands.registerCommand(command, () => vscode.window.showInformationMessage(vscode.l10n.t('Open a Git workspace to use AI Council.')))); } }
 	context.subscriptions.push(
 		agentBridge.onDidEmitEvent(envelope => {
 			const conversationId = envelope.conversationId;
@@ -666,12 +721,12 @@ export function activate(context: vscode.ExtensionContext): void {
 	// by VS Code (when invoked from the context menu) or no argument
 	// (when invoked from the palette); the helper below normalises both.
 	const resolveRosterHandle = async (arg: unknown): Promise<string | undefined> => {
-		if (typeof arg === 'string' && arg.length > 0) {
+		if (typeof arg === 'string' && PERSONAS.some(persona => persona.id === arg)) {
 			return arg;
 		}
 		if (arg && typeof arg === 'object' && Object.hasOwn(arg, 'id')) {
 			const id = (arg as { id?: unknown }).id;
-			if (typeof id === 'string' && id.length > 0) {
+			if (typeof id === 'string' && PERSONAS.some(persona => persona.id === id)) {
 				return id;
 			}
 		}
@@ -693,18 +748,11 @@ export function activate(context: vscode.ExtensionContext): void {
 			if (!handle) {
 				return;
 			}
-			// Open a fresh conversation and surface the chat view so the
-			// user can address the specialist directly. Pre-filling the
-			// composer is a follow-up (the chat panel doesn't yet expose a
-			// programmatic compose hook), so we hint via status bar.
 			const fresh = conversationStore.create();
+			conversationStore.update(fresh.summary.id, [], handle as AgentHandle | 'anton', 'act', 'chat');
 			await vscode.commands.executeCommand(`${ChatViewProvider.VIEW_ID}.focus`);
 			chatViewProvider.openConversation(fresh.summary.id);
 			ChatPanel.switchConversation(fresh.summary.id);
-			vscode.window.setStatusBarMessage(
-				`Started a thread — address ${handle} with @${handle} in the composer.`,
-				5000,
-			);
 		}),
 	);
 
@@ -795,9 +843,8 @@ export function activate(context: vscode.ExtensionContext): void {
 	// The board is a separate webview panel (not embedded in the chat
 	// sidebar) so it can occupy a full editor column for the kanban grid.
 	context.subscriptions.push(
-		vscode.commands.registerCommand('sota.openTaskBoard', () => {
-			const list = conversationStore.list();
-			const activeId = list.length > 0 ? list[0].id : undefined;
+		vscode.commands.registerCommand('sota.openTaskBoard', (conversationId?: string) => {
+			const activeId = typeof conversationId === 'string' && conversationStore.load(conversationId) ? conversationId : conversationStore.getInitialConversation()?.summary.id;
 
 			// Best-effort hydration: if the orchestrator already has a live plan
 			// (e.g. the user proposed a plan, then opened the board before
@@ -834,28 +881,18 @@ export function activate(context: vscode.ExtensionContext): void {
 						void vscode.commands.executeCommand(`${ChatViewProvider.VIEW_ID}.focus`);
 						void vscode.window.showInformationMessage(`Reveal subtask ${taskId} in chat — open the active conversation to scroll to it.`);
 					},
-					dispatchSubtask: (_taskId) => {
-						// Drag from Ready -> In Progress fans through to a fresh
-						// approve cycle. The orchestrator's concurrent dispatch
-						// loop picks up *every* ready subtask, not just the
-						// dragged one, but the UX here matches "the user signalled
-						// that work should begin".
-						void runApprove();
+					dispatchSubtask: (taskId, conversationId) => {
+						if (council?.runBoardTask(taskId)) { return; }
+						void runBoardTask(taskId, conversationId);
 					},
-					reassignSubtask: (taskId, newAssignee) => {
-						if (activeId) {
-							taskBoardModel.reassign(activeId, taskId, newAssignee);
+					reassignSubtask: (taskId, newAssignee, conversationId) => {
+						if (conversationId) {
+							taskBoardModel.reassign(conversationId, taskId, newAssignee);
 						}
 					},
-					rerunSubtask: (taskId) => {
-						// Re-running a single tile in v1 just resets it to ready
-						// and triggers another approve cycle. The dependency
-						// graph then re-routes any downstream tiles that were
-						// blocked on this task.
-						if (activeId) {
-							taskBoardModel.updateTask(activeId, taskId, { state: 'ready', summary: undefined, finishedAt: undefined });
-							void runApprove();
-						}
+					rerunSubtask: (taskId, conversationId) => {
+						if (council?.runBoardTask(taskId)) { return; }
+						void runBoardTask(taskId, conversationId);
 					},
 					// Embedded "Talk to the board" chat: pump a stream from
 					// LlmClient back to the React webview. Returns a disposable
@@ -914,21 +951,26 @@ export function activate(context: vscode.ExtensionContext): void {
 				activeId,
 			);
 
-			async function runApprove(): Promise<void> {
-				const cancellationSource = new vscode.CancellationTokenSource();
+			async function runBoardTask(taskId: string, conversationId: string): Promise<void> {
+				if (!conversationId) { return; }
 				try {
-					await agentBridge.approveActivePlan(activeId, () => { /* events flow via onDidEmitEvent */ }, cancellationSource.token);
+					await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: vscode.l10n.t('Running Board Task'), cancellable: true }, async (_progress, token) => {
+						await boardTaskRunner.run(conversationId, taskId, token, conversationStore.load(conversationId)?.summary.lastModel);
+					});
 				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					void vscode.window.showErrorMessage(`Task board approve failed: ${message}`);
-				} finally {
-					cancellationSource.dispose();
+					void vscode.window.showErrorMessage(vscode.l10n.t('Task failed: {0}', err instanceof Error ? err.message : String(err)));
 				}
 			}
 		}),
 	);
 
-	// Conversation history commands (Phase 47).
+	context.subscriptions.push(vscode.commands.registerCommand('sota.openProviderSettings', async () => {
+		await vscode.commands.executeCommand(`${ChatViewProvider.VIEW_ID}.focus`);
+		chatViewProvider.openProviderSettings();
+	}));
+
+	// Conversation actions share validation and confirmation across every surface.
+	const conversationActions = new ConversationActions(conversationStore);
 	context.subscriptions.push(
 		vscode.commands.registerCommand('sota.openConversation', async (id: string) => {
 			if (typeof id !== 'string' || !id) {
@@ -960,20 +1002,13 @@ export function activate(context: vscode.ExtensionContext): void {
 				);
 				return;
 			}
-			// `ChatPanel.openCliConversation` mints the fresh IDE
-			// conversation and broadcasts the switch via the static
-			// `switchConversation` helper; the sidebar webview view also
-			// needs a nudge so its single-session surface re-renders.
-			const newest = conversationStore.list();
-			if (newest.length > 0) {
-				chatViewProvider.openConversation(newest[0].id);
-			}
+			chatViewProvider.openConversation(imported);
 		}),
 	);
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('sota.newConversation', async () => {
-			const fresh = conversationStore.create();
+			const fresh = conversationActions.create();
 			await vscode.commands.executeCommand(`${ChatViewProvider.VIEW_ID}.focus`);
 			chatViewProvider.openConversation(fresh.summary.id);
 			ChatPanel.switchConversation(fresh.summary.id);
@@ -981,68 +1016,21 @@ export function activate(context: vscode.ExtensionContext): void {
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('sota.renameConversation', async (item?: ConversationTreeItem) => {
-			if (!item || !item.summary) {
-				return;
-			}
-			const newTitle = await vscode.window.showInputBox({
-				prompt: 'Rename conversation',
-				value: item.summary.title,
-				validateInput: (value) => (value.trim().length === 0 ? 'Title cannot be empty.' : undefined),
-			});
-			if (newTitle === undefined) {
-				return;
-			}
-			conversationStore.rename(item.summary.id, newTitle);
+		vscode.commands.registerCommand('sota.renameConversation', target => conversationActions.rename(target)),
+		vscode.commands.registerCommand('sota.deleteConversation', target => conversationActions.delete(target)),
+		conversationStore.onDidDelete(id => {
+			void checkpointManager.deleteFor(id).catch(error => console.warn('[checkpoint] Cleanup failed', error));
 		}),
 	);
 
-	context.subscriptions.push(
-		vscode.commands.registerCommand('sota.deleteConversation', async (item?: ConversationTreeItem) => {
-			if (!item || !item.summary) {
-				return;
-			}
-			const confirm = await vscode.window.showWarningMessage(
-				`Delete conversation "${item.summary.title}"? This cannot be undone.`,
-				{ modal: true },
-				'Delete',
-			);
-			if (confirm !== 'Delete') {
-				return;
-			}
-			const deletedId = item.summary.id;
-			conversationStore.delete(deletedId);
-			// Drop the conversation's checkpoints alongside it so we don't
-			// leak orphaned index entries pointing at a now-defunct
-			// conversation id.
-			checkpointManager.deleteFor(deletedId);
-			// If the deleted conversation was the active one, switch to the
-			// most recent remaining (or create a fresh one when the list is
-			// now empty) so the chat view doesn't keep rendering a tombstoned
-			// conversation's scrollback.
-			const remaining = conversationStore.list();
-			const target = remaining.length > 0 ? remaining[0].id : conversationStore.create().summary.id;
-			chatViewProvider.openConversation(target);
-			ChatPanel.switchConversation(target);
-		}),
-	);
-
-	// Export the active (most recent) conversation to a Markdown file. The
+	// Export this workspace’s active conversation to a Markdown file. The
 	// command is also wired to a small icon button in the chat header so
 	// users don't have to open the palette for a routine archive action.
 	context.subscriptions.push(
-		vscode.commands.registerCommand('sota.exportConversation', async () => {
-			const list = conversationStore.list();
-			if (list.length === 0) {
-				await vscode.window.showInformationMessage('No conversations to export.');
-				return;
-			}
-			// V1 exports the most recently updated conversation. A future
-			// follow-up can wire a quickpick when users push back on this.
-			const summary = list[0];
-			const record = conversationStore.load(summary.id);
+		vscode.commands.registerCommand('sota.exportConversation', async (conversationId?: string) => {
+			const record = typeof conversationId === 'string' ? conversationStore.load(conversationId) : conversationStore.getInitialConversation();
 			if (!record) {
-				await vscode.window.showWarningMessage('Conversation not found.');
+				await vscode.window.showInformationMessage('No conversations to export.');
 				return;
 			}
 			const { exportConversationAsMarkdown, exportFilename } = await import('./chat/ConversationExporter');
@@ -1190,9 +1178,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	// The previous conversation is preserved in the ConversationStore so it
 	// remains accessible from the History sidebar.
 	context.subscriptions.push(
-		vscode.commands.registerCommand('sota.clearChat', () => {
-			ChatPanel.clearConversation();
-		})
+		vscode.commands.registerCommand('sota.clearChat', () => vscode.commands.executeCommand('sota.newConversation'))
 	);
 
 	// --- Workspace Checkpoints ---
@@ -1207,8 +1193,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			if (summary === undefined) {
 				return;
 			}
-			const conversationList = conversationStore.list();
-			const conversationId = conversationList.length > 0 ? conversationList[0].id : conversationStore.create().summary.id;
+			const conversationId = conversationStore.getInitialConversation()?.summary.id ?? conversationStore.create().summary.id;
 			const record = conversationStore.load(conversationId);
 			const turnIndex = record ? record.messages.length : 0;
 			const checkpoint = await checkpointManager.capture(
@@ -1295,6 +1280,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	// Inline Edit (Cmd+K / Ctrl+K)
 	const inlineEditProvider = new InlineEditProvider(llmClient);
+	context.subscriptions.push(inlineEditProvider);
 	context.subscriptions.push(
 		vscode.commands.registerCommand('sota.inlineEdit', () => {
 			inlineEditProvider.provideInlineEdit();
@@ -1303,6 +1289,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	// Inline Completions
 	const completionProvider = new CompletionProvider(llmClient);
+	context.subscriptions.push(completionProvider);
 	context.subscriptions.push(
 		vscode.languages.registerInlineCompletionItemProvider(
 			{ pattern: '**' },
@@ -1317,6 +1304,8 @@ export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(
 		vscode.window.registerTreeDataProvider('sota.taskQueue', taskQueueProvider)
 	);
+
+	registerImpactAnalysisCommand(context, mcpClient);
 
 	// Trace Viewer
 	context.subscriptions.push(
@@ -1495,28 +1484,11 @@ export function activate(context: vscode.ExtensionContext): void {
 	// `<extensionPath>/../..`; that's where the bundled compose stack lives.
 	// Fall back to the workspace root only if the resolved path doesn't exist
 	// (e.g. when the extension ships from a packaged location in the future).
-	const codeGraphController = new CodeGraphController({
-		workspaceRoot: workspacePath || undefined,
-		repoRoot,
-		output: codeGraphChannel,
-	});
-	context.subscriptions.push(codeGraphController);
-	// Legacy Docker-compose stack status item — kept for users on the new
-	// FalkorDB+Qdrant path. The unified backend status (below) covers the
-	// embedded server lifecycle and the legacy `services/{indexer,lsif,
-	// mcp-gateway}` Docker setup.
-	const dockerStackStatusItem = new DockerStackStatusBarItem(codeGraphController);
-	context.subscriptions.push(dockerStackStatusItem);
-
-	// Embedded MCP server lifecycle. Owns the child-process spawn of
-	// `services/code-graph/mcp-server/dist/index.js`, auto-restarts on
-	// crash, and surfaces backend state to its own status-bar item. The
-	// extension merges its `getMcpServerEntry()` into `sota.mcp.servers`
-	// (see `mcpClientDeps.readServersSetting` above) so the existing
-	// `McpClient` picks the server up without the user having to add it
-	// manually.
+	// McpClient owns the single serving process and reports its readiness.
 	const codeGraphBackend = new CodeGraphBackend({
 		workspaceRoot: workspacePath || undefined,
+		getWorkspaceRoot: () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+		extensionPath: context.extensionPath,
 		repoRoot,
 		storageDir: context.globalStorageUri.fsPath,
 		output: codeGraphChannel,
@@ -1574,7 +1546,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('sota.enableCodeGraph', async () => {
-			await runEnableCodeGraph(codeGraphController, codeGraphChannel, context);
+			await vscode.workspace.getConfiguration('sota.codeGraph').update('backend', 'embedded', vscode.ConfigurationTarget.Global);
+			await codeGraphBackend.start();
 		}),
 	);
 	context.subscriptions.push(
@@ -1591,18 +1564,11 @@ export function activate(context: vscode.ExtensionContext): void {
 				return;
 			}
 			if (pick.action === 'stop') {
-				const r = await codeGraphController.stop();
-				if (!r.ok) {
-					vscode.window.showErrorMessage(`Could not stop code graph: ${r.reason}`);
-				}
-			} else if (pick.action === 'restart') {
-				const r = await codeGraphController.restart();
-				if (!r.ok) {
-					vscode.window.showErrorMessage(`Could not restart code graph: ${r.reason}`);
-				}
-			} else {
-				await codeGraphController.showLogs();
-			}
+				await vscode.workspace.getConfiguration('sota.codeGraph').update('backend', 'off', vscode.ConfigurationTarget.Global);
+				await codeGraphBackend.start();
+			} else if (pick.action === 'restart') { await codeGraphBackend.restart(); }
+			else { codeGraphBackend.openLogs(); }
+
 		}),
 	);
 
@@ -1627,7 +1593,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			const symbols = codeGraphBackend.symbolCount ?? 0;
 			const failure = codeGraphBackend.failureReason ? ` — ${codeGraphBackend.failureReason}` : '';
 			vscode.window.showInformationMessage(
-				`Code Graph: ${state}${failure} · last index: ${lastIndexed} · ${files} files, ${symbols} symbols`,
+				`Code Graph: ${state}${failure} · semantic: ${codeGraphBackend.semanticState} · last index: ${lastIndexed} · ${files} files, ${symbols} symbols`,
 			);
 		}),
 		vscode.commands.registerCommand('sota.codeGraph.openLogs', () => {
@@ -1638,7 +1604,9 @@ export function activate(context: vscode.ExtensionContext): void {
 	// First-run prompt — fires once per install when the workspace is large
 	// enough to plausibly benefit from a code graph. The prompt is silent for
 	// users with tiny workspaces or those who've already answered.
-	void maybePromptCodeGraphFirstRun(context, workspacePath);
+	context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => { void codeGraphBackend.start(); }));
+	context.subscriptions.push(vscode.workspace.onDidGrantWorkspaceTrust(() => { void codeGraphBackend.start(); }));
+	context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => { if (event.affectsConfiguration('sota.codeGraph')) { void codeGraphBackend.start(); } }));
 
 	// --- Personality ---
 	// Wrapped in a log-and-continue guard: this group reads bundled resources
@@ -1711,180 +1679,6 @@ export function deactivate(): void {
 	// Cleanup handled by disposables
 }
 
-/**
- * Drive the `sota.enableCodeGraph` palette command flow:
- *  1. Verify Docker is on PATH (offer install link if missing).
- *  2. Build the bundled MCP server if it hasn't been built yet.
- *  3. Bring the docker compose stack up and poll FalkorDB until ready.
- *  4. Register the MCP server in user-scope `sota.mcp.servers` settings.
- */
-async function runEnableCodeGraph(
-	controller: CodeGraphController,
-	output: vscode.OutputChannel,
-	context: vscode.ExtensionContext,
-): Promise<void> {
-	if (!(await controller.isDockerAvailable())) {
-		const choice = await vscode.window.showErrorMessage(
-			'Son of Anton\'s code graph backend uses Docker (FalkorDB + Qdrant). Docker isn\'t installed on this machine.',
-			{
-				modal: true,
-				detail: 'Install Docker Desktop, restart this window, then try Enable Code Graph again. An embedded mode that doesn\'t need Docker is planned for the next release — chat works fine without the code graph in the meantime.',
-			},
-			'Install Docker Desktop',
-			'Open release notes',
-		);
-		if (choice === 'Install Docker Desktop') {
-			void vscode.env.openExternal(vscode.Uri.parse('https://www.docker.com/products/docker-desktop/'));
-		} else if (choice === 'Open release notes') {
-			void vscode.env.openExternal(vscode.Uri.parse('https://github.com/CodeHalwell/Son-Of-Anton/blob/main/CHANGELOG.md'));
-		}
-		return;
-	}
-
-	const stack = controller.getStackRoot();
-	if (!stack) {
-		vscode.window.showErrorMessage('Could not locate services/code-graph/ in this workspace.');
-		return;
-	}
-
-	// Ensure the MCP server is built before we register it. The build is
-	// idempotent and cheap on subsequent runs because tsc only re-emits when
-	// inputs change.
-	output.show(true);
-	const buildOk = await ensureMcpServerBuilt(stack, output);
-	if (!buildOk) {
-		vscode.window.showErrorMessage('Could not build the bundled code-graph MCP server. See output for details.');
-		return;
-	}
-
-	await vscode.window.withProgress(
-		{ location: vscode.ProgressLocation.Notification, title: 'Son of Anton — starting code graph' },
-		async progress => {
-			progress.report({ message: 'Bringing docker compose stack up...' });
-			const result = await controller.start();
-			if (!result.ok) {
-				vscode.window.showErrorMessage(`Could not start code graph: ${result.reason}`);
-				return;
-			}
-			progress.report({ message: 'Registering MCP server...' });
-			await controller.registerMcpServer();
-			await context.workspaceState.update('sota.codeGraph.autoStart', true);
-			vscode.window.showInformationMessage('Son of Anton code graph is running.');
-		},
-	);
-}
-
-/**
- * Build the bundled MCP server (`services/code-graph/mcp-server/`) so the
- * compiled `dist/index.js` exists before `sota.mcp.servers` references it.
- * Uses `npm install` + `npm run build` in the mcp-server directory. Returns
- * true if the entry point exists after the build.
- */
-async function ensureMcpServerBuilt(stackRoot: string, output: vscode.OutputChannel): Promise<boolean> {
-	const path = await import('node:path');
-	const fs = await import('node:fs');
-	const mcpDir = path.join(stackRoot, 'mcp-server');
-	const entry = path.join(mcpDir, 'dist', 'index.js');
-
-	if (fs.existsSync(entry)) {
-		return true;
-	}
-
-	const runStep = (cmd: string, args: string[]): Promise<boolean> => new Promise(resolve => {
-		output.appendLine(`> ${cmd} ${args.join(' ')} (in ${mcpDir})`);
-		const child = cp.spawn(cmd, args, { cwd: mcpDir, shell: false });
-		child.stdout.setEncoding('utf8');
-		child.stderr.setEncoding('utf8');
-		child.stdout.on('data', d => output.append(d));
-		child.stderr.on('data', d => output.append(d));
-		child.on('error', err => {
-			output.appendLine(`error: ${err.message}`);
-			resolve(false);
-		});
-		child.on('close', code => resolve(code === 0));
-	});
-
-	if (!fs.existsSync(path.join(mcpDir, 'node_modules'))) {
-		const ok = await runStep('npm', ['install', '--no-audit', '--no-fund']);
-		if (!ok) {
-			return false;
-		}
-	}
-	const buildOk = await runStep('npm', ['run', 'build']);
-	return buildOk && fs.existsSync(entry);
-}
-
-/**
- * Show the one-time "Enable code graph?" prompt on extension activation when
- * the workspace looks substantial (>=10 files in the top two levels). Stores
- * the result in globalState so subsequent installs / reloads stay quiet.
- */
-async function maybePromptCodeGraphFirstRun(
-	context: vscode.ExtensionContext,
-	workspacePath: string,
-): Promise<void> {
-	const PROMPTED_KEY = 'sota.codeGraph.firstRunPrompted';
-	if (context.globalState.get<boolean>(PROMPTED_KEY)) {
-		return;
-	}
-	if (!workspacePath) {
-		return;
-	}
-	const fileCount = await countTopLevelFiles(workspacePath);
-	if (fileCount < 10) {
-		return;
-	}
-	const choice = await vscode.window.showInformationMessage(
-		'Enable Son of Anton\'s code graph for richer context? Requires Docker Desktop. ' +
-		'(An embedded mode that doesn\'t need Docker is planned for the next release.)',
-		'Yes',
-		'Not now',
-		'Don\'t ask again',
-	);
-	if (choice === 'Yes') {
-		await context.globalState.update(PROMPTED_KEY, true);
-		void vscode.commands.executeCommand('sota.enableCodeGraph');
-	} else if (choice === 'Don\'t ask again') {
-		await context.globalState.update(PROMPTED_KEY, true);
-	}
-	// "Not now" leaves the flag unset so we ask again next session.
-}
-
-/**
- * Count files visible in the top two levels of the workspace. We avoid a deep
- * scan to keep activation snappy; ten visible files is a coarse heuristic
- * that "this is more than a scratch folder."
- */
-async function countTopLevelFiles(root: string): Promise<number> {
-	try {
-		const fs = await import('node:fs/promises');
-		const path = await import('node:path');
-		const stack: string[] = [root];
-		let visited = 0;
-		let count = 0;
-		while (stack.length > 0 && visited < 2 && count < 10) {
-			const dir = stack.shift() as string;
-			visited++;
-			const entries = await fs.readdir(dir, { withFileTypes: true });
-			for (const entry of entries) {
-				if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'out' || entry.name === 'dist') {
-					continue;
-				}
-				if (entry.isFile()) {
-					count++;
-					if (count >= 10) {
-						break;
-					}
-				} else if (entry.isDirectory() && stack.length === 0) {
-					stack.push(path.join(dir, entry.name));
-				}
-			}
-		}
-		return count;
-	} catch {
-		return 0;
-	}
-}
 
 /**
  * Translate the orchestrator's `Subtask.status` enum (used in `agents/types`)

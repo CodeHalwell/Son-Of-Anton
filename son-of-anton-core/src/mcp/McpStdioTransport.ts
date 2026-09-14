@@ -33,6 +33,7 @@ export interface McpStdioTransportOptions {
 	args: string[];
 	env?: Record<string, string>;
 	cwd?: string;
+	onStderr?: (chunk: string) => void;
 }
 
 type MessageHandler = (msg: JsonRpcMessage) => void;
@@ -69,6 +70,7 @@ export class McpStdioTransport {
 
 		child.stderr.setEncoding('utf8');
 		child.stderr.on('data', (chunk: string) => {
+			if (!this.disposed) { this.options.onStderr?.(chunk); }
 			const text = chunk.endsWith('\n') ? chunk.slice(0, -1) : chunk;
 			if (text.length > 0) {
 				console.warn(`[mcp:${this.options.command}] ${text}`);

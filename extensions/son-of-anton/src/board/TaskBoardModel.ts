@@ -42,6 +42,7 @@ export interface BoardTask {
 	startedAt?: number;
 	finishedAt?: number;
 	summary?: string;
+	proposalId?: string;
 	tokenUsage?: { input: number; output: number };
 }
 

@@ -6,12 +6,7 @@ import { isCodexAvailable } from '../llm/codexRunner';
 import type { CredentialBroker } from '../auth/CredentialBroker';
 import type { ConfigStore, SecretStore } from '../host';
 
-// SecretStorage keys used by the wizard. Co-located here so the persistence
-// surface (broker tokens, settings, API-key secrets) stays discoverable from
-// one file. Wizard-saved API keys live in SecretStorage under these keys; the
-// LlmClient still reads from `vscode.workspace.getConfiguration('sota')`,
-// so saving an API key writes to BOTH locations: SecretStorage (canonical)
-// and the existing setting (so LlmClient sees it without further changes).
+// Canonical provider credential keys shared by IDE SecretStorage and the CLI.
 export const SECRET_KEYS = {
 	anthropic: 'sota.secrets.anthropicApiKey',
 	openai: 'sota.secrets.openaiApiKey',
@@ -64,8 +59,9 @@ export async function detectCredentials(
 	secrets: SecretStore,
 	config: ConfigStore,
 	broker: CredentialBroker,
+	discovery: { environment?: NodeJS.ProcessEnv; isCodexAvailable?: () => boolean } = {},
 ): Promise<CredentialState> {
-	const env = process.env;
+	const env = discovery.environment ?? process.env;
 
 	const [
 		anthropicSecret,
@@ -176,7 +172,7 @@ export async function detectCredentials(
 		cerebras: { hasApiKey: cerebrasHasKey },
 		together: { hasApiKey: togetherHasKey },
 		fireworks: { hasApiKey: fireworksHasKey },
-		codex: { hasCli: isCodexAvailable() },
+		codex: { hasCli: (discovery.isCodexAvailable ?? isCodexAvailable)() },
 	};
 }
 

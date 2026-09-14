@@ -1,0 +1,22 @@
+{
+  "fixture": "retrieval-v1",
+  "embedding": "deterministic-offline",
+  "recallAt1": 1,
+  "staleResults": 0,
+  "crossWorkspaceResults": 0,
+  "providerCalls": 5,
+  "samples": [
+    {
+      "query": "load saved project settings",
+      "expected": "loadProjectSettings",
+      "retrieved": "loadProjectSettings",
+      "latencyMs": 1.5399580000000697
+    },
+    {
+      "query": "retry failed network requests",
+      "expected": "scheduleRetry",
+      "retrieved": "scheduleRetry",
+      "latencyMs": 0.8707500000000437
+    }
+  ]
+}

@@ -6,6 +6,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { PNG } from 'pngjs';
 import pixelmatch from 'pixelmatch';
+import { workspacePath, writeWorkspaceFile, WorkspacePathError } from '../_shared/auth/dist/workspaceFs.js';
 import { ComparisonResult, ComparisonReport, BaselineInfo } from './types';
 import { enforceHttpAuth, requireServiceToken } from '../_shared/auth/dist/index.js';
 
@@ -16,13 +17,16 @@ const BASELINES_DIR = process.env.BASELINES_DIR ?? '/workspace/.son-of-anton/vis
  * Visual regression testing service.
  * Compares screenshots against stored baselines using pixel-level diffing.
  */
-class VisualRegressionService {
+export class VisualRegressionService {
 	private readonly baselinesDir: string;
 	private readonly diffThreshold: number;
 
 	constructor(baselinesDir: string) {
 		this.baselinesDir = baselinesDir;
-		this.diffThreshold = parseFloat(process.env.DIFF_THRESHOLD ?? '0.01');
+		this.diffThreshold = Number(process.env.DIFF_THRESHOLD ?? '0.01');
+		if (!Number.isFinite(this.diffThreshold) || this.diffThreshold < 0 || this.diffThreshold > 1) {
+			throw new Error('DIFF_THRESHOLD must be a number between 0 and 1');
+		}
 	}
 
 	async initialize(): Promise<void> {
@@ -33,11 +37,12 @@ class VisualRegressionService {
 	 * Store a new baseline screenshot.
 	 */
 	async saveBaseline(name: string, imageData: Buffer): Promise<BaselineInfo> {
-		const dir = path.join(this.baselinesDir, this.sanitizeName(name));
+		const dir = await workspacePath(this.baselinesDir, this.validateName(name));
+		const png = decodeImage(imageData);
 		await fs.mkdir(dir, { recursive: true });
 
 		const filePath = path.join(dir, 'baseline.png');
-		await fs.writeFile(filePath, imageData);
+		await writeWorkspaceFile(this.baselinesDir, filePath, imageData);
 
 		const info: BaselineInfo = {
 			name,
@@ -48,13 +53,12 @@ class VisualRegressionService {
 		};
 
 		// Read dimensions
-		const png = PNG.sync.read(imageData);
 		info.width = png.width;
 		info.height = png.height;
 
 		// Save metadata
-		await fs.writeFile(
-			path.join(dir, 'metadata.json'),
+		await writeWorkspaceFile(
+			this.baselinesDir, path.join(dir, 'metadata.json'),
 			JSON.stringify(info, null, '\t')
 		);
 
@@ -65,13 +69,14 @@ class VisualRegressionService {
 	 * Compare a screenshot against its baseline.
 	 */
 	async compare(name: string, currentImage: Buffer): Promise<ComparisonResult> {
-		const dir = path.join(this.baselinesDir, this.sanitizeName(name));
-		const baselinePath = path.join(dir, 'baseline.png');
+		const dir = await workspacePath(this.baselinesDir, this.validateName(name));
+		const baselinePath = await workspacePath(this.baselinesDir, path.join(dir, 'baseline.png'));
 
 		// Check if baseline exists
 		try {
 			await fs.access(baselinePath);
-		} catch {
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { throw error; }
 			return {
 				name,
 				status: 'no_baseline',
@@ -84,8 +89,9 @@ class VisualRegressionService {
 		}
 
 		const baselineData = await fs.readFile(baselinePath);
-		const baseline = PNG.sync.read(baselineData);
-		const current = PNG.sync.read(currentImage);
+		const baseline = decodeImage(baselineData);
+		const current = decodeImage(currentImage);
+		await writeWorkspaceFile(this.baselinesDir, path.join(dir, 'current.png'), currentImage);
 
 		// Check dimension mismatch
 		if (baseline.width !== current.width || baseline.height !== current.height) {
@@ -120,9 +126,7 @@ class VisualRegressionService {
 
 		// Save diff image
 		const diffPath = path.join(dir, 'diff.png');
-		const currentPath = path.join(dir, 'current.png');
-		await fs.writeFile(diffPath, PNG.sync.write(diff));
-		await fs.writeFile(currentPath, currentImage);
+		await writeWorkspaceFile(this.baselinesDir, diffPath, PNG.sync.write(diff));
 
 		const passed = mismatchPercentage <= this.diffThreshold * 100;
 
@@ -143,16 +147,16 @@ class VisualRegressionService {
 	 * Update the baseline with the current screenshot.
 	 */
 	async approveBaseline(name: string): Promise<boolean> {
-		const dir = path.join(this.baselinesDir, this.sanitizeName(name));
-		const currentPath = path.join(dir, 'current.png');
-		const baselinePath = path.join(dir, 'baseline.png');
+		const dir = await workspacePath(this.baselinesDir, this.validateName(name));
+		const currentPath = await workspacePath(this.baselinesDir, path.join(dir, 'current.png'));
+		const baselinePath = await workspacePath(this.baselinesDir, path.join(dir, 'baseline.png'));
 
 		try {
-			await fs.copyFile(currentPath, baselinePath);
+			const imageData = await fs.readFile(currentPath);
+			const png = decodeImage(imageData);
+			await writeWorkspaceFile(this.baselinesDir, baselinePath, imageData);
 
 			// Update metadata
-			const imageData = await fs.readFile(baselinePath);
-			const png = PNG.sync.read(imageData);
 			const metadata: BaselineInfo = {
 				name,
 				path: baselinePath,
@@ -160,14 +164,14 @@ class VisualRegressionService {
 				width: png.width,
 				height: png.height,
 			};
-			await fs.writeFile(
-				path.join(dir, 'metadata.json'),
+			await writeWorkspaceFile(
+				this.baselinesDir, path.join(dir, 'metadata.json'),
 				JSON.stringify(metadata, null, '\t')
 			);
 
 			// Clean up diff
 			try {
-				await fs.unlink(path.join(dir, 'diff.png'));
+				await fs.unlink(path.join(dir, 'diff.png')).catch(error => { if (error.code !== 'ENOENT') { throw error; } });
 				await fs.unlink(currentPath);
 			} catch {
 				// Best effort cleanup
@@ -183,9 +187,13 @@ class VisualRegressionService {
 	 * Run comparison for multiple screenshots and generate a report.
 	 */
 	async generateReport(comparisons: ComparisonResult[]): Promise<ComparisonReport> {
+		if (!Array.isArray(comparisons) || comparisons.some(c => !c || !['passed', 'failed', 'no_baseline', 'dimension_mismatch'].includes(c.status))) {
+			throw new InvalidRequestError('comparisons must be an array of valid comparison results');
+		}
 		const passed = comparisons.filter(c => c.status === 'passed').length;
 		const failed = comparisons.filter(c => c.status === 'failed').length;
 		const noBaseline = comparisons.filter(c => c.status === 'no_baseline').length;
+		const dimensionMismatch = comparisons.filter(c => c.status === 'dimension_mismatch').length;
 
 		return {
 			timestamp: Date.now(),
@@ -193,11 +201,11 @@ class VisualRegressionService {
 			passed,
 			failed,
 			noBaseline,
-			dimensionMismatch: comparisons.filter(c => c.status === 'dimension_mismatch').length,
+			dimensionMismatch,
 			results: comparisons,
-			summary: failed > 0
-				? `Visual regression detected: ${failed} of ${comparisons.length} comparisons failed`
-				: `All ${passed} comparisons passed`,
+			summary: failed + dimensionMismatch + noBaseline > 0
+				? `${passed} passed; ${failed} failed; ${dimensionMismatch} dimension mismatches; ${noBaseline} missing baselines`
+				: comparisons.length === 0 ? 'No comparisons were provided' : `All ${passed} comparisons passed`,
 		};
 	}
 
@@ -212,7 +220,7 @@ class VisualRegressionService {
 			for (const entry of entries) {
 				if (entry.isDirectory()) {
 					try {
-						const metadataPath = path.join(this.baselinesDir, entry.name, 'metadata.json');
+						const metadataPath = await workspacePath(this.baselinesDir, path.join(entry.name, 'metadata.json'));
 						const data = await fs.readFile(metadataPath, 'utf-8');
 						baselines.push(JSON.parse(data));
 					} catch {
@@ -227,9 +235,23 @@ class VisualRegressionService {
 		return baselines;
 	}
 
-	private sanitizeName(name: string): string {
-		return name.replace(/[^a-zA-Z0-9_-]/g, '_');
+	private validateName(name: string): string {
+		if (typeof name !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(name)) {
+			throw new InvalidRequestError('Name must contain 1–128 letters, numbers, underscores, or hyphens');
+		}
+		return name;
 	}
+}
+
+class InvalidRequestError extends Error { }
+
+function decodeImage(image: Buffer): PNG {
+	if (image.length > 10 * 1024 * 1024 || image.length < 24 || !image.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+		throw new InvalidRequestError('Upload must be a PNG smaller than 10 MiB');
+	}
+	const pixels = image.readUInt32BE(16) * image.readUInt32BE(20);
+	if (pixels === 0 || pixels > 16777216) { throw new InvalidRequestError('PNG must contain between 1 and 16777216 pixels'); }
+	try { return PNG.sync.read(image); } catch { throw new InvalidRequestError('Invalid PNG image'); }
 }
 
 // --- HTTP API ---
@@ -257,9 +279,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 	}
 
 	if (url.pathname === '/baselines' && req.method === 'POST') {
-		const body = await readBody(req);
-		const { name, imageData } = JSON.parse(body);
-		const buffer = Buffer.from(imageData, 'base64');
+		const { name, buffer } = await readImageRequest(req);
 		const info = await service.saveBaseline(name, buffer);
 		res.writeHead(201, { 'Content-Type': 'application/json' });
 		res.end(JSON.stringify(info, null, 2));
@@ -267,9 +287,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 	}
 
 	if (url.pathname === '/compare' && req.method === 'POST') {
-		const body = await readBody(req);
-		const { name, imageData } = JSON.parse(body);
-		const buffer = Buffer.from(imageData, 'base64');
+		const { name, buffer } = await readImageRequest(req);
 		const result = await service.compare(name, buffer);
 		res.writeHead(200, { 'Content-Type': 'application/json' });
 		res.end(JSON.stringify(result, null, 2));
@@ -278,7 +296,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
 	if (url.pathname === '/approve' && req.method === 'POST') {
 		const body = await readBody(req);
-		const { name } = JSON.parse(body);
+		const { name } = JSON.parse(body) ?? {};
 		const approved = await service.approveBaseline(name);
 		res.writeHead(approved ? 200 : 400, { 'Content-Type': 'application/json' });
 		res.end(JSON.stringify({ approved }));
@@ -287,7 +305,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
 	if (url.pathname === '/report' && req.method === 'POST') {
 		const body = await readBody(req);
-		const { comparisons } = JSON.parse(body);
+		const { comparisons } = JSON.parse(body) ?? {};
 		const report = await service.generateReport(comparisons);
 		res.writeHead(200, { 'Content-Type': 'application/json' });
 		res.end(JSON.stringify(report, null, 2));
@@ -298,10 +316,25 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 	res.end('Not found');
 }
 
+async function readImageRequest(req: http.IncomingMessage): Promise<{ name: string; buffer: Buffer }> {
+	const body = JSON.parse(await readBody(req));
+	if (!body || typeof body.name !== 'string' || typeof body.imageData !== 'string' || !/^[A-Za-z0-9+/]+={0,2}$/.test(body.imageData)) {
+		throw new InvalidRequestError('A name and base64-encoded PNG imageData are required');
+	}
+	const buffer = Buffer.from(body.imageData, 'base64');
+	decodeImage(buffer);
+	return { name: body.name, buffer };
+}
+
 function readBody(req: http.IncomingMessage): Promise<string> {
 	return new Promise((resolve, reject) => {
 		const chunks: Buffer[] = [];
-		req.on('data', (chunk: Buffer) => chunks.push(chunk));
+		let size = 0;
+		req.on('data', (chunk: Buffer) => {
+			size += chunk.length;
+			if (size > 14 * 1024 * 1024) { chunks.length = 0; reject(new InvalidRequestError('Request exceeds 14 MiB')); return; }
+			chunks.push(chunk);
+		});
 		req.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
 		req.on('error', reject);
 	});
@@ -312,15 +345,17 @@ const httpServer = http.createServer(async (req, res) => {
 		await handleRequest(req, res);
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		res.writeHead(500, { 'Content-Type': 'application/json' });
+		res.writeHead(err instanceof InvalidRequestError || err instanceof SyntaxError || err instanceof WorkspacePathError ? 400 : 500, { 'Content-Type': 'application/json' });
 		res.end(JSON.stringify({ error: message }));
 	}
 });
 
-requireServiceToken('visual-regression');
-
-service.initialize().then(() => {
-	httpServer.listen(PORT, () => {
-		console.log(`[visual-regression] Listening on port ${PORT}`);
+if (require.main === module) {
+	requireServiceToken('visual-regression');
+	service.initialize().then(() => {
+		httpServer.listen(PORT, () => {
+			const address = httpServer.address();
+			console.log(`[visual-regression] Listening on port ${typeof address === 'object' ? address?.port : PORT}`);
+		});
 	});
-});
+}

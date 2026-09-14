@@ -223,6 +223,7 @@ const MODEL_COSTS: Record<ModelId, { input: number; output: number; cachedInput:
 	'fireworks-qwen-2-5-coder': { input: 0.9, output: 0.9, cachedInput: 0 },
 	'fireworks-custom': { input: 0, output: 0, cachedInput: 0 },
 	// OpenAI Codex CLI — subscription-based; zero metered cost.
+	'codex-default': { input: 0, output: 0, cachedInput: 0 },
 	'codex-gpt-5': { input: 0, output: 0, cachedInput: 0 },
 	'codex-gpt-5-mini': { input: 0, output: 0, cachedInput: 0 },
 	'codex-gpt-5-codex': { input: 0, output: 0, cachedInput: 0 },

@@ -29,6 +29,8 @@ export interface ParallelTaskResult {
 	success: boolean;
 	mergeResult?: MergeResult;
 	error?: string;
+	proposalId?: string;
+	reviewRequired?: boolean;
 }
 
 export interface ExecutionGroup {
@@ -56,6 +58,8 @@ export class ParallelExecutor {
 	private readonly worktreeManager: WorktreeManager;
 	private readonly conflictCheckIntervalMs: number;
 
+	private disposed = false;
+	private checking = false;
 	private conflictCheckTimer: ReturnType<typeof setInterval> | undefined;
 	private readonly activeExecutions = new Map<string, ParallelTask>();
 
@@ -145,64 +149,29 @@ export class ParallelExecutor {
 		worktreePath: string;
 		execute: (fn: (worktreePath: string) => Promise<void>) => Promise<ParallelTaskResult>;
 	}> {
-		// Acquire scope locks
-		const lockResult = this.lockManager.acquireLock(task.agentId, task.scopeFiles);
-		if (!lockResult.success) {
-			return {
-				worktreePath: '',
-				execute: async () => ({
-					taskId: task.id,
-					agentId: task.agentId,
-					success: false,
-					error: `Lock conflict: ${lockResult.conflicts?.map(c => c.file).join(', ')}`,
-				}),
-			};
-		}
-
-		// Create worktree
-		const worktree = await this.worktreeManager.createWorktree(task.agentId);
-		this.activeExecutions.set(task.agentId, task);
-
-		return {
-			worktreePath: worktree.worktreePath,
-			execute: async (fn: (worktreePath: string) => Promise<void>) => {
-				try {
-					// Run the agent's logic in the worktree
-					await fn(worktree.worktreePath);
-
-					// Simulate merge before committing
-					const sim = await this.worktreeManager.simulateMerge(task.agentId);
-					if (!sim.success) {
-						return {
-							taskId: task.id,
-							agentId: task.agentId,
-							success: false,
-							mergeResult: sim,
-							error: `Merge conflict predicted: ${sim.conflicts.join(', ')}`,
-						};
-					}
-
-					// Merge back to main
-					const mergeResult = await this.worktreeManager.mergeWorktree(
-						task.agentId,
-						`[agent:${task.agentId}] ${task.instruction}`,
-					);
-
-					return {
-						taskId: task.id,
-						agentId: task.agentId,
-						success: mergeResult.success,
-						mergeResult,
-						error: mergeResult.success ? undefined : mergeResult.summary,
-					};
-				} finally {
-					// Always cleanup
-					this.lockManager.releaseLock(task.agentId);
-					await this.worktreeManager.removeWorktree(task.agentId);
-					this.activeExecutions.delete(task.agentId);
-				}
-			},
-		};
+		if (this.disposed) { throw new Error('Parallel executor is disposed'); }
+		if (this.activeExecutions.has(task.id)) { throw new Error('Task is already running'); }
+		const lockResult = this.lockManager.acquireLock(task.id, task.scopeFiles);
+		if (!lockResult.success) { throw new Error(`Lock conflict: ${lockResult.conflicts?.map(conflict => conflict.file).join(', ')}`); }
+		let worktree;
+		this.activeExecutions.set(task.id, task);
+		try { worktree = await this.worktreeManager.createWorktree(task.id); }
+		catch (error) { this.activeExecutions.delete(task.id); this.lockManager.releaseLock(task.id); throw error; }
+		let executed = false;
+		return { worktreePath: worktree.worktreePath, execute: async fn => {
+			if (executed || this.disposed) { throw new Error('Execution handle is no longer available'); } executed = true;
+			try {
+				await fn(worktree.worktreePath);
+				const proposal = await this.worktreeManager.finish(task.id);
+				return { taskId: task.id, agentId: task.agentId, success: true, proposalId: proposal.id, reviewRequired: true };
+			} catch (error) {
+				await this.worktreeManager.finish(task.id, true).catch(() => {});
+				return { taskId: task.id, agentId: task.agentId, success: false, proposalId: worktree.proposalId, error: String(error) };
+			} finally {
+				this.lockManager.releaseLock(task.id); this.activeExecutions.delete(task.id);
+				await this.worktreeManager.removeWorktree(task.id);
+			}
+		} };
 	}
 
 	/**
@@ -212,7 +181,10 @@ export class ParallelExecutor {
 	startConflictDetection(
 		onOverlap: (agentA: string, agentB: string, files: string[]) => void,
 	): void {
+		if (this.conflictCheckTimer) { clearInterval(this.conflictCheckTimer); }
 		this.conflictCheckTimer = setInterval(async () => {
+			if (this.checking || this.disposed) { return; } this.checking = true;
+			try {
 			const agents = [...this.activeExecutions.keys()];
 			for (let i = 0; i < agents.length; i++) {
 				for (let j = i + 1; j < agents.length; j++) {
@@ -226,6 +198,7 @@ export class ParallelExecutor {
 					}
 				}
 			}
+		} finally { this.checking = false; }
 		}, this.conflictCheckIntervalMs);
 	}
 
@@ -233,11 +206,11 @@ export class ParallelExecutor {
 	 * Stop conflict detection and cleanup all resources.
 	 */
 	async dispose(): Promise<void> {
+		this.disposed = true;
 		if (this.conflictCheckTimer) {
 			clearInterval(this.conflictCheckTimer);
 		}
 		this.lockManager.dispose();
-		await this.worktreeManager.removeAll();
 	}
 
 	/**

@@ -34,6 +34,8 @@ export interface ImpactEdge {
 }
 
 export interface ImpactAnalysisData {
+	/** Embedded graph returns file dependencies without caller depth or test coverage. */
+	fileBased?: boolean;
 	/** The symbol being analyzed */
 	target: {
 		name: string;
@@ -222,6 +224,12 @@ export class ImpactAnalysisPanel {
 			padding: 8px 16px;
 		}
 		.node-item {
+			width: 100%;
+			border: 0;
+			background: transparent;
+			color: inherit;
+			font: inherit;
+			text-align: left;
 			padding: 6px 8px;
 			margin: 2px 0;
 			border-radius: 3px;
@@ -247,11 +255,22 @@ export class ImpactAnalysisPanel {
 			white-space: nowrap;
 		}
 		.node-path {
+			max-width: 50%;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
 			font-size: 10px;
 			opacity: 0.6;
 		}
 		.depth-indent {
 			display: inline-block;
+		}
+		.header .target { overflow-wrap: anywhere; }
+		.summary, .filters { flex-wrap: wrap; }
+		:where(button):focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
+		@media (max-width: 600px) {
+			.node-item { flex-wrap: wrap; }
+			.node-path { flex-basis: 100%; max-width: 100%; }
 		}
 	</style>
 </head>
@@ -260,6 +279,7 @@ export class ImpactAnalysisPanel {
 		<h2>Impact Analysis</h2>
 		<div class="target">${escapeHtml(data.target.name)} — ${escapeHtml(data.target.filePath)}</div>
 	</div>
+	${data.fileBased ? `<p>${escapeHtml(vscode.l10n.t('File dependencies within three levels. Caller depth, test coverage, and documentation links are not supplied by this backend.'))}</p>` : ''}
 	<div class="summary">
 		<div class="summary-item">
 			<div class="summary-dot" style="background: #e74c3c"></div>
@@ -267,7 +287,7 @@ export class ImpactAnalysisPanel {
 		</div>
 		<div class="summary-item">
 			<div class="summary-dot" style="background: #f39c12"></div>
-			Transitive: ${data.summary.transitiveCount}
+			${data.fileBased ? escapeHtml(vscode.l10n.t('Affected Files')) : 'Transitive'}: ${data.summary.transitiveCount}
 		</div>
 		<div class="summary-item">
 			<div class="summary-dot" style="background: #2ecc71"></div>
@@ -281,7 +301,7 @@ export class ImpactAnalysisPanel {
 	<div class="filters">
 		<button class="filter-btn active" data-filter="all">All</button>
 		<button class="filter-btn" data-filter="direct">Direct</button>
-		<button class="filter-btn" data-filter="transitive">Transitive</button>
+		<button class="filter-btn" data-filter="transitive">${data.fileBased ? escapeHtml(vscode.l10n.t('Affected Files')) : 'Transitive'}</button>
 		<button class="filter-btn" data-filter="test">Tests</button>
 		<button class="filter-btn" data-filter="documentation">Docs</button>
 	</div>
@@ -299,16 +319,16 @@ export class ImpactAnalysisPanel {
 			const filtered = filter === 'all' ? nodes : nodes.filter(n => n.type === filter);
 
 			container.innerHTML = filtered.map(node => {
-				const indent = node.depth * 16;
+				const indent = Math.max(0, Math.min(3, node.depth)) * 16;
 				// filePath is carried on a data-* attribute and read back via the
 				// delegated click handler below, so no code is built into markup.
-				return '<div class="node-item" data-filepath="' + escapeAttr(node.filePath) + '" ' +
+				return '<button type="button" class="node-item" data-filepath="' + escapeAttr(node.filePath) + '" ' +
 					'title="' + escapeAttr(node.signature || node.label) + '\\n' + escapeAttr(node.filePath) + '">' +
 					'<div class="depth-indent" style="width: ' + indent + 'px"></div>' +
 					'<div class="node-dot" style="background: ' + escapeAttr(node.color) + '"></div>' +
 					'<div class="node-label">' + escapeHtmlJs(node.label) + '</div>' +
 					'<div class="node-path">' + escapeHtmlJs(node.filePath) + '</div>' +
-					'</div>';
+					'</button>';
 			}).join('');
 		}
 

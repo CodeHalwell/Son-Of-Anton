@@ -21,7 +21,7 @@ export class TrustStatusBarItem implements vscode.Disposable {
 	private readonly item: vscode.StatusBarItem;
 	private readonly disposables: vscode.Disposable[] = [];
 
-	constructor(private readonly trustedFolders: TrustedFolders) {
+	constructor(private readonly trustedFolders: TrustedFolders, private readonly isTrusted = (folderPath: string) => trustedFolders.isTrusted(folderPath)) {
 		// Priority 98 sits just left of the auth indicator (99) so the lock
 		// reads as a prefix to the rest of Son of Anton's status group.
 		this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 98);
@@ -61,7 +61,7 @@ export class TrustStatusBarItem implements vscode.Disposable {
 			this.item.hide();
 			return;
 		}
-		if (this.trustedFolders.isTrusted(folder.uri.fsPath)) {
+		if (this.isTrusted(folder.uri.fsPath)) {
 			this.item.hide();
 			return;
 		}

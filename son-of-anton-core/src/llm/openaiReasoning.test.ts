@@ -56,19 +56,19 @@ describe('isOpenAIReasoningModel', () => {
 
 describe('supportsAgenticToolLoop', () => {
 	test('Anthropic-shaped providers can drive the tool loop', () => {
-		// Anthropic, Bedrock (Converse) and Claude Code round-trip tool_use /
-		// tool_result parts, so the native tool loop is safe.
+		// Anthropic and Bedrock Claude round-trip tool_use / tool_result parts.
 		const capable = ['opus', 'sonnet', 'haiku', 'claude-opus-4-7', 'claude-3-5-sonnet', 'bedrock-claude-sonnet-4'] as const;
 		const rejected = capable.filter(m => !supportsAgenticToolLoop(m));
 		assert.deepStrictEqual(rejected, []);
 	});
 
-	test('OpenAI-compatible, Gemini and Claude Code providers must fall back to single-shot', () => {
-		// OpenAI/Gemini serializers reject tool_use / tool_result parts, and the
-		// Claude Code adapter runs with `--tools '' --max-turns 1` so it never
-		// emits tool-call events — all of these single-shot instead of looping.
-		const incapable = ['gpt-5', 'gpt-4o', 'o3', 'gemini-2-5-pro', 'foundry-gpt-4o', 'claude-code-sonnet'] as const;
-		const wronglyCapable = incapable.filter(m => supportsAgenticToolLoop(m));
-		assert.deepStrictEqual(wronglyCapable, []);
+	test('OpenAI-compatible and Gemini serializers support tool loops', () => {
+		const capable = ['gpt-5', 'gpt-4o', 'o3', 'gemini-2-5-pro', 'foundry-gpt-4o'] as const;
+		assert.deepStrictEqual(capable.filter(model => !supportsAgenticToolLoop(model)), []);
+	});
+
+	test('subscription CLIs and unsupported Bedrock families do not use the native tool loop', () => {
+		const external = ['claude-code-sonnet', 'codex-gpt-5', 'bedrock-nova-pro', 'bedrock-llama-3-1-70b'] as const;
+		assert.deepStrictEqual(external.filter(model => supportsAgenticToolLoop(model)), []);
 	});
 });

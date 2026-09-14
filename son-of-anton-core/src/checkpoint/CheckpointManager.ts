@@ -4,7 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { execFile } from 'node:child_process';
+import { randomUUID, createHash } from 'node:crypto';
+import { GitSnapshotStore, type GitSnapshot } from './GitSnapshotStore';
 import { TypedEventEmitter, type Event } from '../eventEmitter';
 import type { ConfigStore, Disposable, MementoStore, Notifier } from '../host';
 
@@ -41,17 +42,6 @@ const DEFAULT_MAX_CHECKPOINTS = 100;
 const HARD_MAX_CHECKPOINTS = 1000;
 
 /**
- * Maximum runtime for a single git invocation. `git stash create` and
- * `git stash apply` should both complete in well under a second on a
- * reasonable working tree, so 30 s is a generous buffer that still bounds
- * pathological hangs (e.g. lock-file contention).
- */
-const GIT_TIMEOUT_MS = 30_000;
-
-/** Allow 32 MB of stdout from `git` calls — `stash apply` can be chatty on big trees. */
-const GIT_MAX_BUFFER = 32 * 1024 * 1024;
-
-/**
  * A persisted snapshot of the workspace state captured at a single chat turn.
  * Kept deliberately small — for git-backed checkpoints we store only a SHA
  * and rely on the repository's object database to retain the actual content.
@@ -73,8 +63,10 @@ export interface Checkpoint {
 	readonly userMessage: string;
 	/** Strategy used to capture the checkpoint. */
 	readonly kind: 'git' | 'fs';
-	/** SHA of the stash commit (`git stash create`), only for `kind: 'git'`. */
+	/** Retained working-tree commit, only for `kind: 'git'`. */
 	readonly gitSha?: string;
+	/** Versioned snapshot with worktree identity and staging state. */
+	readonly snapshot?: GitSnapshot;
 	/** Reference the SHA was based on at capture time (HEAD or branch). */
 	readonly baseRef?: string;
 	/** Human-readable summary (e.g. "3 files modified"). Optional, best-effort. */
@@ -90,47 +82,6 @@ export interface RestoreOptions {
 	conversationToo: boolean;
 }
 
-/**
- * Promise-wrapped `git` invocation. We always use `execFile` (never `exec`)
- * so the args don't pass through a shell — paths and refs are passed as a
- * literal argv to git directly, eliminating the command-injection surface
- * even when called with attacker-controlled input.
- */
-function runGit(cwd: string, args: ReadonlyArray<string>): Promise<{ stdout: string; stderr: string }> {
-	return new Promise((resolve, reject) => {
-		execFile(
-			'git',
-			[...args],
-			{ cwd, timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER },
-			(err, stdout, stderr) => {
-				if (err) {
-					reject(err);
-					return;
-				}
-				resolve({ stdout: stdout.toString(), stderr: stderr.toString() });
-			},
-		);
-	});
-}
-
-/**
- * Captures and restores Cline-style workspace checkpoints — one per chat turn
- * — so users can roll the working tree back to the state that existed when a
- * particular message was sent. The git-backed strategy uses
- * `git stash create` to mint a stash commit without touching the working
- * tree or index; the file-backed strategy is a stub for now (full
- * implementation is a follow-up).
- *
- * Persistence lives in `globalState` because checkpoints need to survive a
- * window reload but are tied to the install (the underlying git objects live
- * in the workspace's `.git`, so a different workspace's history doesn't
- * collide). The total count is capped at {@link DEFAULT_MAX_CHECKPOINTS}
- * (configurable up to {@link HARD_MAX_CHECKPOINTS}); oldest entries are
- * pruned first. The corresponding stash commits are technically dangling
- * after we remove their index entry, but git's reachability GC reaps them
- * automatically after 30 days — acceptable cost for a feature that's only
- * ever supposed to roll back the last few turns.
- */
 /**
  * Host-supplied collaborators the checkpoint manager needs in order to
  * surface modal prompts and a workspace root without depending on `vscode`.
@@ -149,6 +100,7 @@ export interface CheckpointManagerHost {
 export class CheckpointManager implements Disposable {
 	private readonly _onDidChange = new TypedEventEmitter<void>();
 	readonly onDidChange: Event<void> = this._onDidChange.event;
+	private pendingWrite: Promise<void> = Promise.resolve();
 
 	constructor(
 		private readonly conversationStore: ConversationStoreLike,
@@ -176,9 +128,7 @@ export class CheckpointManager implements Disposable {
 			return undefined;
 		}
 
-		const index = this.readIndex();
-		index.push(checkpoint);
-		this.writeIndex(this.pruneIndex(index));
+		await this.mutateIndex(index => this.pruneIndex([...index, checkpoint]), checkpoint.snapshot?.workspaceRoot);
 		this._onDidChange.fire();
 		return checkpoint;
 	}
@@ -213,20 +163,31 @@ export class CheckpointManager implements Disposable {
 			return;
 		}
 
-		const confirmation = await this.host.confirmRestore(
-			options.conversationToo
-				? `Restore workspace AND conversation to the state captured ${this.formatRelativeTime(checkpoint.capturedAt)}? This will overwrite uncommitted changes in the working tree and remove every chat message after this turn.`
-				: `Restore workspace files to the state captured ${this.formatRelativeTime(checkpoint.capturedAt)}? This will overwrite uncommitted changes in the working tree.`,
-		);
-		if (!confirmation) {
+		const root = this.getWorkspaceRoot();
+		if (!root || !checkpoint.snapshot) {
+			throw new Error('This legacy checkpoint has no verified worktree snapshot. Capture a new checkpoint before making changes.');
+		}
+		const store = new GitSnapshotStore(root);
+		const recovery = await store.restore(checkpoint.snapshot, async files => {
+			const preview = files.slice(0, 20).map(file => `  ${file}`).join('\n');
+			const confirmed = await this.host.confirmRestore(
+				`Restore ${files.length} changed paths to this checkpoint? Tracked and non-ignored untracked files are restored; the staging area is preserved as captured. A recovery checkpoint will be retained.\n${preview}${files.length > 20 ? '\n  …' : ''}${options.conversationToo ? '\nThe conversation will also be rewound.' : ''}`,
+			);
+			if (this.getWorkspaceRoot() !== root) { throw new Error('Workspace changed while confirming restore.'); }
+			return confirmed;
+		});
+		if (!recovery) {
 			return;
 		}
-
-		if (checkpoint.kind === 'git') {
-			await this.restoreGit(checkpoint);
-		} else {
-			throw new Error('Git checkpoint required');
-		}
+		await this.mutateIndex(index => this.pruneIndex([...index, {
+			id: randomUUID(), conversationId: checkpoint.conversationId,
+			turnIndex: this.conversationStore.load(checkpoint.conversationId)?.messages.length ?? checkpoint.turnIndex,
+			capturedAt: Date.now(), userMessage: 'Recovery point before checkpoint restore',
+			kind: 'git', gitSha: recovery.commit, baseRef: recovery.head,
+			snapshot: recovery, summary: 'Recovery point before restore',
+		}]), recovery.workspaceRoot);
+		this._onDidChange.fire();
+		this.host.notifier.info('Workspace restored. The previous state is available as a recovery checkpoint.');
 
 		if (options.conversationToo) {
 			this.rewindConversation(checkpoint);
@@ -237,13 +198,8 @@ export class CheckpointManager implements Disposable {
 	 * Drop every checkpoint belonging to this conversation. Called when a
 	 * conversation is deleted so we don't keep dangling index entries.
 	 */
-	deleteFor(conversationId: string): void {
-		const index = this.readIndex();
-		const next = index.filter(cp => cp.conversationId !== conversationId);
-		if (next.length === index.length) {
-			return;
-		}
-		this.writeIndex(next);
+	async deleteFor(conversationId: string): Promise<void> {
+		await this.mutateIndex(index => index.filter(cp => cp.conversationId !== conversationId));
 		this._onDidChange.fire();
 	}
 
@@ -284,10 +240,8 @@ export class CheckpointManager implements Disposable {
 	 * repository. We look for a top-level `.git` entry (file or directory —
 	 * `.git` is a regular file when the folder is a worktree). This is
 	 * cheap and avoids spawning a subprocess for the common "no git here"
-	 * case, but it does miss the rare case where the workspace lives in a
-	 * subdirectory of a repo. That's acceptable — `git stash create` would
-	 * still succeed in that case once we drop into git itself; future work
-	 * can add a `git rev-parse --show-toplevel` probe.
+	 * case. Workspace snapshots require the worktree root so their scope
+	 * matches the folder displayed to the user.
 	 */
 	private isGitRepo(workspaceRoot: string): boolean {
 		try {
@@ -310,94 +264,16 @@ export class CheckpointManager implements Disposable {
 		}
 
 		try {
-			// `git stash create` records the working tree + index as a stash
-			// commit but doesn't touch HEAD or the stash list. Returns an
-			// empty string when there's nothing to stash (clean tree); in
-			// that case we anchor the checkpoint to HEAD instead so the user
-			// can still roll back to it.
-			const stash = await runGit(workspaceRoot, ['stash', 'create']);
-			let sha = stash.stdout.trim();
-			if (!sha) {
-				const head = await runGit(workspaceRoot, ['rev-parse', 'HEAD']);
-				sha = head.stdout.trim();
-				if (!sha) {
-					return undefined;
-				}
-			}
-			let baseRef = 'HEAD';
-			try {
-				const branchResult = await runGit(workspaceRoot, ['rev-parse', '--abbrev-ref', 'HEAD']);
-				const branch = branchResult.stdout.trim();
-				if (branch && branch !== 'HEAD') {
-					baseRef = branch;
-				}
-			} catch {
-				// Detached HEAD or fresh repo — keep the literal "HEAD" ref.
-			}
-			const summary = await this.summariseChanges(workspaceRoot);
+			const snapshot = await new GitSnapshotStore(workspaceRoot).capture();
 			return {
-				id: generateCheckpointId(),
-				conversationId,
-				turnIndex,
-				capturedAt: Date.now(),
-				userMessage: userMessage.length > 200 ? `${userMessage.slice(0, 199)}…` : userMessage,
-				kind: 'git',
-				gitSha: sha,
-				baseRef,
-				summary,
+				id: randomUUID(), conversationId, turnIndex, capturedAt: Date.now(),
+				userMessage: userMessage.slice(0, 200), kind: 'git',
+				gitSha: snapshot.commit, baseRef: snapshot.head, snapshot,
+				summary: 'Tracked and non-ignored untracked files, including staging state',
 			};
-		} catch (err) {
-			console.warn(`[checkpoint] git capture failed: ${err instanceof Error ? err.message : String(err)}`);
+		} catch (error) {
+			this.host.notifier.warn(`Checkpoint was not captured: ${error instanceof Error ? error.message : String(error)}`);
 			return undefined;
-		}
-	}
-
-	/**
-	 * Cheap-and-cheerful summary of the working-tree delta at capture time.
-	 * Used purely as a tooltip/quick-pick label, so falling back to a generic
-	 * "Workspace snapshot" string when status fails is fine.
-	 */
-	private async summariseChanges(workspaceRoot: string): Promise<string> {
-		try {
-			const status = await runGit(workspaceRoot, ['status', '--porcelain=1']);
-			const lines = status.stdout.split('\n').filter(line => line.trim().length > 0);
-			if (lines.length === 0) {
-				return 'Clean working tree';
-			}
-			if (lines.length === 1) {
-				return '1 file changed';
-			}
-			return `${lines.length} files changed`;
-		} catch {
-			return 'Workspace snapshot';
-		}
-	}
-
-	private async restoreGit(checkpoint: Checkpoint): Promise<void> {
-		if (!checkpoint.gitSha) {
-			throw new Error('Checkpoint missing git sha');
-		}
-		const workspaceRoot = this.getWorkspaceRoot();
-		if (!workspaceRoot) {
-			throw new Error('No workspace folder is open');
-		}
-		if (!this.isGitRepo(workspaceRoot)) {
-			throw new Error('Workspace is not a git repository');
-		}
-		try {
-			// `stash apply` reapplies the captured working-tree state on top
-			// of the current HEAD without removing the entry from the stash
-			// list (we never added it via `stash push`, so there's nothing to
-			// remove). Conflicts surface as a non-zero exit; we surface the
-			// stderr verbatim so the user can resolve manually.
-			await runGit(workspaceRoot, ['stash', 'apply', checkpoint.gitSha]);
-			this.host.notifier.info(
-				`Workspace restored to checkpoint from ${this.formatRelativeTime(checkpoint.capturedAt)}.`,
-			);
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			this.host.notifier.error(`Restore failed: ${message}`);
-			throw err;
 		}
 	}
 
@@ -420,13 +296,35 @@ export class CheckpointManager implements Disposable {
 		);
 	}
 
+	private storageKey(root = this.getWorkspaceRoot()): string {
+		if (!root) {
+			return `${CHECKPOINT_INDEX_KEY}.no-workspace`;
+		}
+		const canonical = fs.realpathSync(root);
+		return `${CHECKPOINT_INDEX_KEY}.${createHash('sha256').update(canonical).digest('hex')}`;
+	}
+
 	private readIndex(): Checkpoint[] {
-		const raw = this.globalState.get<Checkpoint[]>(CHECKPOINT_INDEX_KEY);
+		const raw = this.globalState.get<Checkpoint[]>(this.storageKey());
 		return Array.isArray(raw) ? [...raw] : [];
 	}
 
-	private writeIndex(next: Checkpoint[]): void {
-		void this.globalState.update(CHECKPOINT_INDEX_KEY, next);
+	private mutateIndex(update: (index: Checkpoint[]) => Checkpoint[], root = this.getWorkspaceRoot()): Promise<void> {
+		const key = this.storageKey(root);
+		const operation = this.pendingWrite.then(async () => {
+			const previous = this.globalState.get<Checkpoint[]>(key) ?? [];
+			const next = update([...previous]);
+			await this.globalState.update(key, next);
+			for (const removed of previous.filter(item => !next.some(retained => retained.id === item.id))) {
+				if (removed.snapshot) {
+					await new GitSnapshotStore(removed.snapshot.workspaceRoot).release(removed.snapshot).catch(error => {
+						this.host.notifier.warn(`Could not release an expired checkpoint: ${String(error)}`);
+					});
+				}
+			}
+		});
+		this.pendingWrite = operation.catch(() => { /* Allow the next persistence attempt after a failure. */ });
+		return operation;
 	}
 
 	private pruneIndex(index: Checkpoint[]): Checkpoint[] {
@@ -440,43 +338,4 @@ export class CheckpointManager implements Disposable {
 		return sorted.slice(sorted.length - max);
 	}
 
-	/**
-	 * Render `capturedAt` as a relative-time string ("2 minutes ago"). Used
-	 * inside the modal warning so the user knows which checkpoint they're
-	 * about to apply without having to translate a millisecond timestamp.
-	 */
-	private formatRelativeTime(capturedAt: number): string {
-		const deltaMs = Date.now() - capturedAt;
-		const seconds = Math.max(0, Math.floor(deltaMs / 1000));
-		if (seconds < 60) {
-			return seconds <= 1 ? 'a moment ago' : `${seconds} seconds ago`;
-		}
-		const minutes = Math.floor(seconds / 60);
-		if (minutes < 60) {
-			return minutes === 1 ? '1 minute ago' : `${minutes} minutes ago`;
-		}
-		const hours = Math.floor(minutes / 60);
-		if (hours < 24) {
-			return hours === 1 ? '1 hour ago' : `${hours} hours ago`;
-		}
-		const days = Math.floor(hours / 24);
-		return days === 1 ? '1 day ago' : `${days} days ago`;
-	}
-}
-
-/**
- * 128-bit random id without pulling in `crypto.randomUUID()` — keeps the
- * checkpoint module dependency-free and works in any Node 22 host. The
- * collision domain is per-install so an RFC4122-compliant id would be
- * overkill; a random hex string is fine.
- */
-function generateCheckpointId(): string {
-	const bytes = new Uint8Array(16);
-	for (let i = 0; i < bytes.length; i++) {
-		bytes[i] = Math.floor(Math.random() * 256);
-	}
-	bytes[6] = (bytes[6] & 0x0f) | 0x40;
-	bytes[8] = (bytes[8] & 0x3f) | 0x80;
-	const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
-	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }

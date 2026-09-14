@@ -18,7 +18,7 @@ export function registerImpactAnalysisCommand(
 	mcpClient: McpClient,
 ): void {
 	const command = vscode.commands.registerCommand(
-		'son-of-anton.showImpactAnalysis',
+		'sota.showImpactAnalysis',
 		async () => {
 			const editor = vscode.window.activeTextEditor;
 			if (!editor) {
@@ -56,12 +56,15 @@ export function registerImpactAnalysisCommand(
 				},
 				async () => {
 					try {
+						const tool = (await mcpClient.listTools()).find(tool => tool.server === 'code-graph' && tool.tool === 'impact_analysis');
+						const fileBased = !!tool?.inputSchema && 'properties' in tool.inputSchema && !!tool.inputSchema.properties && typeof tool.inputSchema.properties === 'object' && 'path' in tool.inputSchema.properties;
 						const result = await mcpClient.callTool({
 							server: 'code-graph',
 							tool: 'impact_analysis',
-							inputs: { symbol: symbolName, file: filePath },
+							inputs: fileBased ? { path: filePath, depth: 3 } : { symbol: symbolName, file: filePath },
 						});
 
+						if (result.isError) { throw new Error(result.content); }
 						const rawData = JSON.parse(result.content);
 						const data = transformToImpactData(symbolName, filePath, rawData);
 
@@ -99,14 +102,23 @@ function findSymbolAtPosition(
 /**
  * Transform raw MCP impact_analysis response into ImpactAnalysisData.
  */
-function transformToImpactData(
+export function transformToImpactData(
 	symbolName: string,
 	filePath: string,
-	raw: Record<string, unknown>,
+	raw: Record<string, unknown> | string[],
 ): ImpactAnalysisData {
 	const nodes: ImpactNode[] = [];
 	const edges: ImpactEdge[] = [];
 
+	if (Array.isArray(raw)) {
+		const files = [...new Set(raw.filter(file => typeof file === 'string' && file !== filePath))];
+		return {
+			target: { name: filePath, filePath }, fileBased: true,
+			nodes: files.map((file, index) => ({ id: `file-${index}`, label: file, filePath: file, type: 'transitive', depth: 0 })),
+			edges: files.map((_file, index) => ({ source: `file-${index}`, target: 'root', relationship: 'depends on' })),
+			summary: { directCount: 0, transitiveCount: files.length, testCount: 0, documentationCount: 0 },
+		};
+	}
 	const directCallers = (raw.directCallers ?? raw.direct ?? []) as Array<Record<string, string>>;
 	const transitiveCallers = (raw.transitiveCallers ?? raw.transitive ?? []) as Array<Record<string, string>>;
 	const testFiles = (raw.testFiles ?? raw.tests ?? []) as Array<Record<string, string>>;

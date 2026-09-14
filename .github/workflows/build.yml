@@ -51,7 +51,7 @@ jobs:
         run: npm --prefix son-of-anton-core run build
 
       - name: Install extension dependencies
-        run: npm --prefix extensions/son-of-anton install
+        run: npm --prefix extensions/son-of-anton ci
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: 1
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
@@ -124,7 +124,7 @@ jobs:
         run: npm --prefix son-of-anton-cli run build
 
       - name: Install extension dependencies
-        run: npm --prefix extensions/son-of-anton install
+        run: npm --prefix extensions/son-of-anton ci
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: 1
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
@@ -170,7 +170,7 @@ jobs:
         run: npm --prefix son-of-anton-cli ci
 
       - name: Install extension dependencies
-        run: npm --prefix extensions/son-of-anton install
+        run: npm --prefix extensions/son-of-anton ci
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: 1
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
@@ -179,9 +179,7 @@ jobs:
         run: bash scripts/harness-smoke.sh --no-live
 
   # Son of Anton agent-harness unit tests (extension test/* directory). The
-  # core and CLI packages don't yet ship Mocha tests; once they do they
-  # should be added as additional steps here. The extension tests run under
-  # the VS Code test harness which needs a display server, so we use xvfb.
+  # core and CLI suites run alongside the extension and offline product checks.
   sota-harness-tests:
     name: Son of Anton — Agent Harness Tests
     needs: sota-typecheck
@@ -214,7 +212,7 @@ jobs:
         run: npm --prefix son-of-anton-core run build
 
       - name: Install extension dependencies
-        run: npm --prefix extensions/son-of-anton install
+        run: npm --prefix extensions/son-of-anton ci
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: 1
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
@@ -224,6 +222,63 @@ jobs:
 
       - name: Run extension tests under xvfb
         run: xvfb-run --auto-servernum npm --prefix extensions/son-of-anton test
+
+      - name: Install remaining product packages
+        run: |
+          npm --prefix son-of-anton-cli ci
+          npm --prefix services/code-graph/mcp-server ci
+          npm --prefix services/model-router ci
+          npm --prefix services/mcp-gateway ci
+          npm --prefix services/checkpoints ci
+          npm --prefix services/acp-client ci
+
+      - name: Bootstrap native product runtime
+        run: node scripts/bootstrap-sota.mjs --skip-install
+
+      - name: Check board and bounded gateway types
+        run: |
+          node node_modules/typescript/bin/tsc --noEmit -p extensions/son-of-anton/tsconfig.board.json
+          node node_modules/typescript/bin/tsc --noEmit -p services/mcp-gateway/tsconfig.json
+          node scripts/sync-service-auth.mjs --check
+          node scripts/sync-acp-runtime.mjs --check
+          npm --prefix services/acp-client run build
+          node scripts/check-case-collisions.mjs
+
+      - name: Run core, CLI and service regressions
+        run: |
+          npm --prefix son-of-anton-core test
+          npm --prefix son-of-anton-cli test
+          npm --prefix services/model-router test
+          npm --prefix services/checkpoints test
+          npm --prefix services/acp-client test
+          node --test services/_shared/auth/dist/test/*.js
+          node --test scripts/test/configure-services.test.mjs scripts/test/cypher-parameters.test.mjs
+        env:
+          SOTA_TASK_EVAL_OUTPUT: ${{ runner.temp }}/workflow-baseline.json
+
+      - name: Installed runtime and retrieval fixture
+        run: npm run test:sota:offline
+        env:
+          SOTA_EVAL_OUTPUT: ${{ runner.temp }}/retrieval-baseline.json
+
+      - name: Install browser for offline UI checks
+        run: npx playwright install --with-deps chromium
+
+      - name: Exercise shipped chat and board assets
+        run: npm --prefix extensions/son-of-anton run test:ui
+        env:
+          SOTA_UI_SCREENSHOTS: ${{ runner.temp }}/sota-ui
+
+      - name: Preserve product verification artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sota-offline-verification
+          path: |
+            ${{ runner.temp }}/retrieval-baseline.json
+            ${{ runner.temp }}/workflow-baseline.json
+            ${{ runner.temp }}/sota-ui/
+          retention-days: 14
 
   # Son of Anton Rust workspace (H17 embedded code-graph). Lives under
   # `crates/` per Rust convention. Three crates: sota-codegraph-core
@@ -307,6 +362,24 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Build database image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./son-of-anton-mcp/servers/database
+          push: false
+          tags: soa-database:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build visual-regression image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./services/visual-regression
+          push: false
+          tags: soa-visual-regression:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   docker-integration:
     name: Docker Compose Integration
     needs: docker-services
@@ -315,14 +388,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Create .env from example
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Create private service configuration
         run: |
-          cp .env.example .env
-          sed -i "s|^PROJECT_PATH=.*|PROJECT_PATH=$GITHUB_WORKSPACE|" .env
-          echo "BACKGROUND_TASK_API_TOKEN=ci-smoke-token" >> .env
+          node scripts/configure-services.mjs
+          mkdir -p "$RUNNER_TEMP/sota-fixture"
+          printf '%s\n' 'export function cartTotal(items) { return items.reduce((total, item) => total + item.price * item.quantity, 0); }' > "$RUNNER_TEMP/sota-fixture/cart.js"
+          sed -i "s|^PROJECT_PATH=.*|PROJECT_PATH=$RUNNER_TEMP/sota-fixture|" .env
+
+      - name: Verify PostgreSQL authentication and reader permissions
+        run: |
+          docker pull postgres:16
+          SOTA_TEST_DOCKER=1 node --test scripts/test/postgres-roles.test.mjs
 
       - name: Start services
-        run: docker compose up -d --wait --wait-timeout 120
+        run: docker compose --profile services up -d --wait --wait-timeout 120
 
       - name: Verify all services are healthy
         run: |
@@ -334,6 +418,19 @@ jobs:
             exit 1
           fi
           echo "All services healthy"
+
+      - name: Test authenticated service and MCP workflows
+        run: |
+          npm --prefix services/mcp-gateway ci
+          umask 077
+          docker compose --profile services config --format json > "$RUNNER_TEMP/sota-compose.json"
+          SOTA_TEST_COMPOSE_FILE="$RUNNER_TEMP/sota-compose.json" node --test scripts/test/service-stack.test.cjs
+
+      - name: Verify gateway datastore outage recovery
+        run: |
+          npm --prefix services/mcp-gateway run build
+          npm --prefix services/mcp-gateway test
+          SOTA_TEST_DOCKER=1 node --test scripts/test/gateway-recovery.test.mjs
 
       - name: Test FalkorDB connectivity
         run: |
@@ -353,7 +450,7 @@ jobs:
 
       - name: Tear down
         if: always()
-        run: docker compose down -v
+        run: docker compose --profile services down -v
 
   build-electron:
     name: Build Electron Binary
@@ -379,12 +476,28 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build
-        run: npm run compile
+      - name: Bootstrap Son of Anton runtime
+        run: npm run bootstrap:sota
+
+      - name: Build desktop distribution
+        run: npm run gulp vscode-linux-x64
+
+      - name: Verify packaged graph outside checkout
+        run: |
+          test -f "../Son of Anton-linux-x64/resources/app/extensions/son-of-anton/runtime/codegraph/index.cjs"
+          test -f "../Son of Anton-linux-x64/resources/app/extensions/son-of-anton/runtime/codegraph/node_modules/@son-of-anton/codegraph-napi/engine.node"
+          SOTA_RUNTIME_SOURCE="$PWD/../Son of Anton-linux-x64/resources/app/extensions/son-of-anton/runtime/codegraph" npm run test:sota:offline
+
+      - name: Archive desktop distribution with executable permissions
+        run: |
+          mkdir -p .build/electron-artifact
+          tar -czf .build/electron-artifact/son-of-anton-linux-x64.tar.gz -C .. "Son of Anton-linux-x64"
 
       - name: Upload build artefact
         uses: actions/upload-artifact@v4
         with:
           name: son-of-anton-linux-x64
-          path: out/
+          path: .build/electron-artifact/son-of-anton-linux-x64.tar.gz
+          if-no-files-found: error
+          compression-level: 0
           retention-days: 7

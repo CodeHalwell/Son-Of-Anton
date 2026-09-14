@@ -1,13 +1,13 @@
 {
 	"name": "soa-context-sanitiser",
 	"version": "1.0.0",
-	"description": "Son of Anton — Prompt injection detection and context sanitisation",
+	"description": "Son of Anton \u2014 Prompt injection detection and context sanitisation",
 	"main": "dist/index.js",
 	"scripts": {
 		"build": "tsc",
 		"start": "node dist/index.js",
 		"dev": "tsc --watch & nodemon dist/index.js",
-		"test": "tsc -p tsconfig.test.json && node --test dist-test/test/**/*.test.js",
+		"test": "node -e \"require('fs').rmSync('dist-test', {recursive:true, force:true})\" && tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js",
 		"lint": "eslint src/**/*.ts"
 	},
 	"dependencies": {},

@@ -37,7 +37,7 @@ export function mcpServerFingerprint(entry: unknown): string | undefined {
 	if (name === undefined) {
 		return undefined;
 	}
-	const e = entry as { command?: unknown; args?: unknown; cwd?: unknown; env?: unknown };
+	const e = entry as { command?: unknown; args?: unknown; cwd?: unknown; env?: unknown; url?: unknown; headers?: unknown; transport?: unknown };
 	const command = typeof e.command === 'string' ? e.command : '';
 	const args = Array.isArray(e.args) ? e.args.map(a => String(a)) : [];
 	const cwd = typeof e.cwd === 'string' ? e.cwd : '';
@@ -49,7 +49,10 @@ export function mcpServerFingerprint(entry: unknown): string | undefined {
 	// an approval writes this value to global state, and the raw descriptor can
 	// hold `env` secrets (e.g. GITHUB_TOKEN). Hashing keeps trust
 	// descriptor-bound while never storing those secrets in plaintext.
-	const descriptor = [name, command, args.join('\u0000'), cwd, envStr].join('\u0001');
+	const headers = Object.entries(e.headers && typeof e.headers === 'object' ? e.headers : {}).sort(([a], [b]) => a.localeCompare(b));
+	const fields = [name, command, args.join('\u0000'), cwd, envStr];
+	if (e.url || headers.length) { fields.push(String(e.url ?? ''), String(e.transport ?? 'http'), JSON.stringify(headers)); }
+	const descriptor = fields.join('\u0001');
 	return createHash('sha256').update(descriptor).digest('hex');
 }
 

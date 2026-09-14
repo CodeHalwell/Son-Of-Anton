@@ -8,21 +8,7 @@ import type { CodeGraphBackend, CodeGraphBackendState } from '../codeGraph/CodeG
 
 const STATUS_COMMAND = 'sota.codeGraph.statusMenu';
 
-/**
- * Status-bar entry surfacing the embedded code-graph backend state. Mirrors
- * the shape of `HarnessStatusBarItem` — click opens a quick-pick offering
- * Restart / Use Docker stack / Use embedded backend / Open docs.
- *
- * Visual states:
- *   $(database) code-graph ●           — embedded server healthy
- *   $(database) code-graph (docker) ●  — legacy Docker stack detected
- * allow-any-unicode-next-line
- *   $(database) code-graph ○           — off, starting, or failed
- *
- * Distinct from the older `sidebar/CodeGraphStatusBarItem` which surfaces
- * the FalkorDB+Qdrant docker compose stack — that one stays for users on
- * the new docker path; this one represents the unified backend lifecycle.
- */
+/** Status and configuration actions for the MCP-owned embedded graph process. */
 export class CodeGraphStatusBarItem implements vscode.Disposable {
 	private readonly item: vscode.StatusBarItem;
 	private readonly backend: CodeGraphBackend;
@@ -55,6 +41,10 @@ export class CodeGraphStatusBarItem implements vscode.Disposable {
 				this.item.text = '$(database) code-graph $(sync~spin)';
 				this.item.tooltip = this.buildTooltip('starting...');
 				return;
+			case 'degraded':
+				this.item.text = '$(warning) code-graph';
+				this.item.tooltip = this.buildTooltip(this.backend.failureReason ?? 'degraded');
+				return;
 			case 'failed':
 				this.item.text = '$(database) code-graph $(circle-outline)';
 				this.item.tooltip = this.buildTooltip(
@@ -64,7 +54,7 @@ export class CodeGraphStatusBarItem implements vscode.Disposable {
 			case 'off':
 			default:
 				this.item.text = '$(database) code-graph $(circle-outline)';
-				this.item.tooltip = this.buildTooltip('off');
+				this.item.tooltip = this.buildTooltip(this.backend.failureReason ?? 'off');
 				return;
 		}
 	}
@@ -75,7 +65,7 @@ export class CodeGraphStatusBarItem implements vscode.Disposable {
 		// default `false` to avoid broadening the command-URI risk surface.
 		const tip = new vscode.MarkdownString(undefined, true);
 		tip.appendMarkdown(`**Son of Anton — code graph**\n\n`);
-		tip.appendMarkdown(`State: ${stateLine}\n\n`);
+		tip.appendText(`State: ${stateLine}\nSemantic search: ${this.backend.semanticState}\n`);
 		if (this.backend.lastIndexedAt) {
 			const when = new Date(this.backend.lastIndexedAt).toLocaleTimeString();
 			tip.appendMarkdown(
@@ -88,7 +78,7 @@ export class CodeGraphStatusBarItem implements vscode.Disposable {
 
 	private async handleClick(): Promise<void> {
 		interface PickItem extends vscode.QuickPickItem {
-			readonly action: 'restart' | 'use-docker' | 'use-embedded' | 'open-logs' | 'open-docs' | 'show-status';
+			readonly action: 'restart' | 'configure-external' | 'use-embedded' | 'open-logs' | 'open-docs' | 'show-status';
 		}
 		const items: PickItem[] = [
 			{
@@ -97,27 +87,27 @@ export class CodeGraphStatusBarItem implements vscode.Disposable {
 				action: 'restart',
 			},
 			{
-				label: '$(output) Open logs',
+				label: '$(output) Open Logs',
 				description: 'Show child process stdout / stderr',
 				action: 'open-logs',
 			},
 			{
-				label: '$(info) Show status',
+				label: '$(info) Show Status',
 				description: 'Backend state, last index time, symbol count',
 				action: 'show-status',
 			},
 			{
-				label: '$(server) Use Docker stack',
-				description: 'Set sota.codeGraph.backend = \'docker\'',
-				action: 'use-docker',
+				label: '$(server) Configure External Graph',
+				description: 'Connect an optional gateway in MCP settings',
+				action: 'configure-external',
 			},
 			{
-				label: '$(rocket) Use embedded backend',
+				label: '$(rocket) Use Embedded Graph',
 				description: 'Set sota.codeGraph.backend = \'embedded\'',
 				action: 'use-embedded',
 			},
 			{
-				label: '$(link-external) Open docs',
+				label: '$(link-external) Open Docs',
 				description: 'services/code-graph/README.md',
 				action: 'open-docs',
 			},
@@ -139,23 +129,16 @@ export class CodeGraphStatusBarItem implements vscode.Disposable {
 			case 'show-status':
 				await vscode.commands.executeCommand('sota.codeGraph.showStatus');
 				return;
-			case 'use-docker':
-				await vscode.workspace
-					.getConfiguration('sota.codeGraph')
-					.update('backend', 'docker', vscode.ConfigurationTarget.Global);
-				vscode.window.showInformationMessage(
-					'Son of Anton: code graph backend set to docker. Restart applied.',
-				);
-				await vscode.commands.executeCommand('sota.codeGraph.restart');
+			case 'configure-external':
+				await vscode.commands.executeCommand('workbench.action.openSettings', 'sota.mcp.servers');
 				return;
 			case 'use-embedded':
 				await vscode.workspace
 					.getConfiguration('sota.codeGraph')
 					.update('backend', 'embedded', vscode.ConfigurationTarget.Global);
 				vscode.window.showInformationMessage(
-					'Son of Anton: code graph backend set to embedded. Restart applied.',
+					'Son of Anton: embedded code graph selected.',
 				);
-				await vscode.commands.executeCommand('sota.codeGraph.restart');
 				return;
 			case 'open-docs':
 				await vscode.env.openExternal(

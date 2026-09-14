@@ -363,7 +363,7 @@ describe('CopilotAdapter', () => {
 		);
 	});
 
-	test('send synthesises a message_stop when the stream ends without a finish_reason', async () => {
+	test('send reports an incomplete stream when no finish_reason arrives', async () => {
 		const broker = new FakeBroker();
 		const { fetch } = fakeFetchOk([
 			'data: {"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n',
@@ -375,7 +375,8 @@ describe('CopilotAdapter', () => {
 			events.push(e);
 		}
 		const stop = events.find(e => e.type === 'message_stop');
-		assert.ok(stop && stop.type === 'message_stop' && stop.stopReason === 'end_turn');
+		assert.ok(stop && stop.type === 'message_stop' && stop.stopReason === 'error');
+		assert.ok(events.some(event => event.type === 'error' && event.code === 'incomplete_stream'));
 	});
 
 	test('exposes the canonical provider id', () => {

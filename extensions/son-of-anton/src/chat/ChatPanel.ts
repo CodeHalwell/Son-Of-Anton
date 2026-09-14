@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import * as vscode from 'vscode';
+import { getChatUiStrings } from './chatUiStrings';
 import { globalScopedConfig } from './globalScopedConfig';
 import { LlmClient, LlmContentPart, LlmMessage, ModelId, ToolDefinition as LlmToolDefinition } from 'son-of-anton-core/llm/LlmClient';
 import { ToolRegistry, createInstrumentedWorkspaceToolContext, type ApprovalRequest } from '../tools/registry';
@@ -55,6 +56,11 @@ export type ChatMessageContent = string | ReadonlyArray<ChatMessageContentPart>;
 export interface ChatMessage {
 	role: 'user' | 'assistant' | 'system';
 	content: ChatMessageContent;
+	/** Preserve the author when a conversation contains several specialists. */
+	specialistId?: string;
+	usageUnavailable?: boolean;
+	/** Original composer references, without resolved file or terminal bodies. */
+	request?: { text: string; attachments?: string[]; mentions?: string[]; mentionsKinded?: KindedMention[]; includeWorkspaceContext: boolean; chatMode: ChatMode };
 	model?: ModelId;
 	timestamp: number;
 }
@@ -79,9 +85,18 @@ type KindedMention =
 	| { kind: 'terminal' }
 	| { kind: 'url'; url?: string };
 
+interface ChatTurn {
+	readonly controller: AbortController;
+	readonly conversationId: string;
+}
+
 interface WebviewMessage {
 	type: string;
+	integrationId?: string;
+	integrationAction?: string;
 	text?: string;
+	conversationId?: string;
+	includeWorkspaceContext?: boolean;
 	model?: ModelId;
 	attachments?: string[];
 	mentions?: string[];
@@ -344,6 +359,7 @@ export class ChatSession {
 	private currentTab: ChatTab = 'chat';
 	private workspaceIndexRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 	private workspaceIndex: WorkspaceIndexEntry[] = [];
+	private contextPreviewSequence = 0;
 	private costUpdateDebounceTimer: ReturnType<typeof setTimeout> | undefined;
 	/**
 	 * In-flight approval prompts for risky tool calls (Phase 41). Keyed by the
@@ -414,6 +430,7 @@ export class ChatSession {
 	private sessionTotalCost = 0;
 	private sessionTotalTokens = 0;
 	private sessionTurnCount = 0;
+	private sessionUnmeteredTurns = 0;
 
 	/**
 	 * H17 — lifecycle-hook turn counter. Distinct from {@link sessionTurnCount}
@@ -457,6 +474,8 @@ export class ChatSession {
 		this.currentConversationId = resolved.summary.id;
 		this.conversation = [...resolved.messages];
 		this.currentSpecialistId = resolved.summary.lastSpecialist ?? 'anton';
+		this.currentModel = this.resolveChatModel(resolved.summary.lastModel);
+		this.conversationStore.rememberActive(this.currentConversationId);
 		this.currentMode = resolved.summary.lastMode ?? 'act';
 		this.currentTab = resolved.summary.lastTab ?? 'chat';
 		this.webview.html = this.getHtmlContent();
@@ -491,9 +510,11 @@ export class ChatSession {
 		if (this.conversation.length > 0) {
 			this.webview.postMessage({
 				type: 'loadConversation',
+				conversationId: this.currentConversationId,
 				messages: this.conversation,
 				lastSpecialist: this.currentSpecialistId,
 				lastMode: this.currentMode,
+				lastModel: this.currentModel,
 			});
 		} else {
 			// Even on an empty conversation we want the chip to reflect the
@@ -601,6 +622,7 @@ export class ChatSession {
 		// create / rename / delete from any surface.
 		this.disposables.push(
 			this.conversationStore.onDidChange(() => this.postHistorySnapshot()),
+			this.conversationStore.onDidDelete(id => this.handleConversationDeleted(id)),
 		);
 		this.disposables.push(new vscode.Disposable(() => {
 			if (this.costUpdateDebounceTimer) {
@@ -671,6 +693,12 @@ export class ChatSession {
 		}, 100);
 	}
 
+	private estimatedSessionCost(model: ModelId): number {
+		// The reporter aggregates the models actually used. A generic Anthropic
+		// estimate would charge subscription turns and misprice mixed-model runs.
+		return this.costReporter?.getTotalCost() ?? this.llmClient.estimateCost(model);
+	}
+
 	/**
 	 * H11 — fold a single completed assistant turn's deltas into the running
 	 * session totals and broadcast a `sessionUsage` postMessage to the webview.
@@ -680,12 +708,15 @@ export class ChatSession {
 	 * underlying counters reset between turns — are clamped to zero so the
 	 * meter only ever ticks forward.
 	 */
-	private recordSessionTurn(deltaTokens: number, deltaCost: number): void {
+	private recordSessionTurn(deltaTokens: number, deltaCost: number, unmetered = false): void {
 		const safeTokens = Math.max(0, Math.floor(deltaTokens));
 		const safeCost = Math.max(0, deltaCost);
 		this.sessionTotalTokens += safeTokens;
 		this.sessionTotalCost += safeCost;
 		this.sessionTurnCount += 1;
+		if (unmetered) {
+			this.sessionUnmeteredTurns += 1;
+		}
 		this.postSessionUsage();
 	}
 
@@ -702,6 +733,7 @@ export class ChatSession {
 		}
 		this.webview.postMessage({
 			type: 'sessionUsage',
+			unmeteredTurns: this.sessionUnmeteredTurns,
 			totalCost: this.sessionTotalCost,
 			totalTokens: this.sessionTotalTokens,
 			turnCount: this.sessionTurnCount,
@@ -719,6 +751,7 @@ export class ChatSession {
 		this.sessionTotalCost = 0;
 		this.sessionTotalTokens = 0;
 		this.sessionTurnCount = 0;
+		this.sessionUnmeteredTurns = 0;
 		this.postSessionUsage();
 	}
 
@@ -1180,6 +1213,14 @@ export class ChatSession {
 		this.webview.postMessage({ type: 'workspaceIndexUpdate', entries });
 	}
 
+	openProviderSettings(): void {
+		this.currentTab = 'settings';
+		this.saveConversation();
+		this.postSettingsState();
+		void this.refreshConnectionState();
+		this.webview.postMessage({ type: 'showProviderSettings' });
+	}
+
 	clearConversation(): void {
 		// "Clear" now means "start a new conversation" — the previous one is
 		// preserved in the store so users can return to it from the History
@@ -1187,19 +1228,22 @@ export class ChatSession {
 		// pending approvals, and the streaming UI all reset cleanly.
 		this.cancelPendingApprovals('cancel');
 		this.abortController?.abort();
+		this.abortController = undefined;
 		this.emittedUiBlockIds.clear();
 		this.pendingUiBlockResponses.clear();
 		const fresh = this.conversationStore.create();
 		this.currentConversationId = fresh.summary.id;
+		this.conversationStore.rememberActive(this.currentConversationId);
 		this.conversation = [...fresh.messages];
 		// Fresh conversation starts on the Chat tab so the user sees the
 		// composer immediately rather than landing on whichever pane was
 		// active in the previous conversation.
 		this.currentTab = 'chat';
+		this.saveConversation();
 		this.webview.postMessage({ type: 'tabChanged', tab: this.currentTab });
 		this.postBoardSnapshot();
 		this.postHistorySnapshot();
-		this.webview.postMessage({ type: 'conversationCleared' });
+		this.webview.postMessage({ type: 'conversationCleared', conversationId: this.currentConversationId, lastModel: this.currentModel });
 		// Reset the running cost meter so a fresh chat starts at $0.00. The
 		// CostReporter's onDidChange will fanout the empty totals; the
 		// dedicated `costReset` message is the canonical "hide and zero" cue
@@ -1221,6 +1265,10 @@ export class ChatSession {
 	 * via `loadConversation` and resets per-session state (cost meter,
 	 * approval cards) the same way `clearConversation` does.
 	 */
+	notifySystemIntegrationsChanged(): void {
+		this.webview.postMessage({ type: 'systemIntegrationsChanged' });
+	}
+
 	switchConversation(id: string): void {
 		if (id === this.currentConversationId) {
 			return;
@@ -1234,18 +1282,23 @@ export class ChatSession {
 		// streamRequest will mint a fresh AbortController.
 		this.cancelPendingApprovals('cancel');
 		this.abortController?.abort();
+		this.abortController = undefined;
 		this.emittedUiBlockIds.clear();
 		this.pendingUiBlockResponses.clear();
 		this.currentConversationId = record.summary.id;
 		this.conversation = [...record.messages];
-		this.currentSpecialistId = record.summary.lastSpecialist ?? this.currentSpecialistId;
+		this.currentSpecialistId = record.summary.lastSpecialist ?? 'anton';
+		this.currentModel = this.resolveChatModel(record.summary.lastModel);
+		this.conversationStore.rememberActive(this.currentConversationId);
 		this.currentMode = record.summary.lastMode ?? 'act';
 		this.currentTab = record.summary.lastTab ?? 'chat';
 		this.webview.postMessage({
 			type: 'loadConversation',
+			conversationId: this.currentConversationId,
 			messages: this.conversation,
 			lastSpecialist: this.currentSpecialistId,
 			lastMode: this.currentMode,
+			lastModel: this.currentModel,
 		});
 		// Replay checkpoints so the pills come back after a conversation
 		// switch. Posted after `loadConversation` so the user bubbles are
@@ -1266,6 +1319,16 @@ export class ChatSession {
 		this.webview.postMessage({ type: 'tabChanged', tab: this.currentTab });
 		this.postBoardSnapshot();
 		this.postHistorySnapshot();
+	}
+
+	/** Replace a deleted active chat while leaving unrelated conversations and streams alone. */
+	handleConversationDeleted(id: string): void {
+		if (this.disposed) { return; }
+		if (id === this.currentConversationId) {
+			const next = this.conversationStore.getInitialConversation() ?? this.conversationStore.create();
+			this.switchConversation(next.summary.id);
+		}
+		this.webview.postMessage({ type: 'conversationDeleted', conversationId: id });
 	}
 
 	/**
@@ -1293,9 +1356,11 @@ export class ChatSession {
 		this.conversation = [...record.messages];
 		this.webview.postMessage({
 			type: 'loadConversation',
+			conversationId: this.currentConversationId,
 			messages: this.conversation,
 			lastSpecialist: this.currentSpecialistId,
 			lastMode: this.currentMode,
+			lastModel: this.currentModel,
 		});
 		this.postCheckpointsForCurrentConversation();
 	}
@@ -1380,11 +1445,15 @@ export class ChatSession {
 		if (this.disposed) {
 			return;
 		}
+		const workspaceIds = new Set(this.conversationStore.listForWorkspace().map(summary => summary.id));
 		const summaries = this.conversationStore.list().map(s => ({
 			id: s.id,
 			title: s.title,
 			updatedAt: s.updatedAt,
 			messageCount: s.messageCount,
+			lastSpecialist: s.lastSpecialist,
+			workspaceName: s.workspaceName,
+			inCurrentWorkspace: workspaceIds.has(s.id),
 		}));
 		this.webview.postMessage({
 			type: 'historySnapshot',
@@ -1412,6 +1481,7 @@ export class ChatSession {
 			getModel: () => this.currentModel,
 			setModel: (id: ModelId) => {
 				this.currentModel = id;
+				this.saveConversation();
 				this.webview.postMessage({ type: 'modelChange', model: id });
 			},
 			getMode: () => this.currentMode,
@@ -1456,11 +1526,11 @@ export class ChatSession {
 
 	/**
 	 * Pick the initial conversation when the session boots. Honours an
-	 * explicit caller-supplied id, then falls back to the most recently used
-	 * conversation, and finally creates a new one when the store is empty.
+	 * explicit caller-supplied id, then restores this workspace’s active
+	 * conversation, and finally creates a new one.
 	 */
 	private resolveInitialConversation(initialConversationId: string | undefined): {
-		summary: { id: string; lastSpecialist?: AgentHandle | 'anton'; lastMode?: ChatMode; lastTab?: ChatTab };
+		summary: { id: string; lastSpecialist?: AgentHandle | 'anton'; lastMode?: ChatMode; lastTab?: ChatTab; lastModel?: ModelId };
 		messages: ChatMessage[];
 	} {
 		if (initialConversationId) {
@@ -1469,16 +1539,16 @@ export class ChatSession {
 				return { summary: record.summary, messages: record.messages };
 			}
 		}
-		const list = this.conversationStore.list();
-		if (list.length > 0) {
-			const mostRecent = list[0];
-			const record = this.conversationStore.load(mostRecent.id);
-			if (record) {
-				return { summary: record.summary, messages: record.messages };
-			}
-		}
+		const current = this.conversationStore.getInitialConversation();
+		if (current) { return current; }
 		const fresh = this.conversationStore.create();
 		return { summary: fresh.summary, messages: fresh.messages };
+	}
+
+	private resolveChatModel(saved?: ModelId): ModelId {
+		if (typeof saved === 'string' && Object.prototype.hasOwnProperty.call(MODEL_METADATA, saved)) { return saved; }
+		const configured = vscode.workspace.getConfiguration('sota').get<string>('defaultModel', 'sonnet');
+		return typeof configured === 'string' && Object.prototype.hasOwnProperty.call(MODEL_METADATA, configured) ? configured as ModelId : 'sonnet';
 	}
 
 	private saveConversation(): void {
@@ -1489,6 +1559,7 @@ export class ChatSession {
 			lastSpecialist,
 			this.currentMode,
 			this.currentTab,
+			this.currentModel,
 		);
 	}
 
@@ -1496,6 +1567,52 @@ export class ChatSession {
 		this.webview.onDidReceiveMessage(
 			async (message: WebviewMessage) => {
 				switch (message.type) {
+					case 'selectModel':
+						if (message.conversationId === this.currentConversationId && typeof message.model === 'string' && Object.prototype.hasOwnProperty.call(MODEL_METADATA, message.model)) {
+							this.currentModel = message.model;
+							this.saveConversation();
+						}
+						break;
+					case 'selectSpecialist':
+						if (message.conversationId === this.currentConversationId && typeof message.specialistId === 'string' && getSpecialist(message.specialistId)) {
+							this.currentSpecialistId = message.specialistId;
+							this.saveConversation();
+						}
+						break;
+					case 'browseAcpAdapters':
+						await vscode.commands.executeCommand('sota.browseAcpAdapters');
+						break;
+					case 'reviewWithCouncil':
+						await vscode.commands.executeCommand('sota.reviewWithCouncil');
+						break;
+					case 'councilHistory':
+						await vscode.commands.executeCommand('sota.councilHistory');
+						break;
+					case 'webviewReady':
+						// Bootstrap only after the document installs its message listener.
+						this.webview.postMessage({ type: 'loadConversation', conversationId: this.currentConversationId, messages: this.conversation, lastSpecialist: this.currentSpecialistId, lastMode: this.currentMode, lastModel: this.currentModel });
+						this.webview.postMessage({ type: 'tabChanged', tab: this.currentTab });
+						this.webview.postMessage({ type: 'workspaceIndexUpdate', entries: this.workspaceIndex });
+						this.postCheckpointsForCurrentConversation();
+						this.postHistorySnapshot();
+						this.postBoardSnapshot();
+						void this.refreshConnectionState();
+						break;
+					case 'previewWorkspaceContext': {
+						const conversationId = this.currentConversationId;
+						const sequence = ++this.contextPreviewSequence;
+						try {
+							const context = await this.workspaceContext?.collect();
+							if (!this.disposed && conversationId === this.currentConversationId && sequence === this.contextPreviewSequence) {
+								this.webview.postMessage({ type: 'workspaceContextPreview', conversationId, markdown: context?.markdown ?? '', estimatedTokens: context?.estimatedTokens ?? 0 });
+							}
+						} catch (error) {
+							if (!this.disposed && conversationId === this.currentConversationId && sequence === this.contextPreviewSequence) {
+								this.webview.postMessage({ type: 'workspaceContextPreview', conversationId, error: vscode.l10n.t('Could not read workspace context: {0}', error instanceof Error ? error.message : String(error)) });
+							}
+						}
+						break;
+					}
 					case 'sendMessage':
 						// Refresh connection state opportunistically so the user
 						// sees fresh auth status if they just signed in via a popup.
@@ -1503,6 +1620,7 @@ export class ChatSession {
 						await this.handleSendMessage(message);
 						break;
 					case 'modeChange': {
+						if (message.conversationId && message.conversationId !== this.currentConversationId) { break; }
 						// Plan/Act toggle from the composer toolbar pill. Persist
 						// the choice on the conversation summary so reloading and
 						// switching conversations both restore the right mode.
@@ -1628,43 +1746,12 @@ export class ChatSession {
 							void this.refreshConnectionState();
 						}
 						break;
-					case 'historyRename': {
-						// Rename a conversation from the History tab. The TreeItem-based
-						// `sota.renameConversation` command needs a tree node arg, so
-						// we drive the rename directly via the store with an inline
-						// input box for the new title.
-						const id = typeof message.id === 'string' ? message.id : '';
-						if (!id) { break; }
-						const current = this.conversationStore.list().find(s => s.id === id);
-						if (!current) { break; }
-						const next = await vscode.window.showInputBox({
-							prompt: 'Rename conversation',
-							value: current.title,
-							validateInput: (value) => (value.trim().length === 0 ? 'Title cannot be empty.' : undefined),
-						});
-						if (next !== undefined) {
-							this.conversationStore.rename(id, next);
-						}
+					case 'historyRename':
+						if (typeof message.id === 'string' && message.id) { await vscode.commands.executeCommand('sota.renameConversation', message.id); }
 						break;
-					}
-					case 'historyDelete': {
-						// Mirrors the `sota.deleteConversation` command's confirm-and-
-						// delete flow without requiring a TreeItem argument so the
-						// History tab can call it directly.
-						const id = typeof message.id === 'string' ? message.id : '';
-						if (!id) { break; }
-						const current = this.conversationStore.list().find(s => s.id === id);
-						if (!current) { break; }
-						const choice = await vscode.window.showWarningMessage(
-							`Delete conversation "${current.title}"?`,
-							{ modal: true },
-							'Delete',
-						);
-						if (choice === 'Delete') {
-							this.conversationStore.delete(id);
-						}
+					case 'historyDelete':
+						if (typeof message.id === 'string' && message.id) { await vscode.commands.executeCommand('sota.deleteConversation', message.id); }
 						break;
-					}
 					case 'openCodeInEditor': {
 						if (typeof message.code !== 'string') {
 							break;
@@ -1755,6 +1842,16 @@ export class ChatSession {
 					case 'settingChange':
 						await this.handleSettingChange(message);
 						break;
+					case 'systemIntegrations': {
+						const action = ['list', 'refresh', 'open', 'connect', 'disconnect'].includes(message.integrationAction ?? '') ? message.integrationAction! : 'list';
+						try {
+							const state = await vscode.commands.executeCommand('sota.systemIntegrations', action, message.integrationId);
+							if (!this.disposed) { this.webview.postMessage({ type: 'systemIntegrationsState', state }); }
+						} catch {
+							if (!this.disposed) { this.webview.postMessage({ type: 'systemIntegrationsState', error: vscode.l10n.t('Could not load system integrations. Refresh to try again.') }); }
+						}
+						break;
+					}
 					case 'requestSettings':
 						this.postSettingsState();
 						break;
@@ -1806,7 +1903,7 @@ export class ChatSession {
 						// Delegates to the host command so the save dialog,
 						// filename, and post-save toast match what the palette
 						// flow does — keeping a single export code path.
-						await vscode.commands.executeCommand('sota.exportConversation');
+						await vscode.commands.executeCommand('sota.exportConversation', this.currentConversationId);
 						break;
 					}
 					case 'rerunFromSubtask': {
@@ -2085,8 +2182,8 @@ export class ChatSession {
 			'sota.personality.asciiArt': cfg.get<boolean>('personality.asciiArt', true),
 			'sota.personality.easterEggs': cfg.get<boolean>('personality.easterEggs', true),
 			'sota.personality.antonIsWatching': cfg.get<boolean>('personality.antonIsWatching', true),
-			'sota.personality.antonIsWatching.frequency': cfg.get<string>(
-				'personality.antonIsWatching.frequency',
+			'sota.personality.antonIsWatchingFrequency': cfg.get<string>(
+				'personality.antonIsWatchingFrequency',
 				'normal',
 			),
 			'sota.terminal.shellIntegration': cfg.get<boolean>('terminal.shellIntegration', true),
@@ -2096,7 +2193,8 @@ export class ChatSession {
 			'sota.personality.voiceIntensity': cfg.get<number>('personality.voiceIntensity', 5),
 			'sota.terminal.outputLineCap': cfg.get<number>('terminal.outputLineCap', 100),
 		};
-		this.webview.postMessage({ type: 'settingsState', settings });
+		const version = vscode.extensions.getExtension('son-of-anton.son-of-anton')?.packageJSON.version;
+		this.webview.postMessage({ type: 'settingsState', settings, version: typeof version === 'string' ? version : undefined });
 		this.postSpendLimitState();
 	}
 
@@ -2129,8 +2227,8 @@ export class ChatSession {
 	/**
 	 * Connect Anthropic via the locally-installed Claude Code CLI. No API key
 	 * required — the CLI handles auth itself (subscription tokens stored by
-	 * the Claude Code installer). We just verify the binary is present, set
-	 * the active model to a `claude-code-*` id, and surface the result.
+	 * the Claude Code installer). Configure ACP too so specialists can use
+	 * tools when a `claude-code-*` model is selected.
 	 */
 	private async handleConnectClaudeCode(): Promise<void> {
 		const { isClaudeCodeAvailable } = await import('son-of-anton-core/llm/claudeCodeRunner');
@@ -2144,12 +2242,16 @@ export class ChatSession {
 			});
 			return;
 		}
+		if (!await vscode.commands.executeCommand<boolean>('sota.configureClaudeAcp')) {
+			this.webview.postMessage({ type: 'providerSaveResult', provider: 'anthropic', ok: false, deferred: false, message: vscode.l10n.t('Claude Code is available, but ACP setup was not completed. Configure Claude ACP to enable specialist tools.') });
+			return;
+		}
 		this.webview.postMessage({
 			type: 'providerSaveResult',
 			provider: 'anthropic',
 			ok: true,
 			deferred: false,
-			message: 'Connected via Claude Code. Pick a "via Claude Code" model in the dropdown to use your subscription.',
+			message: vscode.l10n.t('Connected via Claude Code with ACP specialist tools. Pick a “via Claude Code” model to use your subscription.'),
 		});
 		void this.refreshConnectionState();
 	}
@@ -2192,17 +2294,23 @@ export class ChatSession {
 	 */
 	/**
 	 * Reset every `sota.*` toggle/value the inline settings view exposes back
-	 * to its default. Confirmation lives in the webview (a modal) so the host
-	 * is only invoked after the user has explicitly opted in. Provider keys
-	 * are intentionally NOT touched — losing those would log the user out.
+	 * to its default after a native confirmation. Provider credentials are preserved.
 	 */
 	private async handleResetAllSettings(): Promise<void> {
+		const reset = { title: vscode.l10n.t('Reset Settings') };
+		const selected = await vscode.window.showWarningMessage(
+			vscode.l10n.t('Reset all Son of Anton settings shown here to their defaults? Provider credentials will be preserved.'),
+			{ modal: true }, reset,
+		);
+		if (selected !== reset) { return; }
 		const cfg = vscode.workspace.getConfiguration('sota');
 		const keys: ReadonlyArray<string> = [
 			'personality.enabled',
 			'personality.voiceIntensity',
 			'personality.asciiArt',
 			'personality.easterEggs',
+			'personality.antonIsWatching',
+			'personality.antonIsWatchingFrequency',
 			'chat.includeWorkspaceContext',
 			'chat.autoApproveSafeOperations',
 			'autoApprove.read',
@@ -2291,10 +2399,12 @@ export class ChatSession {
 		const entries = ChatSession.SPECIALIST_MODEL_ENTRIES.map(entry => {
 			const raw = cfg.get<string>(`sota.agents.${entry.handle}.model`, '') ?? '';
 			const value = typeof raw === 'string' ? raw.trim() : '';
+			const acpAgent = cfg.get<unknown>(`sota.agents.${entry.handle}.acpAgent`);
 			return {
 				handle: entry.handle,
 				displayName: entry.displayName,
 				defaultModel: entry.defaultModel,
+				acpAgent: typeof acpAgent === 'string' ? acpAgent.trim() : '',
 				value,
 				pinned: value.length > 0,
 			};
@@ -2501,6 +2611,11 @@ export class ChatSession {
 			});
 			return;
 		}
+		const remove = { title: vscode.l10n.t('Delete Server') };
+		const selected = await vscode.window.showWarningMessage(
+			vscode.l10n.t('Delete MCP server "{0}"?', name), { modal: true }, remove,
+		);
+		if (selected !== remove) { return; }
 		const cfg = vscode.workspace.getConfiguration('sota');
 		const result = await deleteMcpServer(name, cfg);
 		this.webview.postMessage({
@@ -2590,21 +2705,36 @@ export class ChatSession {
 				if (!gitExt.isActive) {
 					await gitExt.activate();
 				}
-				type GitApi = { toGitUri?: (uri: vscode.Uri, ref: string) => vscode.Uri };
+				type Change = { uri: vscode.Uri; originalUri: vscode.Uri; status: number };
+				type GitApi = {
+					toGitUri(uri: vscode.Uri, ref: string): vscode.Uri;
+					getRepository(uri: vscode.Uri): { rootUri: vscode.Uri; diffWith(ref: string): Promise<Change[]>; getObjectDetails(ref: string, path: string): Promise<object>; status(): Promise<void>; state: { untrackedChanges: Change[]; workingTreeChanges: Change[] } } | null;
+				};
 				const api = gitExt.exports.getAPI(1) as GitApi;
-				if (api && typeof api.toGitUri === 'function') {
-					// Diff the workspace ROOT against the checkpoint — VS
-					// Code interprets a folder URI on the left of `vscode.diff`
-					// as "compare every changed file", which lines up nicely
-					// with the user's intent ("show me what changed since
-					// the checkpoint").
-					const checkpointUri = api.toGitUri(folder.uri, checkpoint.gitSha);
-					await vscode.commands.executeCommand(
-						'vscode.diff',
-						checkpointUri,
-						folder.uri,
-						`Checkpoint ${checkpoint.gitSha.slice(0, 7)} ↔ Working tree`,
-					);
+				const repository = api.getRepository(folder.uri);
+				if (repository) {
+					await repository.status();
+					const changes = await repository.diffWith(checkpoint.gitSha);
+					const untracked = new Map([...repository.state.untrackedChanges, ...repository.state.workingTreeChanges.filter(change => change.status === 7)].map(change => [change.uri.toString(), change]));
+					const seen = new Set(changes.map(change => change.uri.toString()));
+					changes.push(...[...untracked.values()].filter(change => !seen.has(change.uri.toString())));
+					if (!changes.length) {
+						void vscode.window.showInformationMessage(vscode.l10n.t('No changes since this checkpoint.'));
+						return;
+					}
+					const resources = await Promise.all(changes.map(async change => {
+						const isUntracked = untracked.has(change.uri.toString());
+						let existed = ![1, 7, 9].includes(change.status);
+						if (isUntracked || !existed) {
+							// Checkpoints include untracked files. Git's index-based diff
+							// may call an existing untracked file deleted or newly added.
+							try { await repository.getObjectDetails(checkpoint.gitSha!, path.relative(repository.rootUri.fsPath, change.originalUri.fsPath).split(path.sep).join('/')); existed = true; }
+							catch { existed = false; }
+						}
+						return [change.uri, existed ? api.toGitUri(change.originalUri, checkpoint.gitSha!) : undefined,
+							!isUntracked && [2, 6].includes(change.status) ? undefined : change.uri];
+					}));
+					await vscode.commands.executeCommand('vscode.changes', vscode.l10n.t('Checkpoint {0} ↔ Working Tree', checkpoint.gitSha.slice(0, 7)), resources);
 					return;
 				}
 			}
@@ -2644,19 +2774,51 @@ export class ChatSession {
 				this.conversation = [...record.messages];
 				this.webview.postMessage({
 					type: 'loadConversation',
+					conversationId: this.currentConversationId,
 					messages: this.conversation,
 					lastSpecialist: this.currentSpecialistId,
 					lastMode: this.currentMode,
+					lastModel: this.currentModel,
 				});
 			}
 		}
 	}
 
+	/** Only the current turn may publish UI updates or persist into this session. */
+	private ownsTurn(turn: ChatTurn): boolean {
+		return !this.disposed && this.abortController === turn.controller && this.currentConversationId === turn.conversationId;
+	}
+
 	private async handleSendMessage(message: WebviewMessage): Promise<void> {
+		if (message.conversationId && message.conversationId !== this.currentConversationId) {
+			return;
+		}
+		this.cancelPendingApprovals('cancel');
+		this.abortController?.abort();
+		const turn: ChatTurn = { controller: new AbortController(), conversationId: this.currentConversationId };
+		this.abortController = turn.controller;
+		try {
+			await this.runChatTurn(message, turn);
+		} catch (error) {
+			if (this.ownsTurn(turn) && !turn.controller.signal.aborted) {
+				this.webview.postMessage({ type: 'streamError', error: error instanceof Error ? error.message : String(error) });
+			}
+		} finally {
+			if (this.ownsTurn(turn)) {
+				this.webview.postMessage({ type: 'requestSettled', cancelled: turn.controller.signal.aborted });
+				this.abortController = undefined;
+			}
+		}
+	}
+
+	private async runChatTurn(message: WebviewMessage, owner: ChatTurn): Promise<void> {
+		const controller = owner.controller;
+		const current = () => this.ownsTurn(owner) && !controller.signal.aborted;
+		const post = (payload: Record<string, unknown>) => { if (this.ownsTurn(owner)) { void this.webview.postMessage(payload); } };
 		// Allow attachment-only messages: when the user types nothing but has
 		// attached context (e.g. just the current file), we still want to send.
 		const hasAttachments = Array.isArray(message.attachments) && message.attachments.length > 0;
-		const hasMentions = Array.isArray(message.mentions) && message.mentions.length > 0;
+		const hasMentions = (Array.isArray(message.mentions) && message.mentions.length > 0) || (Array.isArray(message.mentionsKinded) && message.mentionsKinded.length > 0);
 		// Image attachments are validated separately so a malformed entry doesn't
 		// silently get embedded in the prompt; sanitisation lives below.
 		const incomingImages: ImageAttachmentPayload[] = Array.isArray(message.images)
@@ -2678,7 +2840,7 @@ export class ChatSession {
 		if (this.spendGuard) {
 			const sessionCheck = this.spendGuard.checkSessionCap();
 			if (sessionCheck.blocked) {
-				this.webview.postMessage({
+				post({
 					type: 'spendCapBlocked',
 					scope: 'session',
 					currentUsd: sessionCheck.currentUsd,
@@ -2713,6 +2875,7 @@ export class ChatSession {
 		let rejectOverride = false;
 		if (rawText.trimStart().startsWith('/')) {
 			const result = await parseAndDispatch(rawText, this.buildSlashCommandContext());
+			if (!current()) return;
 			if (result.handled) {
 				if (result.output) {
 					this.postSystemMessage(result.output);
@@ -2749,6 +2912,7 @@ export class ChatSession {
 					model,
 					mode,
 				});
+				if (!current()) return;
 				if (!fired.allowed) {
 					this.postSystemMessage('pre-prompt hook denied this prompt.');
 					return;
@@ -2768,9 +2932,10 @@ export class ChatSession {
 		// commands short-circuit before this point, so they never pay this
 		// cost. The cost itself is dominated by a single README read; the
 		// rest is in-memory state.
-		const workspaceCtx = this.workspaceContext
+		const workspaceCtx = this.workspaceContext && message.includeWorkspaceContext !== false
 			? await this.workspaceContext.collect()
 			: { markdown: '', estimatedTokens: 0 };
+		if (!current()) return;
 		const systemPrompt = workspaceCtx.markdown
 			? `${baseSystemPrompt}\n\n---\n\n${workspaceCtx.markdown}`
 			: baseSystemPrompt;
@@ -2783,6 +2948,7 @@ export class ChatSession {
 		// `message.text` is intentionally left untouched so the user's
 		// own bubble keeps their typed text as the visible summary.
 		const fullPrompt = await this.buildUserPrompt(promptForLlm, message.attachments, message.mentions, message.mentionsKinded);
+		if (!current()) return;
 		const visibleSummaryText = (message.text && message.text.trim())
 			? message.text
 			: hasImages
@@ -2810,6 +2976,15 @@ export class ChatSession {
 			role: 'user',
 			content: persistedContent,
 			model,
+			specialistId,
+			request: {
+				text: rawText,
+				attachments: message.attachments ? [...message.attachments] : undefined,
+				mentions: message.mentions ? [...message.mentions] : undefined,
+				mentionsKinded: message.mentionsKinded?.map(mention => ({ ...mention })),
+				includeWorkspaceContext: message.includeWorkspaceContext !== false,
+				chatMode: mode,
+			},
 			timestamp: Date.now(),
 		};
 
@@ -2832,8 +3007,9 @@ export class ChatSession {
 					this.conversation.length,
 					trigger,
 				);
+				if (!current()) return;
 				if (checkpoint) {
-					this.webview.postMessage({
+					post({
 						type: 'checkpointCaptured',
 						checkpointId: checkpoint.id,
 						turnIndex: checkpoint.turnIndex,
@@ -2847,10 +3023,11 @@ export class ChatSession {
 			}
 		}
 
+		if (!current()) return;
 		this.conversation.push(userMessage);
 		this.saveConversation();
 
-		this.abortController = new AbortController();
+
 
 		// Phase 86 — snapshot the session total at the start of this turn so
 		// `SpendGuard.checkTaskCap()` can compute the per-turn delta as the
@@ -2863,7 +3040,7 @@ export class ChatSession {
 		// can render its pulsing dot. Paired with `requestEnded` below.
 		// `specialistId` + `userMessage` feed the pinned active-task header so
 		// the user can keep their place in long streams (Phase 66).
-		this.webview.postMessage({
+		post({
 			type: 'requestStarted',
 			specialistId,
 			userMessage: visibleSummaryText,
@@ -2879,7 +3056,7 @@ export class ChatSession {
 		this.lastInputTokens = usageSnapshot.input;
 		this.lastOutputTokens = usageSnapshot.output;
 		this.lastCachedTokens = usageSnapshot.cached;
-		this.lastEstimatedCost = this.llmClient.estimateCost(model);
+		this.lastEstimatedCost = this.estimatedSessionCost(model);
 		this.streamStartedAt = Date.now();
 
 		// Plan mode is orchestrator-only — specialists always execute their
@@ -2899,10 +3076,11 @@ export class ChatSession {
 			// so the user's typed text stays clean — no prepending.
 			let bridgeAssistantText = '';
 			try {
-				bridgeAssistantText = await this.runViaAgentBridge(specialistId, fullPrompt, model, mode, assistantConversationIndex, workspaceCtx.markdown, approveOverride, rejectOverride);
+				bridgeAssistantText = await this.runViaAgentBridge(owner, specialistId, fullPrompt, model, mode, assistantConversationIndex, workspaceCtx.markdown, approveOverride, rejectOverride);
 			} finally {
-				this.webview.postMessage({ type: 'requestEnded' });
+				post({ type: 'requestEnded' });
 			}
+			if (!this.ownsTurn(owner)) return;
 			this.turnsRun += 1;
 			this.firePostResponseHook(rawText, bridgeAssistantText, specialistId, model, mode);
 			return;
@@ -2977,7 +3155,7 @@ export class ChatSession {
 		let turn = 0;
 
 		try {
-			while (turn < MAX_TOOL_TURNS) {
+			while (turn < MAX_TOOL_TURNS && current()) {
 				turn++;
 				const pendingToolCalls: Array<{ id: string; name: string; input: Record<string, unknown> }> = [];
 				let stopReason: string | undefined;
@@ -2987,14 +3165,15 @@ export class ChatSession {
 						model,
 						messages: llmMessages,
 						systemPrompt,
-						signal: this.abortController.signal,
+						signal: controller.signal,
 						tools,
 						agentHandle: 'chat',
 					})) {
+						if (!current()) { aborted = true; break; }
 						if (event.type === 'token') {
 							assistantBuffer += event.token;
 							fullAssistantText += event.token;
-							this.webview.postMessage({ type: 'streamToken', token: event.token });
+							post({ type: 'streamToken', token: event.token });
 						} else if (event.type === 'tool-call') {
 							pendingToolCalls.push({ id: event.id, name: event.name, input: event.input });
 							// Render a structured tool-call card in the webview
@@ -3008,7 +3187,7 @@ export class ChatSession {
 							// rendered block. The block postMessage in the
 							// execute branch below handles all visible UI.
 							if (event.name !== 'emit_ui_block') {
-								this.webview.postMessage({
+								post({
 									type: 'toolCall',
 									id: event.id,
 									name: event.name,
@@ -3023,24 +3202,23 @@ export class ChatSession {
 							// webview doesn't flip out of streaming state mid-loop.
 							if (!willLoop) {
 								const usage = this.llmClient.getTokenUsage();
-								const cost = this.llmClient.estimateCost();
-								this.webview.postMessage({
+								const turnInputDelta = Math.max(0, usage.input - this.lastInputTokens);
+								const turnOutputDelta = Math.max(0, usage.output - this.lastOutputTokens);
+								const turnCachedDelta = Math.max(0, usage.cached - this.lastCachedTokens);
+								const turnCostDelta = Math.max(0, this.estimatedSessionCost(model) - this.lastEstimatedCost);
+								post({
 									type: 'messageComplete',
-									inputTokens: event.inputTokens,
-									outputTokens: event.outputTokens,
-									totalTokens: usage.input + usage.output,
-									estimatedCost: cost.toFixed(4),
+									inputTokens: turnInputDelta,
+									outputTokens: turnOutputDelta,
+									totalTokens: turnInputDelta + turnOutputDelta,
+									estimatedCost: turnCostDelta.toFixed(4),
 								});
 								// Phase 68 — per-message metrics popover. Tool-loop
 								// turns accumulate into the same assistant wrapper
 								// so we deliberately publish ONLY on the final
-								// turn; the delta below covers all input/output
+								// turn; these deltas cover all input/output
 								// across sub-turns of this send.
-								const turnInputDelta = Math.max(0, usage.input - this.lastInputTokens);
-								const turnOutputDelta = Math.max(0, usage.output - this.lastOutputTokens);
-								const turnCachedDelta = Math.max(0, usage.cached - this.lastCachedTokens);
-								const turnCostDelta = Math.max(0, this.llmClient.estimateCost(model) - this.lastEstimatedCost);
-								this.webview.postMessage({
+								post({
 									type: 'messageMetrics',
 									conversationIndex: assistantConversationIndex,
 									model,
@@ -3056,14 +3234,14 @@ export class ChatSession {
 								this.recordSessionTurn(turnInputDelta + turnOutputDelta, turnCostDelta);
 							}
 						} else if (event.type === 'error') {
-							this.webview.postMessage({ type: 'streamError', error: event.error });
+							post({ type: 'streamError', error: event.error });
 							stopReason = 'error';
 						}
 					}
 				} catch (err) {
 					// Treat AbortError-shaped exceptions as a clean cancel; bail
 					// out of the loop without surfacing a misleading error to UI.
-					const isAbort = this.abortController?.signal.aborted
+					const isAbort = controller.signal.aborted
 						|| (err instanceof Error && (err.name === 'AbortError' || /aborted/i.test(err.message)));
 					if (isAbort) {
 						aborted = true;
@@ -3081,7 +3259,7 @@ export class ChatSession {
 				}
 
 				if (turn >= MAX_TOOL_TURNS) {
-					this.webview.postMessage({
+					post({
 						type: 'streamError',
 						error: `Tool call loop exceeded ${MAX_TOOL_TURNS} turns. Aborting.`,
 					});
@@ -3096,13 +3274,13 @@ export class ChatSession {
 				// "Aborting" notice rather than the generic streamError.
 				if (this.spendGuard && this.spendGuard.checkTaskCap()) {
 					const limits = readSpendLimits();
-					this.webview.postMessage({
+					post({
 						type: 'spendCapBlocked',
 						scope: 'task',
 						currentUsd: this.spendGuard.getTaskCost(),
 						capUsd: limits.taskCapUsd,
 					});
-					this.abortController?.abort();
+					controller.abort();
 					aborted = true;
 					break;
 				}
@@ -3112,6 +3290,7 @@ export class ChatSession {
 				// same send (per Phase 19 spec) so we don't pay per-call setup.
 				const resultLines: string[] = ['[Tool results]'];
 				for (const call of pendingToolCalls) {
+					if (!current()) return;
 					// Phase 41: gate tools whose definition declares
 					// `riskLevel: 'requiresApproval'` (write_file, run_command)
 					// behind an inline approval card unless the user has opted
@@ -3136,7 +3315,7 @@ export class ChatSession {
 					if (requiresApproval) {
 						const approvalId = `approval-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 						const payload = this.buildApprovalPayload(call.name, call.input);
-						this.webview.postMessage({
+						post({
 							type: 'approvalRequest',
 							id: approvalId,
 							toolName: call.name,
@@ -3149,9 +3328,10 @@ export class ChatSession {
 						if (autoApprove) {
 							approvalDecision = { action: 'approve', reason: 'auto-approved' };
 						} else {
-							approvalDecision = await this.waitForApproval(approvalId, this.abortController?.signal);
+							approvalDecision = await this.waitForApproval(approvalId, controller.signal);
 						}
 
+						if (!current()) return;
 						if (approvalDecision.action === 'approve') {
 							result = await this.toolRegistry.execute(call.name, call.input, ctx);
 						} else if (approvalDecision.action === 'reject') {
@@ -3168,7 +3348,7 @@ export class ChatSession {
 
 						// Echo the final state back so the card flips from its
 						// pending appearance into approved/rejected/cancelled.
-						this.webview.postMessage({
+						post({
 							type: 'approvalResolved',
 							id: approvalId,
 							toolCallId: call.id,
@@ -3179,6 +3359,7 @@ export class ChatSession {
 						result = await this.toolRegistry.execute(call.name, call.input, ctx);
 					}
 
+					if (!current()) return;
 					const inputJson = JSON.stringify(call.input);
 					const status = result.isError ? 'error' : 'ok';
 					// Inline tool-result review: if the user edited this tool's
@@ -3231,7 +3412,7 @@ export class ChatSession {
 							console.warn(`[chat] emit_ui_block: duplicate blockId ${meta.blockId} ignored`);
 						} else {
 							this.emittedUiBlockIds.add(meta.blockId);
-							this.webview.postMessage({
+							post({
 								type: 'uiBlock',
 								blockId: meta.blockId,
 								component: meta.component,
@@ -3245,7 +3426,7 @@ export class ChatSession {
 						// missing prior cards (e.g. session reload mid-run).
 						// `metadata` (when present) drives richer render branches —
 						// e.g. shell metadata renders a terminal-style block.
-						this.webview.postMessage({
+						post({
 							type: 'toolCall',
 							id: call.id,
 							name: call.name,
@@ -3359,12 +3540,13 @@ export class ChatSession {
 				assistantBuffer = '';
 			}
 		} finally {
-			this.abortController = undefined;
+
 			// Always pair with `requestStarted` so the webview's pulse animation
 			// stops on success, error, AND user-cancellation paths.
-			this.webview.postMessage({ type: 'requestEnded' });
+			post({ type: 'requestEnded' });
 		}
 
+		if (!this.ownsTurn(owner)) return;
 		// Persist the visible assistant output (concatenation of token streams
 		// AND structured tool-call summaries) so reloading the session shows a
 		// readable trace of what happened — instead of the old `<see chat
@@ -3373,6 +3555,7 @@ export class ChatSession {
 			this.conversation.push({
 				role: 'assistant',
 				content: fullAssistantText,
+				specialistId,
 				model,
 				timestamp: Date.now(),
 			});
@@ -3408,7 +3591,7 @@ export class ChatSession {
 		const inputTokens = Math.max(0, usage.input - this.lastInputTokens);
 		const outputTokens = Math.max(0, usage.output - this.lastOutputTokens);
 		const cachedTokens = Math.max(0, usage.cached - this.lastCachedTokens);
-		const costUsd = Math.max(0, this.llmClient.estimateCost(model) - this.lastEstimatedCost);
+		const costUsd = Math.max(0, this.estimatedSessionCost(model) - this.lastEstimatedCost);
 		void this.hookRunner
 			.fire('post-response', {
 				conversationId: this.currentConversationId,
@@ -3432,22 +3615,25 @@ export class ChatSession {
 	 * caller uses this to populate the `post-response` lifecycle-hook payload
 	 * so a single helper in `handleSendMessage` covers both dispatch paths.
 	 */
-	private async runViaAgentBridge(specialistId: string, fullPrompt: string, model: ModelId, mode: ChatMode, assistantConversationIndex: number, workspaceContextSnapshot?: string, approveOverride: boolean = false, rejectOverride: boolean = false): Promise<string> {
+	private async runViaAgentBridge(owner: ChatTurn, specialistId: string, fullPrompt: string, model: ModelId, mode: ChatMode, assistantConversationIndex: number, workspaceContextSnapshot?: string, approveOverride: boolean = false, rejectOverride: boolean = false): Promise<string> {
 		if (!this.agentBridge) {
 			return '';
 		}
+		const controller = owner.controller;
+		const post = (payload: Record<string, unknown>) => { if (this.ownsTurn(owner)) { void this.webview.postMessage(payload); } };
 		const cancellationSource = new vscode.CancellationTokenSource();
 		// Bridge AbortController -> CancellationToken so the existing Cancel
 		// button (which aborts the controller) still cancels in-flight LLM work.
-		this.abortController?.signal.addEventListener('abort', () => {
-			cancellationSource.cancel();
-		});
+		const cancel = () => cancellationSource.cancel();
+		controller.signal.addEventListener('abort', cancel, { once: true });
+		if (controller.signal.aborted) cancel();
 
 		let assembled = '';
 		let finalText: string | undefined;
 		let errorText: string | undefined;
 		let spendCapAborted = false;
 		const emit = (event: AgentEvent): void => {
+			if (!this.ownsTurn(owner) || controller.signal.aborted) return;
 			this.handleAgentEvent(event);
 			if (event.type === 'token') {
 				assembled += event.token;
@@ -3470,14 +3656,14 @@ export class ChatSession {
 			) {
 				spendCapAborted = true;
 				const limits = readSpendLimits();
-				this.webview.postMessage({
+				post({
 					type: 'spendCapBlocked',
 					scope: 'task',
 					currentUsd: this.spendGuard.getTaskCost(),
 					capUsd: limits.taskCapUsd,
 				});
 				cancellationSource.cancel();
-				this.abortController?.abort();
+				controller.abort();
 			}
 		};
 
@@ -3494,7 +3680,7 @@ export class ChatSession {
 				// hardcoded Opus and tried Anthropic regardless of the picker.
 				await this.agentBridge.runOrchestrator(fullPrompt, emit, cancellationSource.token, {
 					mode,
-					conversationId: this.currentConversationId,
+					conversationId: owner.conversationId,
 					model,
 					workspaceContextSnapshot,
 					command: approveOverride ? 'approve' : rejectOverride ? 'reject' : undefined,
@@ -3504,43 +3690,46 @@ export class ChatSession {
 				// We still surface a system-style hint upstream of the call so
 				// users notice the chip is non-functional for non-orchestrator
 				// turns; see handleSendMessage's pre-dispatch hint.
-				await this.agentBridge.runSpecialist(specialistId as AgentHandle, fullPrompt, emit, cancellationSource.token, model, workspaceContextSnapshot, this.currentConversationId);
+				await this.agentBridge.runSpecialist(specialistId as AgentHandle, fullPrompt, emit, cancellationSource.token, model, workspaceContextSnapshot, owner.conversationId);
 			}
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
-			this.webview.postMessage({ type: 'streamError', error: message });
+			if (!controller.signal.aborted) post({ type: 'streamError', error: message });
 		} finally {
 			cancellationSource.dispose();
-			this.abortController = undefined;
+			controller.signal.removeEventListener('abort', cancel);
 		}
 
+		if (!this.ownsTurn(owner)) return '';
 		if (errorText) {
-			this.webview.postMessage({ type: 'streamError', error: errorText });
+			post({ type: 'streamError', error: errorText });
 			return '';
 		}
 
 		// Token usage telemetry is currently captured per-LLM-call inside the
-		// agent stack; we publish the cumulative LlmClient counters here so the
-		// status bar at the bottom of the chat reflects the full session.
+		// agent stack; publish only this turn’s deltas to avoid attributing
+		// earlier conversations and requests to the current response.
+		const unmetered = this.agentBridge?.isAcpAgent?.(specialistId, model) ?? false;
 		const usage = this.llmClient.getTokenUsage();
-		const cost = this.llmClient.estimateCost();
-		this.webview.postMessage({
-			type: 'messageComplete',
-			inputTokens: usage.input,
-			outputTokens: usage.output,
-			totalTokens: usage.input + usage.output,
-			estimatedCost: cost.toFixed(4),
-		});
-		// Phase 68 — per-message metrics popover. The agent stack drives
-		// many sub-LLM calls under the hood; the delta below sums all of
-		// them since this send started, attributed to the user-visible
-		// assistant turn it produced.
 		const turnInputDelta = Math.max(0, usage.input - this.lastInputTokens);
 		const turnOutputDelta = Math.max(0, usage.output - this.lastOutputTokens);
 		const turnCachedDelta = Math.max(0, usage.cached - this.lastCachedTokens);
-		const turnCostDelta = Math.max(0, this.llmClient.estimateCost(model) - this.lastEstimatedCost);
-		this.webview.postMessage({
+		const turnCostDelta = Math.max(0, this.estimatedSessionCost(model) - this.lastEstimatedCost);
+		if (!controller.signal.aborted) post({
+			type: 'messageComplete',
+			usageUnavailable: unmetered,
+			inputTokens: turnInputDelta,
+			outputTokens: turnOutputDelta,
+			totalTokens: turnInputDelta + turnOutputDelta,
+			estimatedCost: turnCostDelta.toFixed(4),
+		});
+		// Phase 68 — per-message metrics popover. The agent stack drives
+		// many sub-LLM calls under the hood; these deltas sum all of
+		// them since this send started, attributed to the user-visible
+		// assistant turn it produced.
+		post({
 			type: 'messageMetrics',
+			usageUnavailable: unmetered,
 			conversationIndex: assistantConversationIndex,
 			model,
 			latencyMs: Date.now() - this.streamStartedAt,
@@ -3552,13 +3741,15 @@ export class ChatSession {
 		// H11 — fold the same per-turn deltas into the session-wide
 		// cumulative meter so the chat status bar ticks up across
 		// multiple turns even when no `CostReporter` is wired in.
-		this.recordSessionTurn(turnInputDelta + turnOutputDelta, turnCostDelta);
+		this.recordSessionTurn(turnInputDelta + turnOutputDelta, turnCostDelta, unmetered);
 
 		const persisted = (finalText && finalText.length > 0) ? finalText : assembled;
 		if (persisted) {
 			this.conversation.push({
 				role: 'assistant',
 				content: persisted,
+				usageUnavailable: unmetered,
+				specialistId,
 				model,
 				timestamp: Date.now(),
 			});
@@ -3658,7 +3849,7 @@ export class ChatSession {
 				// webview message so the chat surface renders the same
 				// inline tool card the chat-panel direct-tool-loop path
 				// already produces. Status maps verbatim — the webview
-				// already knows 'running' / 'done' / 'error'. Skip
+				// normalizes 'done' to its 'ok' presentation. Skip
 				// emit_ui_block here too so generative-UI blocks render via
 				// their dedicated `uiBlock` postMessage instead.
 				if (event.name === 'emit_ui_block') {
@@ -3735,7 +3926,7 @@ export class ChatSession {
 		}
 		if (hasAttachments && attachments) {
 			for (const id of attachments) {
-				const block = this.resolveAttachment(id);
+				const block = await this.resolveAttachment(id);
 				if (block) {
 					sections.push(block);
 				}
@@ -3860,7 +4051,7 @@ export class ChatSession {
 	 * containing the actual content (file body, selection, etc.). Returns
 	 * `undefined` for unknown ids so callers can skip them silently.
 	 */
-	private resolveAttachment(id: string): string | undefined {
+	private async resolveAttachment(id: string): Promise<string | undefined> {
 		const editor = vscode.window.activeTextEditor;
 		switch (id) {
 			case 'current-file': {
@@ -3892,12 +4083,8 @@ export class ChatSession {
 				const content = editor.document.getText(editor.selection);
 				return `**Attached selection** (\`${filename}\` lines ${startLine}-${endLine}):\n\n\`\`\`${language}\n${content}\n\`\`\``;
 			}
-			case 'terminal-output': {
-				// VS Code's stable API doesn't expose terminal scrollback to
-				// extensions, so we surface a graceful hint rather than a
-				// silent no-op. The user can paste the relevant lines manually.
-				return '_(Terminal output capture is not yet supported. Please paste any relevant terminal output into the message manually.)_';
-			}
+			case 'terminal-output':
+				return this.workspaceContext?.resolveTerminalMention() ?? vscode.l10n.t('Terminal context is unavailable. Reload the window and try again.');
 			default:
 				return undefined;
 		}
@@ -4224,31 +4411,36 @@ export class ChatSession {
 			nonce += NONCE_CHARS.charAt(Math.floor(Math.random() * NONCE_CHARS.length));
 		}
 
-		const defaultModel = vscode.workspace.getConfiguration('sota').get<string>('defaultModel', 'sonnet');
+		const defaultModel = this.currentModel.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 		// Serialise the registry into the page so the webview JS can render the
 		// agent menu without an extra round-trip. JSON.stringify produces JSON
 		// that's safe to embed inside a <script type="application/json"> block.
-		const specialistRolesJson = JSON.stringify(SPECIALIST_ROLES);
+		const specialistRolesJson = JSON.stringify(SPECIALIST_ROLES.map(role => {
+			const acpAgent = vscode.workspace.getConfiguration('sota').get<unknown>(`agents.${role.id}.acpAgent`);
+			return { ...role, acpAgent: typeof acpAgent === 'string' ? acpAgent.trim() : '' };
+		})).replace(/</g, '\\u003c');
 		// Per-specialist visual identity (avatar monogram, accent colour,
 		// tagline). Embedded alongside the role data so the webview can render
 		// the persona avatar above each assistant bubble without an extra
 		// round-trip. Persona data is parallel to role data — joined by `id`
 		// at render time — so the prompt layer stays decoupled from UI concerns.
-		const personasJson = JSON.stringify(PERSONAS);
+		const personasJson = JSON.stringify(PERSONAS).replace(/</g, '\\u003c');
 		// Roster cards for the Roster tab — display order matches
 		// `SPECIALIST_ROLES`. Joined with `SPECIALIST_ROLES` client-side so
 		// each card can show the role's display name + description alongside
 		// the persona's avatar/tagline.
-		const rosterJson = JSON.stringify(getRoster());
+		const rosterJson = JSON.stringify(getRoster()).replace(/</g, '\\u003c');
 		// Embed the slash-command catalogue so the popup can render without an
 		// extra round-trip. The host-side dispatcher (`parseAndDispatch`) is
 		// the source of truth for execution; the popup is purely a UX layer.
-		const slashCommandsJson = JSON.stringify(getCommandList());
+		const slashCommandsJson = JSON.stringify(getCommandList()).replace(/</g, '\\u003c');
 		// Phase 5 — per-model tooltip data for the picker. Keep parallel to
 		// `MODEL_LABELS` in chat-webview.js so every model id surfaces its
 		// own context window / pricing / capabilities row.
-		const modelMetadataJson = JSON.stringify(MODEL_METADATA);
+		const modelMetadataJson = JSON.stringify(MODEL_METADATA).replace(/</g, '\\u003c');
 		const initialTab: ChatTab = this.currentTab;
+		const conversationId = this.currentConversationId.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+		const uiStringsJson = JSON.stringify(getChatUiStrings()).replace(/</g, '\\u003c');
 
 		return /* html */`<!DOCTYPE html>
 <html lang="en">
@@ -4259,11 +4451,11 @@ export class ChatSession {
 	<link href="${cssUri}" rel="stylesheet">
 	<title>Son of Anton Chat</title>
 </head>
-<body data-default-model="${defaultModel}" data-initial-tab="${initialTab}">
+<body data-conversation-id="${conversationId}" data-default-model="${defaultModel}" data-initial-tab="${initialTab}">
 	<div class="chat">
 		<div class="chat-header">
 			<div class="hdr-titles">
-				<div class="hdr-title">Son of Anton</div>
+				<div class="hdr-title" id="conversationTitle">Son of Anton</div>
 				<div class="hdr-subtitle" id="hdrSubtitle" hidden></div>
 			</div>
 			<button class="hdr-cost" id="hdrCost" type="button" hidden title="Session totals. Reset on /clear." aria-label="Session token and cost totals" aria-haspopup="true">
@@ -4279,6 +4471,7 @@ export class ChatSession {
 			<button class="hdr-btn hdr-btn-settings" id="settingsBtn" title="Settings" aria-label="Open settings tab">
 				<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 5.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z"/><path d="M13.4 9.6a5.6 5.6 0 0 0 0-3.2l1.4-1.1-1.5-2.6-1.7.6a5.6 5.6 0 0 0-2.8-1.6L8.5 0h-3l-.3 1.7a5.6 5.6 0 0 0-2.8 1.6l-1.7-.6L-.8 5.3l1.4 1.1a5.6 5.6 0 0 0 0 3.2L-.8 10.7l1.5 2.6 1.7-.6a5.6 5.6 0 0 0 2.8 1.6L5.5 16h3l.3-1.7a5.6 5.6 0 0 0 2.8-1.6l1.7.6 1.5-2.6-1.4-1.1z"/></svg>
 			</button>
+			<button class="hdr-btn" id="councilBtn" data-ui-label="reviewWithCouncil" data-ui-title="reviewWithCouncil" type="button"><span aria-hidden="true">◇</span></button>
 			<button class="hdr-btn hdr-btn-export" id="exportBtn" title="Export conversation" aria-label="Export conversation as Markdown">
 				<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 11V3M5 6l3-3 3 3M3 13h10"/></svg>
 			</button>
@@ -4322,30 +4515,32 @@ export class ChatSession {
 		</div>
 
 		<div class="chat-pane" id="pane-chat" data-pane="chat" role="tabpanel">
-		<div class="message-list" id="messageList">
+		<div class="message-list" id="messageList" role="region" aria-label="Conversation" tabindex="0">
 			<div class="empty-state" id="emptyState">
 				<!-- Visible when ANY auth is available -->
 				<div id="emptyStateReady" hidden>
-					<div class="empty-title">How can I help?</div>
-					<div class="empty-subtitle">Ask anything about your code or the current workspace.</div>
+					<div class="welcome-mark" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 7 2 16l7 9M23 7l7 9-7 9M19 4l-6 24"/></svg></div>
+					<div class="welcome-eyebrow">Your workspace. A little more possible.</div>
+					<h1 class="empty-title">What shall we build?</h1>
+					<div class="empty-subtitle">Start with a question, a rough idea, or something that needs fixing.</div>
 					<div class="empty-prompts">
 						<button class="prompt-card" data-prompt="Explain what the current file does and how it fits in the codebase.">
 							<span class="prompt-card-icon" aria-hidden="true">
 								<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2h7l3 3v9H3z"/><path d="M10 2v3h3"/><path d="M5 8h6M5 11h4"/></svg>
 							</span>
-							<span class="prompt-card-text">Explain the current file</span>
+							<span class="prompt-card-text"><strong>Understand the Code</strong><small>Get oriented in the current file</small></span><span class="prompt-arrow" aria-hidden="true">↗</span>
 						</button>
 						<button class="prompt-card" data-prompt="Suggest tests for the selected code, covering happy path and edge cases.">
 							<span class="prompt-card-icon" aria-hidden="true">
 								<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h8M6 4v9a1 1 0 0 0 1 1h2a1 1 0 0 0 1-1V4"/><path d="M5 9h6"/></svg>
 							</span>
-							<span class="prompt-card-text">Suggest tests for the selection</span>
+							<span class="prompt-card-text"><strong>Build Confidence</strong><small>Find the tests your code needs</small></span><span class="prompt-arrow" aria-hidden="true">↗</span>
 						</button>
 						<button class="prompt-card" data-prompt="Review the recent changes for bugs, missing edge cases, and unclear code.">
 							<span class="prompt-card-icon" aria-hidden="true">
 								<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8a6 6 0 1 0 12 0 6 6 0 0 0-12 0z"/><path d="M5 8l2 2 4-4"/></svg>
 							</span>
-							<span class="prompt-card-text">Review recent changes</span>
+							<span class="prompt-card-text"><strong>Take a Fresh Look</strong><small>Review recent changes for bugs</small></span><span class="prompt-arrow" aria-hidden="true">↗</span>
 						</button>
 					</div>
 				</div>
@@ -4353,7 +4548,9 @@ export class ChatSession {
 				<div id="emptyStateAuth" hidden>
 					<div class="empty-state-providers" id="emptyStateProviders">
 						<div class="provider-list-title">Connect to get started</div>
-						<div class="provider-list-subtitle">Pick an LLM provider to start chatting:</div>
+						<div class="provider-list-subtitle">Choose a provider or a local model to make this workspace yours.</div>
+						<label class="provider-search"><input type="search" id="providerSearch" aria-label="Find a provider" placeholder="Find a provider…" /></label>
+						<p id="providerSearchEmpty" class="provider-search-empty" hidden>No providers match your search.</p>
 						<div class="provider-cards">
 							<button class="provider-card" type="button" data-provider="anthropic">
 								<div class="provider-card-header">
@@ -4509,7 +4706,16 @@ export class ChatSession {
 						<span>New conversation</span>
 					</button>
 				</div>
+				<button type="button" id="councilHistoryBtn" class="history-pane-new" data-ui-text="councilHistory"></button>
+				<label class="history-search"><input type="search" id="historySearch" data-ui-label="searchConversations" data-ui-placeholder="searchConversations" autocomplete="off" /></label>
+				<div class="history-scope" role="group" data-ui-label="historyScope">
+					<button type="button" data-history-scope="all" aria-pressed="true" data-ui-text="allWorkspaces"></button>
+					<button type="button" data-history-scope="workspace" aria-pressed="false" data-ui-text="thisWorkspace"></button>
+				</div>
+				<div class="history-results-row"><div class="history-results" id="historyResults" role="status"></div><button type="button" id="historyClearFilters" class="history-clear-filters" hidden data-ui-text="clearHistoryFilters"></button></div>
 				<div class="history-pane-list" id="historyPaneList"></div>
+				<p class="history-no-results" id="historyNoResults" hidden data-ui-text="noConversations"></p>
+				<button class="history-show-more" id="historyShowMore" type="button" hidden data-ui-text="showMore"></button>
 				<div class="history-pane-empty" id="historyPaneEmpty" hidden>
 					<p>No conversations yet. Start chatting to populate this list.</p>
 				</div>
@@ -4519,35 +4725,36 @@ export class ChatSession {
 		<div class="chat-pane" id="pane-settings" data-pane="settings" role="tabpanel" hidden>
 			<div class="chat-settings-view chat-settings-view-tabbed" id="chatSettingsView" data-active-subtab="api">
 				<aside class="settings-subtab-nav" role="tablist" aria-label="Settings sections">
-					<button class="settings-subtab" data-subtab="api" role="tab" aria-selected="true" aria-controls="settingsSubtab-api">
+					<button id="settingsTab-api" class="settings-subtab" data-subtab="api" role="tab" aria-selected="true" aria-controls="settingsSubtab-api">
 						<svg class="settings-section-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4l5 3 5-3M3 4v8l5 3 5-3V4M3 4l5 3v8"/></svg>
 						<span>API Configuration</span>
 					</button>
-					<button class="settings-subtab" data-subtab="models" role="tab" aria-selected="false" aria-controls="settingsSubtab-models">
+					<button id="settingsTab-models" class="settings-subtab" data-subtab="models" role="tab" aria-selected="false" aria-controls="settingsSubtab-models">
 						<svg class="settings-section-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="5"/><path d="M8 3v10M3 8h10"/></svg>
 						<span>Models</span>
 					</button>
-					<button class="settings-subtab" data-subtab="specialists" role="tab" aria-selected="false" aria-controls="settingsSubtab-specialists">
+					<button id="settingsTab-specialists" class="settings-subtab" data-subtab="specialists" role="tab" aria-selected="false" aria-controls="settingsSubtab-specialists">
 						<svg class="settings-section-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="6" r="2"/><circle cx="11" cy="6" r="2"/><path d="M1.5 13c0-2 1.6-3 3.5-3s3.5 1 3.5 3M7.5 13c0-2 1.6-3 3.5-3s3.5 1 3.5 3"/></svg>
 						<span>Specialist Models</span>
 					</button>
-					<button class="settings-subtab" data-subtab="features" role="tab" aria-selected="false" aria-controls="settingsSubtab-features">
+					<button id="settingsTab-features" class="settings-subtab" data-subtab="features" role="tab" aria-selected="false" aria-controls="settingsSubtab-features">
 						<svg class="settings-section-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2" width="5" height="5"/><rect x="9" y="2" width="5" height="5"/><rect x="2" y="9" width="5" height="5"/><rect x="9" y="9" width="5" height="5"/></svg>
 						<span>Features</span>
 					</button>
-					<button class="settings-subtab" data-subtab="personality" role="tab" aria-selected="false" aria-controls="settingsSubtab-personality">
+					<button id="settingsTab-personality" class="settings-subtab" data-subtab="personality" role="tab" aria-selected="false" aria-controls="settingsSubtab-personality">
 						<svg class="settings-section-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="6" r="2.5"/><path d="M3 13c0-2.5 2.2-4 5-4s5 1.5 5 4"/></svg>
 						<span>Personality</span>
 					</button>
-					<button class="settings-subtab" data-subtab="mcp" role="tab" aria-selected="false" aria-controls="settingsSubtab-mcp">
+					<button id="settingsTab-mcp" class="settings-subtab" data-subtab="mcp" role="tab" aria-selected="false" aria-controls="settingsSubtab-mcp">
 						<svg class="settings-section-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="4" rx="1"/><rect x="2" y="9" width="12" height="4" rx="1"/><circle cx="5" cy="5" r="0.6" fill="currentColor"/><circle cx="5" cy="11" r="0.6" fill="currentColor"/></svg>
 						<span>MCP Servers</span>
 					</button>
-					<button class="settings-subtab" data-subtab="terminal" role="tab" aria-selected="false" aria-controls="settingsSubtab-terminal">
+					<button id="settingsTab-integrations" class="settings-subtab" data-subtab="integrations" role="tab" aria-selected="false" aria-controls="settingsSubtab-integrations"><span data-ui-text="integrations"></span></button>
+					<button id="settingsTab-terminal" class="settings-subtab" data-subtab="terminal" role="tab" aria-selected="false" aria-controls="settingsSubtab-terminal">
 						<svg class="settings-section-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1"/><path d="M5 7l2 2-2 2M9 11h3"/></svg>
 						<span>Terminal</span>
 					</button>
-					<button class="settings-subtab" data-subtab="about" role="tab" aria-selected="false" aria-controls="settingsSubtab-about">
+					<button id="settingsTab-about" class="settings-subtab" data-subtab="about" role="tab" aria-selected="false" aria-controls="settingsSubtab-about">
 						<svg class="settings-section-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M8 11V7M8 5h.01"/></svg>
 						<span>About</span>
 					</button>
@@ -4555,7 +4762,7 @@ export class ChatSession {
 				<div class="settings-subtab-content">
 					<h3 class="chat-settings-title">Son of Anton Settings</h3>
 
-					<section class="settings-section settings-subtab-pane" id="settingsSubtab-api" data-subtab-pane="api" role="tabpanel" aria-labelledby="settingsSubtab-api">
+					<section class="settings-section settings-subtab-pane" id="settingsSubtab-api" data-subtab-pane="api" role="tabpanel" aria-labelledby="settingsTab-api">
 						<div class="settings-section-head">
 							<svg class="settings-section-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4l5 3 5-3M3 4v8l5 3 5-3V4M3 4l5 3v8"/></svg>
 							<h4>API Configuration</h4>
@@ -4564,7 +4771,7 @@ export class ChatSession {
 						<div class="settings-providers" id="settingsProviders"></div>
 					</section>
 
-					<section class="settings-section settings-subtab-pane" id="settingsSubtab-models" data-subtab-pane="models" role="tabpanel" hidden aria-labelledby="settingsSubtab-models">
+					<section class="settings-section settings-subtab-pane" id="settingsSubtab-models" data-subtab-pane="models" role="tabpanel" hidden aria-labelledby="settingsTab-models">
 						<div class="settings-section-head">
 							<svg class="settings-section-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="5"/><path d="M8 3v10M3 8h10"/></svg>
 							<h4>Models</h4>
@@ -4594,7 +4801,7 @@ export class ChatSession {
 						<button class="settings-link-button" type="button" data-action="open-settings-json" data-setting-id="sota.defaultModel">Edit model routing in settings.json</button>
 					</section>
 
-					<section class="settings-section settings-subtab-pane" id="settingsSubtab-specialists" data-subtab-pane="specialists" role="tabpanel" hidden aria-labelledby="settingsSubtab-specialists">
+					<section class="settings-section settings-subtab-pane" id="settingsSubtab-specialists" data-subtab-pane="specialists" role="tabpanel" hidden aria-labelledby="settingsTab-specialists">
 						<div class="settings-section-head">
 							<svg class="settings-section-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="6" r="2"/><circle cx="11" cy="6" r="2"/><path d="M1.5 13c0-2 1.6-3 3.5-3s3.5 1 3.5 3M7.5 13c0-2 1.6-3 3.5-3s3.5 1 3.5 3"/></svg>
 							<h4>Specialist Models</h4>
@@ -4615,7 +4822,7 @@ export class ChatSession {
 						<button class="settings-link-button" type="button" data-action="open-settings-json" data-setting-id="sota.agents">Edit agent models in settings.json</button>
 					</section>
 
-					<section class="settings-section settings-subtab-pane" id="settingsSubtab-features" data-subtab-pane="features" role="tabpanel" hidden aria-labelledby="settingsSubtab-features">
+					<section class="settings-section settings-subtab-pane" id="settingsSubtab-features" data-subtab-pane="features" role="tabpanel" hidden aria-labelledby="settingsTab-features">
 						<div class="settings-section-head">
 							<svg class="settings-section-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2" width="5" height="5"/><rect x="9" y="2" width="5" height="5"/><rect x="2" y="9" width="5" height="5"/><rect x="9" y="9" width="5" height="5"/></svg>
 							<h4>Features</h4>
@@ -4693,7 +4900,7 @@ export class ChatSession {
 						</div>
 					</section>
 
-					<section class="settings-section settings-subtab-pane" id="settingsSubtab-personality" data-subtab-pane="personality" role="tabpanel" hidden aria-labelledby="settingsSubtab-personality">
+					<section class="settings-section settings-subtab-pane" id="settingsSubtab-personality" data-subtab-pane="personality" role="tabpanel" hidden aria-labelledby="settingsTab-personality">
 						<div class="settings-section-head">
 							<svg class="settings-section-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="6" r="2.5"/><path d="M3 13c0-2.5 2.2-4 5-4s5 1.5 5 4"/></svg>
 							<h4>Personality</h4>
@@ -4723,7 +4930,7 @@ export class ChatSession {
 						<p class="settings-toggle-example">A periodic dry observation surfaced once per window — never while you're idle.</p>
 						<label class="settings-field" id="settingsAntonIsWatchingFrequencyField">
 							<span class="settings-field-label">Frequency</span>
-							<select class="settings-input" data-setting-select="sota.personality.antonIsWatching.frequency">
+							<select class="settings-input" data-setting-select="sota.personality.antonIsWatchingFrequency">
 								<option value="rare">Rare (2-4 hour window)</option>
 								<option value="normal">Normal (30 min - 4 hour window)</option>
 								<option value="often">Often (10 min - 2 hour window)</option>
@@ -4731,7 +4938,7 @@ export class ChatSession {
 						</label>
 					</section>
 
-					<section class="settings-section settings-subtab-pane" id="settingsSubtab-mcp" data-subtab-pane="mcp" role="tabpanel" hidden aria-labelledby="settingsSubtab-mcp">
+					<section class="settings-section settings-subtab-pane" id="settingsSubtab-mcp" data-subtab-pane="mcp" role="tabpanel" hidden aria-labelledby="settingsTab-mcp">
 						<div class="settings-section-head">
 							<svg class="settings-section-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="4" rx="1"/><rect x="2" y="9" width="12" height="4" rx="1"/><circle cx="5" cy="5" r="0.6" fill="currentColor"/><circle cx="5" cy="11" r="0.6" fill="currentColor"/></svg>
 							<h4>MCP Servers</h4>
@@ -4748,23 +4955,36 @@ export class ChatSession {
 						<button class="settings-link-button" type="button" data-action="open-settings-json" data-setting-id="sota.mcp.servers">Edit in settings.json</button>
 					</section>
 
-					<section class="settings-section settings-subtab-pane" id="settingsSubtab-terminal" data-subtab-pane="terminal" role="tabpanel" hidden aria-labelledby="settingsSubtab-terminal">
+					<section class="settings-section settings-subtab-pane" id="settingsSubtab-integrations" data-subtab-pane="integrations" role="tabpanel" hidden aria-labelledby="settingsTab-integrations">
+						<h4 data-ui-text="integrations"></h4>
+						<p class="settings-section-blurb" data-ui-text="integrationsHelp"></p>
+						<div class="integration-toolbar">
+							<input id="integrationSearch" type="search" data-ui-label="searchIntegrations" data-ui-placeholder="searchIntegrations" />
+							<select id="integrationKind" data-ui-label="integrationKind"><option value="all" data-ui-text="allIntegrations"></option><option value="skill" data-ui-text="skills"></option><option value="plugin" data-ui-text="plugins"></option><option value="mcp" data-ui-text="mcp"></option></select>
+							<button id="browseAcpAdapters" type="button" data-ui-text="browseAcpAdapters"></button>
+							<button id="integrationRefresh" type="button" data-ui-text="integrationRefresh"></button>
+						</div>
+						<p id="integrationStatus" role="status" aria-live="polite"></p>
+						<div id="integrationList"></div>
+						<button id="integrationMore" type="button" hidden data-ui-text="showMore"></button>
+					</section>
+					<section class="settings-section settings-subtab-pane" id="settingsSubtab-terminal" data-subtab-pane="terminal" role="tabpanel" hidden aria-labelledby="settingsTab-terminal">
 						<div class="settings-section-head">
 							<svg class="settings-section-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1"/><path d="M5 7l2 2-2 2M9 11h3"/></svg>
 							<h4>Terminal</h4>
 						</div>
-						<p class="settings-section-blurb">Tune how much terminal output Anton can read at a time.</p>
+						<p class="settings-section-blurb" data-ui-text="terminalCaptureHelp"></p>
 						<label class="settings-field">
 							<span class="settings-field-label">Output line cap — <span class="settings-slider-value" id="terminalOutputLinesValue">100</span></span>
 							<input class="settings-input settings-slider" type="range" min="20" max="500" step="10" data-setting-number="sota.terminal.outputLineCap" id="settingsTerminalLineCap" />
 						</label>
 						<label class="settings-toggle">
 							<input type="checkbox" data-setting="sota.terminal.shellIntegration" />
-							<span>Shell integration (advisory)</span>
+							<span data-ui-text="captureTerminalOutput"></span>
 						</label>
 					</section>
 
-					<section class="settings-section settings-subtab-pane" id="settingsSubtab-about" data-subtab-pane="about" role="tabpanel" hidden aria-labelledby="settingsSubtab-about">
+					<section class="settings-section settings-subtab-pane" id="settingsSubtab-about" data-subtab-pane="about" role="tabpanel" hidden aria-labelledby="settingsTab-about">
 						<div class="settings-section-head">
 							<svg class="settings-section-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M8 11V7M8 5h.01"/></svg>
 							<h4>About</h4>
@@ -4790,6 +5010,16 @@ export class ChatSession {
 		</div>
 
 		<div class="composer-host" id="composerHost">
+		<button class="jump-to-latest" id="jumpToLatest" type="button" hidden>↓ Jump to Latest</button>
+		<details class="workspace-context" id="workspaceContextDetails">
+			<summary><span data-ui-text="workspaceContext"></span><span id="workspaceContextSummary"></span></summary>
+			<div class="workspace-context-body">
+				<label class="workspace-context-toggle"><input type="checkbox" id="includeWorkspaceContext" checked /><span data-ui-text="includeWorkspaceContext"></span></label>
+				<p data-ui-text="contextExplanation"></p>
+				<button type="button" id="refreshContext" data-ui-text="refreshPreview"></button>
+				<pre id="workspaceContextPreview" tabindex="0" data-ui-label="workspaceContext"></pre>
+			</div>
+		</details>
 		<div class="composer">
 			<button class="floating-stop" id="floatingStop" type="button" hidden title="Stop generating (Esc)" aria-label="Stop generating">
 				<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5"/></svg>
@@ -4799,8 +5029,10 @@ export class ChatSession {
 				<div class="popup slash-popup" id="slashPopup" hidden role="listbox" aria-label="Slash commands"></div>
 				<div class="popup mention-popup" id="mentionPopup" hidden role="listbox" aria-label="Workspace mentions"></div>
 				<div class="context-chips" id="contextChips"></div>
+				<span class="draft-status" id="draftStatus" hidden></span>
+				<div class="prompt-restore-notice" id="promptRestoreNotice" role="status" hidden><span data-ui-text="promptRestored"></span><button type="button" id="undoPromptRestore" data-ui-text="undoPromptRestore"></button></div>
 				<div class="composer-shell">
-					<textarea class="composer-input" id="messageInput" placeholder="Ask Anton anything…" rows="3"></textarea>
+					<textarea class="composer-input" aria-label="Message Anton" id="messageInput" placeholder="Ask Anton anything…" rows="3"></textarea>
 					<div class="composer-toolbar">
 						<button class="toolbar-chip" id="attachBtn" title="Add context" aria-label="Add context">
 							<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg>
@@ -4872,7 +5104,9 @@ export class ChatSession {
 		</div>
 		<!-- /composer-host -->
 
-		<div class="popover" id="modelMenu" hidden role="menu">
+		<div class="popover model-picker" id="modelMenu" hidden role="dialog" data-ui-label="chooseModel">
+			<div class="model-search"><input type="search" id="modelSearch" data-ui-label="searchModels" data-ui-placeholder="searchModels" autocomplete="off" spellcheck="false" /></div>
+			<p class="model-search-empty" id="modelSearchEmpty" hidden data-ui-text="noModels"></p>
 			<div class="popover-section-label">Claude (latest)</div>
 			<button class="popover-item" role="menuitem" data-model="claude-opus-4-7"><span class="item-check"></span>Claude Opus 4.7<span class="item-key">complex</span></button>
 			<button class="popover-item" role="menuitem" data-model="claude-sonnet-4-7"><span class="item-check"></span>Claude Sonnet 4.7<span class="item-key">balanced</span></button>
@@ -5003,9 +5237,7 @@ export class ChatSession {
 			<button class="popover-item" role="menuitem" data-model="fireworks-qwen-2-5-coder"><span class="item-check"></span>Qwen 2.5 Coder (Fireworks)<span class="item-key">code</span></button>
 			<button class="popover-item" role="menuitem" data-model="fireworks-custom"><span class="item-check"></span>Fireworks (custom)<span class="item-key">fireworks</span></button>
 			<div class="popover-section-label">OpenAI Codex CLI (subscription)</div>
-			<button class="popover-item" role="menuitem" data-model="codex-gpt-5"><span class="item-check"></span>GPT-5 via Codex CLI<span class="item-key">subscription</span></button>
-			<button class="popover-item" role="menuitem" data-model="codex-gpt-5-mini"><span class="item-check"></span>GPT-5 mini via Codex CLI<span class="item-key">subscription</span></button>
-			<button class="popover-item" role="menuitem" data-model="codex-gpt-5-codex"><span class="item-check"></span>GPT-5 Codex via Codex CLI<span class="item-key">subscription</span></button>
+			<button class="popover-item" role="menuitem" data-model="codex-default"><span class="item-check"></span>Codex CLI Default<span class="item-key">subscription</span></button>
 		</div>
 
 		<div class="popover" id="agentMenu" hidden role="menu">
@@ -5025,6 +5257,7 @@ export class ChatSession {
 	<script type="application/json" id="personasData" nonce="${nonce}">${personasJson}</script>
 	<script type="application/json" id="rosterData" nonce="${nonce}">${rosterJson}</script>
 	<script type="application/json" id="slashCommandsData" nonce="${nonce}">${slashCommandsJson}</script>
+	<script type="application/json" id="chatUiStrings" nonce="${nonce}">${uiStringsJson}</script>
 	<script type="application/json" id="modelMetadataData" nonce="${nonce}">${modelMetadataJson}</script>
 
 	<script nonce="${nonce}" src="${webviewJsUri}"></script>
@@ -5178,6 +5411,10 @@ export class ChatPanel {
 	 * The previous conversation is preserved in the store so it remains
 	 * browsable from the History view.
 	 */
+	static notifySystemIntegrationsChanged(): void {
+		for (const session of ACTIVE_SESSIONS) { session.notifySystemIntegrationsChanged(); }
+	}
+
 	static clearConversation(): void {
 		for (const session of ACTIVE_SESSIONS) {
 			session.clearConversation();
@@ -5247,26 +5484,26 @@ export class ChatPanel {
 	 * surface contract simple — read CLI, write IDE — and avoids the
 	 * conflict-resolution rabbit hole that two-way sync would open.
 	 *
-	 * Returns `true` on success and `false` if the file was missing,
+	 * Returns the imported conversation id, or undefined if the file was missing,
 	 * malformed, or otherwise unreadable. The caller is responsible for
 	 * surfacing user-visible feedback when this happens.
 	 */
 	static async openCliConversation(
 		cliId: string,
 		conversationStore: ConversationStore,
-	): Promise<boolean> {
+	): Promise<string | undefined> {
 		if (typeof cliId !== 'string' || !cliId) {
-			return false;
+			return undefined;
 		}
 		const cliRecord = await loadCliConversation(cliId);
 		if (!cliRecord) {
-			return false;
+			return undefined;
 		}
 		const fresh = conversationStore.create(cliRecord.messages);
 		ChatPanel.switchConversation(fresh.summary.id);
 		void vscode.window.showInformationMessage(
 			'Imported CLI session into a new IDE conversation.',
 		);
-		return true;
+		return fresh.summary.id;
 	}
 }

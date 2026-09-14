@@ -52,10 +52,7 @@ pub struct Reference {
 /// Embed a single query string. Split out from `semantic_search` so callers
 /// can drive the await without holding a `&SqliteStore` borrow — `Connection`
 /// is `!Sync`, which would make any future holding it non-`Send`.
-pub async fn embed_query(
-    embedder: &dyn Embedder,
-    query: &str,
-) -> Result<Vec<f32>, CodeGraphError> {
+pub async fn embed_query(embedder: &dyn Embedder, query: &str) -> Result<Vec<f32>, CodeGraphError> {
     embedder
         .embed(&[query.to_string()])
         .await?
@@ -112,10 +109,14 @@ pub fn nearest(
             continue;
         };
         if let Some(scope) = scope {
-            if !scope.iter().any(|s| path.starts_with(s)) {
+            if !scope
+                .iter()
+                .any(|s| std::path::Path::new(&path).starts_with(s))
+            {
                 continue;
             }
         }
+        crate::index::checked_index_path(store, std::path::Path::new(&path))?;
         let snippet = read_snippet(path, *start, *end).unwrap_or_default();
         out.push(SearchHit {
             symbol: name.clone(),
@@ -170,10 +171,10 @@ fn read_snippet(path: &str, start: usize, end: usize) -> Option<String> {
 
 // ──────────────────────────────── 2. file_summary ───────────────────────────────────
 
-pub fn file_summary(
-    store: &SqliteStore,
-    path: &str,
-) -> Result<FileSummary, CodeGraphError> {
+pub fn file_summary(store: &SqliteStore, path: &str) -> Result<FileSummary, CodeGraphError> {
+    let path = crate::index::checked_index_path(store, std::path::Path::new(path))?
+        .to_string_lossy()
+        .to_string();
     let (id, language): (i64, String) = store.conn.query_row(
         "SELECT id, language FROM files WHERE path = ?1",
         params![path],
@@ -216,13 +217,17 @@ pub fn symbol_lookup(
     limit: usize,
 ) -> Result<Vec<SymbolMatch>, CodeGraphError> {
     let exact = query.to_string();
-    let fuzzy = format!("%{query}%");
+    let literal = query
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let fuzzy = format!("%{literal}%");
 
     let mut stmt = store.conn.prepare(
         "SELECT s.name, s.kind, f.path, s.start_byte, s.end_byte,
                 CASE WHEN s.name = ?1 THEN 0 ELSE 1 END AS rank
          FROM symbols s JOIN files f ON f.id = s.file_id
-         WHERE s.name LIKE ?2
+         WHERE s.name LIKE ?2 ESCAPE '\\'
          ORDER BY rank ASC, length(s.name) ASC
          LIMIT ?3",
     )?;
@@ -270,7 +275,14 @@ pub fn dependency_traversal(
          ORDER BY f.path",
     )?;
     let paths = stmt
-        .query_map(params![start_file, max_depth as i64], |row| row.get(0))?
+        .query_map(
+            params![
+                crate::index::checked_index_path(store, std::path::Path::new(start_file))?
+                    .to_string_lossy(),
+                max_depth as i64
+            ],
+            |row| row.get(0),
+        )?
         .collect::<Result<Vec<String>, _>>()?;
     Ok(paths)
 }
@@ -299,7 +311,14 @@ pub fn impact_analysis(
          ORDER BY f.path",
     )?;
     let paths = stmt
-        .query_map(params![target_file, max_depth as i64], |row| row.get(0))?
+        .query_map(
+            params![
+                crate::index::checked_index_path(store, std::path::Path::new(target_file))?
+                    .to_string_lossy(),
+                max_depth as i64
+            ],
+            |row| row.get(0),
+        )?
         .collect::<Result<Vec<String>, _>>()?;
     Ok(paths)
 }
@@ -382,6 +401,25 @@ mod tests {
         let hits = symbol_lookup(&store, "lph", 10).unwrap();
         let names: Vec<&str> = hits.iter().map(|h| h.name.as_str()).collect();
         assert!(names.contains(&"alpha"));
+    }
+
+    #[test]
+    fn symbol_lookup_treats_sql_wildcards_as_literal_text() {
+        let (dir, mut store) = fixture_store();
+        write(
+            &dir.path().join("names.rs"),
+            "fn snake_case() {}\nfn snakeXcase() {}\n",
+        );
+        bulk_index(&mut store, dir.path()).unwrap();
+        let names: Vec<String> = symbol_lookup(&store, "snake_", 10)
+            .unwrap()
+            .into_iter()
+            .map(|hit| hit.name)
+            .collect();
+        assert_eq!(names, vec!["snake_case"]);
+        for query in ["%", "\\"] {
+            assert!(symbol_lookup(&store, query, 10).unwrap().is_empty());
+        }
     }
 
     #[test]

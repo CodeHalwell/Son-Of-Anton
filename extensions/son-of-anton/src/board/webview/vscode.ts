@@ -20,6 +20,10 @@ declare global {
 }
 
 let cached: VsCodeApi | undefined;
+let conversationId: string | null | undefined;
+
+/** Scope outgoing board actions to the snapshot the user is viewing. */
+export function setBoardConversation(id: string | null): void { conversationId = id; }
 
 export function vscode(): VsCodeApi {
 	if (!cached) {
@@ -29,5 +33,5 @@ export function vscode(): VsCodeApi {
 }
 
 export function postToHost(message: WebviewToHostMessage): void {
-	vscode().postMessage(message);
+	vscode().postMessage({ ...message, conversationId: message.conversationId === undefined ? conversationId : message.conversationId });
 }

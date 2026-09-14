@@ -329,7 +329,7 @@ describe('FailoverChain.send pre-stream failover', () => {
 // ── send — mid-stream failover ────────────────────────────────────────────────
 
 describe('FailoverChain.send mid-stream failover', () => {
-	test('after content, a retryable error triggers failover to next adapter', async () => {
+	test('after content, an error terminates without replay', async () => {
 		const primaryEvents: AgentEvent[] = [
 			{ type: 'message_start', requestId: 'r', provider: 'p', model: 'm' },
 			{ type: 'text_delta', text: 'partial' },
@@ -345,17 +345,15 @@ describe('FailoverChain.send mid-stream failover', () => {
 			slot(adapterFromEvents('fallback', fallback)),
 		]);
 		const got = await collect(chain.send(BASE_REQUEST, ABORT));
-		// Primary's content events up to (not including) the error should be yielded,
-		// then fallback's events follow.
 		assert.deepStrictEqual(got, [
 			{ type: 'message_start', requestId: 'r', provider: 'p', model: 'm' },
 			{ type: 'text_delta', text: 'partial' },
-			// error is consumed and NOT yielded — chain advances to fallback
-			...fallback,
+			{ type: 'error', code: 'server_error', message: 'mid-stream 503', retryable: false },
+			{ type: 'message_stop', stopReason: 'error' },
 		]);
 	});
 
-	test('mid-stream thrown exception triggers failover', async () => {
+	test('mid-stream thrown exception terminates without replay', async () => {
 		const preEvents: AgentEvent[] = [
 			{ type: 'message_start', requestId: 'r', provider: 'p', model: 'm' },
 			{ type: 'text_delta', text: 'some text' },
@@ -372,7 +370,8 @@ describe('FailoverChain.send mid-stream failover', () => {
 		const got = await collect(chain.send(BASE_REQUEST, ABORT));
 		assert.deepStrictEqual(got, [
 			...preEvents,
-			...fallback,
+			{ type: 'error', code: 'connection_reset', message: 'mid-stream connection reset', retryable: false },
+			{ type: 'message_stop', stopReason: 'error' },
 		]);
 	});
 });
@@ -391,7 +390,7 @@ describe('FailoverChain.send all adapters exhausted', () => {
 		assert.strictEqual((got[0] as Extract<AgentEvent, { type: 'error' }>).retryable, false);
 		assert.match(
 			(got[0] as Extract<AgentEvent, { type: 'error' }>).message,
-			/All providers failed/,
+			/connection reset/,
 		);
 		assert.deepStrictEqual(got[1], { type: 'message_stop', stopReason: 'error' });
 	});

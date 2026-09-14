@@ -1,99 +1,45 @@
-# Son of Anton — Code Graph (bundled)
+# Embedded code graph
 
-A self-contained docker compose stack that powers the IDE's code-graph
-features (semantic search, symbol lookup, impact analysis, etc.). Bundled
-inside the IDE repo so users can enable rich-context AI without cloning a
-separate `son-of-anton-graph` repository.
+The supported editor path is an MCP server with a dedicated native worker process. The server remains responsive during native loading, SQLite work and vector construction. The worker stores parsed files, symbols, relationships and optional vectors in a workspace-bound SQLite database. Startup indexes the workspace before advertising structural tools. A serialized watcher reconciles edits, renames and deletes; it invalidates embeddings when content or embedding configuration changes. Shutdown stops the worker, including stalled model downloads; worker failure rejects pending calls and leaves status available. Excess work is rejected once 256 native requests are pending.
 
-## Architecture
+`npm run bootstrap:sota` builds the server and native module for the current platform. The editor loads `extensions/son-of-anton/runtime/codegraph/index.cjs`; it does not require a checkout-relative server in an installed application. The runtime contains `engine-worker.cjs`, a platform/architecture manifest, and its N-API loader and binary. Native assets must be built on the target platform; do not copy a macOS runtime into a Linux or Windows package.
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│ Son of Anton IDE                                                     │
-│                                                                      │
-│  ┌──────────────────────┐     spawn (stdio JSON-RPC)                 │
-│  │ CodeGraphController  │────────────────────────────┐               │
-│  │  (extension)         │                            ▼               │
-│  └──────────────────────┘                   ┌─────────────────────┐  │
-│             │                               │ mcp-server (Node)   │  │
-│             │ docker compose up -d          │ stdio JSON-RPC      │  │
-│             ▼                               └──────────┬──────────┘  │
-│  ┌────────────────────────────────────────────────────┼──────────┐  │
-│  │ services/code-graph/docker-compose.yml             │          │  │
-│  │                                                    │          │  │
-│  │  ┌──────────────┐  ┌──────────┐  ┌──────────────┐  │          │  │
-│  │  │  FalkorDB    │  │  Qdrant  │  │   indexer    │  │          │  │
-│  │  │  :6379       │  │  :6333   │  │  (v1 stub)   │◀─┘          │  │
-│  │  │  (graph DB)  │  │ (vectors)│  │              │             │  │
-│  │  └──────────────┘  └──────────┘  └──────────────┘             │  │
-│  └─────────────────────────────────────────────────────────────────┘
-└──────────────────────────────────────────────────────────────────────┘
+## Capabilities
+
+`codegraph_status` is always available, including failed startup. It reports structural availability, semantic state, last index time and index statistics. Structural tools are exposed only after indexing succeeds:
+
+- `file_summary`, `symbol_lookup`, `find_references`
+- `dependency_traversal`, `impact_analysis`
+- `semantic_search`, only when a usable vector index is ready
+
+With `sota.codeGraph.embedder` set to `none` (the default), structural tools work and semantic search is explicitly disabled. A provider embedder requires an endpoint, model and matching dimensions. It sends source snippets to that provider. Configure the final embedding URL: redirects are rejected so code is not forwarded to a different endpoint. Provider requests are limited to eight concurrent calls and a 30-second deadline including queue wait. Response bodies are bounded by the requested vector count and dimensions, with a 64 MiB ceiling; malformed or oversized responses leave structural tools available. HTTP diagnostics omit URLs and response bodies. The `local` option downloads about 130 MB for BGE-small-en-v1.5 on first use and stores the model beside the graph database. A cached model works offline. Download or embedding failures report degraded semantic capability while structural tools remain usable. Symbol lookup matches literal substrings, including underscores, and ranks exact names first.
+
+Native parsing currently has its own supported-language set in `crates/sota-codegraph-core/src/parse`; unsupported files are not indexed. Git-ignored files and symlinks outside the workspace are excluded. Tree-sitter structure is not a substitute for a compiler's complete type resolution.
+
+## Validate an installed runtime
+
+```sh
+npm run test:sota:offline
 ```
 
-The MCP server is launched by the extension as a stdio child process. It
-connects to FalkorDB (`localhost:6379`) and Qdrant (`localhost:6333`) — both
-exposed by the docker compose stack. The orchestrator's
-`gatherGraphContext` and `BaseAgent.queryFileGraph` / `queryDependencies` /
-etc. helpers route through `McpClient.callTool('code-graph', ...)`.
+The suite copies the runtime away from the checkout, starts the actual MCP child, indexes source fixtures, queries the graph and verifies watcher freshness, workspace isolation, structural-only mode and missing-native diagnostics. Embeddings come from a local deterministic HTTP fixture. Set `SOTA_RUNTIME_SOURCE` to test an extracted application's runtime and `SOTA_EVAL_OUTPUT` to save the retrieval smoke results.
 
-## What you get today (v1)
+After compiling the server and building its native runtime, run the full graph suite, including real-model retrieval and a 2,002-symbol capacity fixture:
 
-- **FalkorDB** and **Qdrant** containers come up cleanly and persist data
-  under `services/code-graph/.data/` (gitignored).
-- **Indexer** is a stub — it logs `Indexer ready (v1 stub — no indexing yet)`
-  and stays alive. Real tree-sitter indexing is a future phase.
-- **MCP server** registers the six expected tools and returns a placeholder
-  response (`(code graph available — index empty; run sota:graph:reindex to
-  populate)`) for every call. The orchestrator already handles the
-  index-empty case gracefully.
-
-## Quick start (manual)
-
-```bash
-# Bring the stack up
-npm run sota:graph:up
-
-# Confirm health
-npm run sota:graph:status
-docker compose -f services/code-graph/docker-compose.yml exec falkordb \
-  redis-cli GRAPH.QUERY son-of-anton "RETURN 1"
-curl -sf http://localhost:6333/readyz
-
-# Tear down (preserves data) or remove volumes with `down -v`
-npm run sota:graph:down
+```sh
+SOTA_TEST_LOCAL_EMBEDDINGS=1 SOTA_TEST_GRAPH_LOAD=1 node --test services/code-graph/mcp-server/test/*.test.mjs
 ```
 
-## IDE integration
+The real-model fixture downloads and removes its own model cache. The capacity fixture uses generated 384-dimensional vectors to measure native throughput independently of model quality. The suite also tests slow native loading, worker exit, queue saturation, and cancellation of a stalled native download. `SOTA_LOCAL_EVAL_OUTPUT` and `SOTA_GRAPH_LOAD_OUTPUT` save measurements as JSON. Native distribution CI runs the offline and capacity checks by default; its manual `test_local_embeddings` input enables model downloads.
 
-Run `Son of Anton: Enable Code Graph` from the command palette. The
-extension will:
+Use `sota doctor --runtime /path/to/runtime/codegraph` to inspect installation compatibility. Runtime presence does not establish live indexing readiness; query `codegraph_status` for that.
 
-1. Verify Docker is on `PATH`.
-2. Run `docker compose up -d` from `services/code-graph/`.
-3. Poll FalkorDB until it answers `GRAPH.QUERY son-of-anton "RETURN 1"`
-   (60s timeout).
-4. Build the MCP server (`npm run build` inside `mcp-server/`) and
-   register it in `sota.mcp.servers` (User scope) so the chat agents
-   can call it on subsequent sessions.
-5. Show a status-bar item `◇ Code Graph: Running` while the stack is up.
+## Optional Docker stack
 
-## Tools exposed by the MCP server
+The root Compose deployment is separate from the embedded lifecycle. Connect its gateway explicitly in `sota.mcp.servers`. Selecting `docker` in the legacy backend setting now explains that setup instead of starting a second controller or probing obsolete ports. The old `services/code-graph/docker-compose.yml` is retained for compatibility; it is not the default editor backend. Root Compose services require `--profile services`.
 
-| Tool | Purpose |
-|---|---|
-| `semantic_search` | Vector-search code by natural-language query (Qdrant). |
-| `file_summary` | Summarise a file's top-level symbols and imports (FalkorDB). |
-| `symbol_lookup` | Find a symbol's definition site and metadata. |
-| `dependency_traversal` | Walk a file's import graph. |
-| `impact_analysis` | Predict files affected by a change. |
-| `find_references` | Find every reference to a named symbol. |
+Database files are derived local caches in the editor's workspace-specific storage. Stop the graph before deleting its cache to force a complete reindex. Normal editor shutdown and `docker compose down` preserve data.
 
-All six are stubs in v1. Each returns a single text content part —
-`(code graph available — index empty; ...)`.
+Provider failure/recovery checks run with `node --test services/code-graph/mcp-server/test/provider-recovery.test.mjs` after compilation and native runtime construction. They use a loopback OpenAI-compatible test endpoint, including oversized content-length/chunked bodies, redirects, concurrency, credential rejection, recovery, and transport-error redaction. These establish protocol behavior rather than validate a live commercial provider.
 
-## Future work
-
-- Real tree-sitter parsing in the indexer (TypeScript, JavaScript, Python).
-- FalkorDB schema for AST nodes / call edges / dependency edges.
-- Embedding model selection + Qdrant collection management.
-- Wiring `sota:graph:reindex` and incremental updates on file save.
+For a longer native run, set `SOTA_TEST_GRAPH_SOAK=1` and run `node --test services/code-graph/mcp-server/test/soak.test.mjs`. It copies 50 application source files into an isolated installation, exercises concurrent queries and repeated edits for five minutes, rejects stale symbols, and bounds native-worker RSS growth after warmup on macOS/Linux. Windows still runs lifecycle checks, but RSS sampling is unavailable in this fixture. Set `SOTA_GRAPH_SOAK_OUTPUT` to retain measurements. Generated vectors measure capacity rather than semantic quality. The distribution workflow exposes the same opt-in `test_graph_soak` input.

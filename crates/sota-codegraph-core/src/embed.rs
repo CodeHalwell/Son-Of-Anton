@@ -20,11 +20,13 @@ pub struct LocalEmbedder {
 }
 
 impl LocalEmbedder {
-    pub fn new() -> Result<Self, CodeGraphError> {
-        let model = fastembed::TextEmbedding::try_new(
-            fastembed::InitOptions::new(fastembed::EmbeddingModel::BGESmallENV15),
-        )
-        .map_err(|e| CodeGraphError::Parse(format!("fastembed init: {e}")))?;
+    pub fn new(cache_dir: Option<std::path::PathBuf>) -> Result<Self, CodeGraphError> {
+        let mut options = fastembed::InitOptions::new(fastembed::EmbeddingModel::BGESmallENV15);
+        if let Some(directory) = cache_dir {
+            options = options.with_cache_dir(directory);
+        }
+        let model = fastembed::TextEmbedding::try_new(options)
+            .map_err(|e| CodeGraphError::Parse(format!("fastembed init: {e}")))?;
         Ok(Self {
             model: Arc::new(parking_lot::Mutex::new(model)),
             dims: 384,
@@ -61,16 +63,22 @@ pub struct ProviderEmbedder {
     model: String,
     api_key: Option<String>,
     dims: usize,
+    requests: Arc<tokio::sync::Semaphore>,
 }
 
 impl ProviderEmbedder {
     pub fn new(endpoint: String, model: String, dims: usize, api_key: Option<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("HTTP client configuration"),
             endpoint,
             model,
             api_key,
             dims,
+            requests: Arc::new(tokio::sync::Semaphore::new(8)),
         }
     }
 }
@@ -88,12 +96,25 @@ struct EmbedResponse {
 
 #[derive(serde::Deserialize)]
 struct EmbedItem {
+    index: Option<usize>,
     embedding: Vec<f32>,
 }
 
-#[async_trait]
-impl Embedder for ProviderEmbedder {
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, CodeGraphError> {
+impl ProviderEmbedder {
+    async fn embed_bounded(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, CodeGraphError> {
+        let _permit = self
+            .requests
+            .acquire()
+            .await
+            .map_err(|_| CodeGraphError::Parse("embedding request queue closed".into()))?;
+        // Accommodate float encodings and normal API metadata without accepting
+        // arbitrary provider bodies. Saturation also bounds untrusted dimensions.
+        let body_limit = texts
+            .len()
+            .saturating_mul(self.dims)
+            .saturating_mul(32)
+            .saturating_add(16 * 1024)
+            .min(64 * 1024 * 1024);
         let mut req = self.client.post(&self.endpoint).json(&EmbedRequest {
             model: &self.model,
             input: texts,
@@ -101,16 +122,77 @@ impl Embedder for ProviderEmbedder {
         if let Some(key) = &self.api_key {
             req = req.bearer_auth(key);
         }
-        let resp = req
+        let mut response = req
             .send()
             .await
-            .map_err(|e| CodeGraphError::Parse(format!("http: {e}")))?
-            .error_for_status()
-            .map_err(|e| CodeGraphError::Parse(format!("http status: {e}")))?
-            .json::<EmbedResponse>()
+            .map_err(|e| CodeGraphError::Parse(format!("embedding http: {}", e.without_url())))?;
+        if !response.status().is_success() {
+            return Err(CodeGraphError::Parse(format!(
+                "embedding provider returned HTTP {}",
+                response.status().as_u16()
+            )));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > body_limit as u64)
+        {
+            return Err(CodeGraphError::Parse(
+                "embedding response exceeds size limit".into(),
+            ));
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .map_err(|e| CodeGraphError::Parse(format!("json: {e}")))?;
-        Ok(resp.data.into_iter().map(|i| i.embedding).collect())
+            .map_err(|e| CodeGraphError::Parse(format!("embedding body: {}", e.without_url())))?
+        {
+            if chunk.len() > body_limit.saturating_sub(body.len()) {
+                return Err(CodeGraphError::Parse(
+                    "embedding response exceeds size limit".into(),
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let resp: EmbedResponse = serde_json::from_slice(&body)
+            .map_err(|e| CodeGraphError::Parse(format!("embedding json: {e}")))?;
+        let mut data = resp.data;
+        if data.iter().any(|item| item.index.is_some()) {
+            data.sort_by_key(|item| item.index);
+            if data
+                .iter()
+                .enumerate()
+                .any(|(i, item)| item.index != Some(i))
+            {
+                return Err(CodeGraphError::Parse(
+                    "invalid embedding response indices".into(),
+                ));
+            }
+        }
+        if data.len() != texts.len()
+            || data.iter().any(|item| {
+                item.embedding.len() != self.dims || item.embedding.iter().any(|v| !v.is_finite())
+            })
+        {
+            return Err(CodeGraphError::Parse(
+                "invalid embedding response shape".into(),
+            ));
+        }
+        Ok(data.into_iter().map(|i| i.embedding).collect())
+    }
+}
+
+#[async_trait]
+impl Embedder for ProviderEmbedder {
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, CodeGraphError> {
+        // Include time spent waiting for a request slot in the same deadline.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.embed_bounded(texts),
+        )
+        .await
+        .map_err(|_| {
+            CodeGraphError::Parse("embedding provider timed out (including queue wait)".into())
+        })?
     }
 
     fn dimensions(&self) -> usize {
@@ -150,10 +232,8 @@ pub struct VectorIndex {
 impl VectorIndex {
     /// Build an HNSW index from `(symbol_id, embedding)` pairs.
     pub fn build(items: Vec<(SymbolId, Vec<f32>)>) -> Self {
-        let (points, values): (Vec<_>, Vec<_>) = items
-            .into_iter()
-            .map(|(id, v)| (EmbVec(v), id.0))
-            .unzip();
+        let (points, values): (Vec<_>, Vec<_>) =
+            items.into_iter().map(|(id, v)| (EmbVec(v), id.0)).unzip();
         let map = Builder::default().build(points, values);
         Self { map }
     }
@@ -243,8 +323,7 @@ mod tests {
             .await;
 
         let url = format!("{}/v1/embeddings", server.uri());
-        let embedder =
-            ProviderEmbedder::new(url, "test-model".into(), 3, Some("sk-test".into()));
+        let embedder = ProviderEmbedder::new(url, "test-model".into(), 3, Some("sk-test".into()));
         let out = embedder
             .embed(&["hello".to_string(), "world".to_string()])
             .await
@@ -254,5 +333,21 @@ mod tests {
         assert_eq!(out[0], vec![0.1, 0.2, 0.3]);
         assert_eq!(out[1], vec![0.4, 0.5, 0.6]);
         assert_eq!(embedder.dimensions(), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn provider_deadline_includes_waiting_for_a_request_slot() {
+        let embedder =
+            ProviderEmbedder::new("http://127.0.0.1:1".into(), "fixture".into(), 3, None);
+        let permits = embedder.requests.acquire_many(8).await.unwrap();
+        let started = tokio::time::Instant::now();
+        let error = embedder
+            .embed(&["queued request".into()])
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("including queue wait"));
+        assert!(started.elapsed() >= std::time::Duration::from_secs(30));
+        drop(permits);
+        assert_eq!(embedder.requests.available_permits(), 8);
     }
 }

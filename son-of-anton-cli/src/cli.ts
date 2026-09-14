@@ -10,7 +10,12 @@ import { authCommand } from './commands/auth';
 import { runChat } from './commands/chat';
 import { configCommand } from './commands/config';
 import { hooksCommand } from './commands/hooks';
+import { runDoctor } from './commands/doctor';
 import { runInit } from './commands/init';
+import { acpDoctorCommand } from './commands/acpDoctor';
+import { acpRegistryCommand } from './commands/acpRegistry';
+import { councilCommand } from './commands/council';
+import { integrationsCommand } from './commands/integrations';
 import { mcpCommand } from './commands/mcp';
 import { runPlan } from './commands/plan';
 import { runResume } from './commands/resume';
@@ -90,6 +95,13 @@ program
 	.action(runInit);
 
 program
+	.command('doctor')
+	.description('Inspect local setup and print repair actions without contacting providers.')
+	.option('--runtime <path>', 'Path to a separately installed code graph runtime')
+	.addOption(outputOption())
+	.action(runDoctor);
+
+program
 	.command('traces')
 	.description('Print prompt-cache and model-routing summaries collected by the harness.')
 	.option('--load <path>', 'Load persisted metrics from a workspace root or .son-of-anton/metrics directory')
@@ -107,12 +119,18 @@ program
 program
 	.command('acp')
 	.description('Run as an Agent Client Protocol (ACP) stdio JSON-RPC server.')
-	.action(async () => {
-		await runAcpServer();
+	.option('--agent <handle>', 'Default specialist (or anton for orchestration)', 'anton')
+	.option('--read-only', 'Only review supplied evidence; do not create tool stacks or memory')
+	.action(async (options: { agent: string }) => {
+		await runAcpServer(options);
 	});
 
 program.addCommand(toolsCommand());
 program.addCommand(mcpCommand());
+program.addCommand(integrationsCommand());
+program.addCommand(councilCommand());
+program.addCommand(acpRegistryCommand());
+program.addCommand(acpDoctorCommand());
 program.addCommand(configCommand());
 program.addCommand(hooksCommand());
 program.addCommand(authCommand());

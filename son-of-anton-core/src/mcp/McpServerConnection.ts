@@ -7,8 +7,17 @@ import {
 	JsonRpcMessage,
 	JsonRpcRequest,
 	JsonRpcResponse,
-	McpStdioTransport,
 } from './McpStdioTransport';
+
+export interface McpTransport {
+	start(): void | Promise<void>;
+	send(message: object): void | Promise<void>;
+	onMessage(handler: (message: JsonRpcMessage) => void): void;
+	onClose(handler: (code: number | null) => void): void;
+	onError(handler: (error: Error) => void): void;
+	dispose(): void;
+	setProtocolVersion?(version: string): void;
+}
 
 const INITIALIZE_TIMEOUT_MS = 10_000;
 const TOOL_CALL_TIMEOUT_MS = 30_000;
@@ -52,7 +61,7 @@ export type McpServerState = 'idle' | 'connecting' | 'ready' | 'error' | 'closed
 interface PendingRequest {
 	resolve: (value: unknown) => void;
 	reject: (err: Error) => void;
-	timer: NodeJS.Timeout;
+	cleanup: () => void;
 }
 
 interface McpToolsListResult {
@@ -71,21 +80,28 @@ interface McpToolCallRawResult {
 
 export interface McpServerConnectionOptions {
 	name: string;
-	transport: McpStdioTransport;
+	transport: McpTransport;
+	onStateChange?: (state: McpServerState, error?: string) => void;
+	onToolsChanged?: () => void;
 }
 
 export class McpServerConnection {
 	readonly name: string;
-	private readonly transport: McpStdioTransport;
+	private readonly transport: McpTransport;
 	private readonly pending = new Map<JsonRpcId, PendingRequest>();
 	private nextId = 1;
 	private currentState: McpServerState = 'idle';
 	private currentError: Error | undefined;
 	private cachedTools: McpToolDescriptor[] | undefined;
 
-	constructor(options: McpServerConnectionOptions) {
+	constructor(private readonly options: McpServerConnectionOptions) {
 		this.name = options.name;
 		this.transport = options.transport;
+	}
+
+	private setState(state: McpServerState): void {
+		this.currentState = state;
+		this.options.onStateChange?.(state, this.currentError?.message);
 	}
 
 	get state(): McpServerState {
@@ -100,22 +116,22 @@ export class McpServerConnection {
 		if (this.currentState === 'ready' || this.currentState === 'connecting') {
 			return;
 		}
-		this.currentState = 'connecting';
+		this.setState('connecting');
 		this.transport.onMessage(msg => this.handleMessage(msg));
 		this.transport.onClose(code => this.handleClose(code));
 		this.transport.onError(err => this.handleError(err));
 
 		try {
-			this.transport.start();
+			await this.transport.start();
 		} catch (err) {
 			const wrapped = err instanceof Error ? err : new Error(String(err));
-			this.currentState = 'error';
 			this.currentError = wrapped;
+			this.setState('error');
 			throw wrapped;
 		}
 
 		try {
-			await this.request(
+			const initialized = await this.request(
 				'initialize',
 				{
 					protocolVersion: PROTOCOL_VERSION,
@@ -124,15 +140,18 @@ export class McpServerConnection {
 				},
 				INITIALIZE_TIMEOUT_MS,
 			);
-			this.transport.send({
+			const protocolVersion = initialized && typeof initialized === 'object' && 'protocolVersion' in initialized ? initialized.protocolVersion : undefined;
+			if (typeof protocolVersion === 'string') { this.transport.setProtocolVersion?.(protocolVersion); }
+			await this.transport.send({
 				jsonrpc: '2.0',
 				method: 'notifications/initialized',
 			});
-			this.currentState = 'ready';
+			if (this.currentState === 'closed') { throw new Error('MCP connection disposed during initialization'); }
+			this.setState('ready');
 		} catch (err) {
 			const wrapped = err instanceof Error ? err : new Error(String(err));
-			this.currentState = 'error';
 			this.currentError = wrapped;
+			if (this.currentState !== 'closed') { this.setState('error'); }
 			this.failPending(wrapped);
 			throw wrapped;
 		}
@@ -164,12 +183,13 @@ export class McpServerConnection {
 		return normalised;
 	}
 
-	async callTool(name: string, args: Record<string, unknown>): Promise<McpToolCallResult> {
+	async callTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<McpToolCallResult> {
 		this.ensureReady();
 		const raw = await this.request(
 			'tools/call',
 			{ name, arguments: args },
 			TOOL_CALL_TIMEOUT_MS,
+			signal,
 		);
 		const result = (raw ?? {}) as McpToolCallRawResult;
 		const parts = Array.isArray(result.content) ? result.content : [];
@@ -198,28 +218,38 @@ export class McpServerConnection {
 		}
 	}
 
-	private request(method: string, params: unknown, timeoutMs: number): Promise<unknown> {
+	private request(method: string, params: unknown, timeoutMs: number, signal?: AbortSignal): Promise<unknown> {
+		if (signal?.aborted) { return Promise.reject(new Error('MCP request cancelled')); }
 		return new Promise<unknown>((resolve, reject) => {
 			const id = this.nextId++;
 			const message: JsonRpcRequest = { jsonrpc: '2.0', id, method, params };
+			const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); };
+			const abort = () => {
+				if (!this.pending.delete(id)) { return; }
+				cleanup();
+				try { void Promise.resolve(this.transport.send({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: id, reason: 'Client cancelled the turn' } })).catch(() => {}); } catch { /* connection closed */ }
+				reject(new Error('MCP request cancelled'));
+			};
 			const timer = setTimeout(() => {
 				this.pending.delete(id);
+				cleanup();
 				reject(new Error(`MCP request '${method}' to '${this.name}' timed out after ${timeoutMs}ms`));
 			}, timeoutMs);
-			this.pending.set(id, { resolve, reject, timer });
-			try {
-				this.transport.send(message);
-			} catch (err) {
-				clearTimeout(timer);
-				this.pending.delete(id);
+			this.pending.set(id, { resolve, reject, cleanup });
+			signal?.addEventListener('abort', abort, { once: true });
+			const sendFailed = (err: unknown) => {
+				if (!this.pending.delete(id)) { return; }
+				cleanup();
 				reject(err instanceof Error ? err : new Error(String(err)));
-			}
+			};
+			try { void Promise.resolve(this.transport.send(message)).catch(sendFailed); } catch (err) { sendFailed(err); }
 		});
 	}
 
 	private handleMessage(msg: JsonRpcMessage): void {
 		const id = (msg as { id?: JsonRpcId }).id;
 		if (id === undefined || id === null) {
+			if ('method' in msg && msg.method === 'notifications/tools/list_changed') { this.cachedTools = undefined; this.options.onToolsChanged?.(); }
 			return;
 		}
 		const pending = this.pending.get(id);
@@ -227,7 +257,7 @@ export class McpServerConnection {
 			return;
 		}
 		this.pending.delete(id);
-		clearTimeout(pending.timer);
+		pending.cleanup();
 		const response = msg as JsonRpcResponse;
 		if (response.error) {
 			pending.reject(new Error(`MCP error from '${this.name}': ${response.error.message}`));
@@ -240,7 +270,7 @@ export class McpServerConnection {
 		if (this.currentState === 'closed') {
 			return;
 		}
-		this.currentState = 'closed';
+		this.setState('closed');
 		const err = new Error(`MCP server '${this.name}' exited with code ${code ?? 'null'}`);
 		this.currentError = err;
 		this.failPending(err);
@@ -249,14 +279,14 @@ export class McpServerConnection {
 	private handleError(err: Error): void {
 		this.currentError = err;
 		if (this.currentState === 'connecting' || this.currentState === 'ready') {
-			this.currentState = 'error';
+			this.setState('error');
 		}
 		this.failPending(err);
 	}
 
 	private failPending(err: Error): void {
 		for (const [, pending] of this.pending) {
-			clearTimeout(pending.timer);
+			pending.cleanup();
 			pending.reject(err);
 		}
 		this.pending.clear();

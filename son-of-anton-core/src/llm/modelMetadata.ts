@@ -188,6 +188,7 @@ export const MODEL_METADATA: Record<ModelId, ModelInfo> = {
 	'fireworks-custom': { contextWindow: 128000, maxOutputTokens: 4096, capabilities: ['text'], inputCostPer1M: 0, outputCostPer1M: 0, blurb: 'Any Fireworks model slug. Configure under sota.fireworksCustomModel.' },
 
 	// --- OpenAI Codex CLI (subscription) ---------------------------
+	'codex-default': { contextWindow: 200000, maxOutputTokens: 32000, capabilities: ['text', 'reasoning'], inputCostPer1M: 0, outputCostPer1M: 0, blurb: 'Use the installed Codex CLI’s default model with your ChatGPT subscription. Text responses; use an ACP adapter for agent tools.' },
 	'codex-gpt-5': { contextWindow: 400000, maxOutputTokens: 128000, capabilities: ['text', 'vision', 'tools', 'reasoning'], inputCostPer1M: 0, outputCostPer1M: 0, blurb: 'GPT-5 via your ChatGPT subscription using the Codex CLI. No API key required.' },
 	'codex-gpt-5-mini': { contextWindow: 400000, maxOutputTokens: 128000, capabilities: ['text', 'vision', 'tools', 'reasoning'], inputCostPer1M: 0, outputCostPer1M: 0, blurb: 'GPT-5 mini via the Codex CLI. Subscription via Codex CLI.' },
 	'codex-gpt-5-codex': { contextWindow: 400000, maxOutputTokens: 128000, capabilities: ['text', 'tools', 'reasoning'], inputCostPer1M: 0, outputCostPer1M: 0, blurb: 'GPT-5 Codex via the Codex CLI. Subscription via Codex CLI.' },

@@ -1,6 +1,6 @@
-use crate::error::{CodeGraphError};
+use crate::error::CodeGraphError;
 use crate::store::GraphStore;
-use crate::types::{FileNode, FileId, SymbolNode, SymbolId, Edge};
+use crate::types::{Edge, FileId, FileNode, SymbolId, SymbolNode};
 use rusqlite::{params, Connection};
 use rusqlite_migration::{Migrations, M};
 
@@ -12,11 +12,13 @@ impl SqliteStore {
     pub fn new(path: &str) -> Result<Self, CodeGraphError> {
         let mut conn = Connection::open(path)?;
 
-        conn.execute_batch("
+        conn.execute_batch(
+            "
             PRAGMA journal_mode = WAL;
             PRAGMA synchronous = NORMAL;
             PRAGMA foreign_keys = ON;
-        ")?;
+        ",
+        )?;
 
         migrations().to_latest(&mut conn)?;
 
@@ -40,9 +42,7 @@ impl SqliteStore {
     }
 
     /// Load every embedding from the store, in symbol-id order.
-    pub fn load_all_embeddings(
-        &self,
-    ) -> Result<Vec<(SymbolId, Vec<f32>)>, CodeGraphError> {
+    pub fn load_all_embeddings(&self) -> Result<Vec<(SymbolId, Vec<f32>)>, CodeGraphError> {
         let mut stmt = self
             .conn
             .prepare("SELECT symbol_id, vector FROM embeddings ORDER BY symbol_id")?;
@@ -182,7 +182,8 @@ fn now_secs() -> i64 {
 
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
-        M::up("
+        M::up(
+            "
             CREATE TABLE files (
                 id INTEGER PRIMARY KEY,
                 path TEXT UNIQUE NOT NULL,
@@ -190,8 +191,10 @@ fn migrations() -> Migrations<'static> {
                 content_hash INTEGER NOT NULL,
                 indexed_at INTEGER NOT NULL
             );
-        "),
-        M::up("
+        ",
+        ),
+        M::up(
+            "
             CREATE TABLE symbols (
                 id INTEGER PRIMARY KEY,
                 file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
@@ -202,8 +205,10 @@ fn migrations() -> Migrations<'static> {
                 docstring TEXT,
                 UNIQUE(file_id, name, kind, start_byte)
             );
-        "),
-        M::up("
+        ",
+        ),
+        M::up(
+            "
             CREATE TABLE edges (
                 from_node INTEGER NOT NULL,
                 to_node INTEGER NOT NULL,
@@ -212,14 +217,31 @@ fn migrations() -> Migrations<'static> {
             );
             CREATE INDEX idx_edges_from ON edges(from_node);
             CREATE INDEX idx_edges_to ON edges(to_node);
-        "),
-        M::up("
+        ",
+        ),
+        M::up(
+            "
             CREATE TABLE embeddings (
                 symbol_id INTEGER PRIMARY KEY REFERENCES symbols(id) ON DELETE CASCADE,
                 dims INTEGER NOT NULL,
                 vector BLOB NOT NULL
             );
-        "),
+        ",
+        ),
+        M::up(
+            "
+            CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE raw_edges (
+                file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                target_name TEXT NOT NULL, kind TEXT NOT NULL,
+                PRIMARY KEY(file_id,target_name,kind)
+            );
+            CREATE INDEX idx_symbols_name ON symbols(name);
+            -- Derived data is rebuilt once to populate unresolved references.
+            DELETE FROM edges;
+            DELETE FROM files;
+        ",
+        ),
     ])
 }
 
@@ -332,7 +354,15 @@ mod tests {
             .query_row(
                 "SELECT name, kind, start_byte, end_byte, docstring FROM symbols WHERE id = ?1",
                 params![sid.0],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(name, "do_thing");
@@ -377,11 +407,9 @@ mod tests {
 
         let (from, to, kind): (i64, i64, String) = store
             .conn
-            .query_row(
-                "SELECT from_node, to_node, kind FROM edges",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
+            .query_row("SELECT from_node, to_node, kind FROM edges", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
             .unwrap();
         assert_eq!(from, 1);
         assert_eq!(to, 2);

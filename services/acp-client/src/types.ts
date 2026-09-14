@@ -25,7 +25,7 @@ export interface AgentDescriptor {
 	costTier: CostTier;
 }
 
-export type TransportType = 'stdio' | 'http';
+export type TransportType = 'stdio';
 export type CostTier = 'free' | 'subscription' | 'pay-per-use' | 'local';
 
 /** Capabilities an agent can declare. */
@@ -62,7 +62,10 @@ export interface AgentToolDescriptor {
 // ---------------------------------------------------------------------------
 
 export interface SessionConfig {
-	task: string;
+	task?: string;
+	cwd?: string;
+	mcpServers?: import('../_shared/acp/dist/protocol').AcpMcpServer[];
+	requestPermissions?: boolean;
 	context?: SessionContext;
 	tools?: string[];
 	maxTokens?: number;
@@ -91,6 +94,7 @@ export interface Session {
 }
 
 export type SessionStatus =
+	| 'idle'
 	| 'initialising'
 	| 'running'
 	| 'paused'
@@ -111,6 +115,7 @@ export interface SessionEvent {
 }
 
 export type SessionEventType =
+	| 'permission'
 	| 'message'
 	| 'file_edit'
 	| 'terminal_command'
@@ -184,6 +189,7 @@ export interface AgentRegistryConfig {
 }
 
 export interface AgentRegistryEntry {
+	authMethodId?: string;
 	id: string;
 	name: string;
 	transport: TransportType;
@@ -208,7 +214,7 @@ export interface ACPClient {
 
 	// Session management
 	createSession(agentId: string, config: SessionConfig): Promise<Session>;
-	sendMessage(sessionId: string, message: string, context?: SessionContext): Promise<void>;
+	sendMessage(sessionId: string, message: string, context?: SessionContext, signal?: AbortSignal): Promise<void>;
 	pauseSession(sessionId: string): Promise<void>;
 	resumeSession(sessionId: string): Promise<void>;
 	terminateSession(sessionId: string): Promise<void>;

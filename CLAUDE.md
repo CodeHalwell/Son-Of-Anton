@@ -80,7 +80,7 @@ Services live in `services/<service-name>/`, each with its own `Dockerfile`, `pa
 | `model-router` | 3200 | Routes LLM requests to the appropriate model |
 | `checkpoints` | 3201 | Workspace checkpoint and rollback service |
 | `walkthrough` | 3202 | Guided walkthrough generation |
-| `acp-client` | 3300 | Agent Communication Protocol client |
+| `acp-client` | 3300 | Agent Client Protocol client |
 | `build-dag` | 3301 | Build dependency graph analysis |
 | `context-sanitiser` | 3302 | Strips secrets and sensitive data from LLM context |
 | `spec-pipeline` | 8090 | Specification-driven development pipeline |

@@ -4,9 +4,39 @@
  *--------------------------------------------------------------------------------------------*/
 
 		const vscode = acquireVsCodeApi();
+		const uiStrings = JSON.parse(document.getElementById('chatUiStrings').textContent);
+		function uiText(key, ...args) {
+			return (uiStrings[key] || key).replace(/\{(\d+)\}/g, (_, index) => String(args[Number(index)] ?? ''));
+		}
+		for (const element of document.querySelectorAll('[data-ui-text]')) element.textContent = uiText(element.dataset.uiText);
+		for (const element of document.querySelectorAll('[data-ui-label]')) element.setAttribute('aria-label', uiText(element.dataset.uiLabel));
+		for (const element of document.querySelectorAll('[data-ui-placeholder]')) element.setAttribute('placeholder', uiText(element.dataset.uiPlaceholder));
+
 		const messageList = document.getElementById('messageList');
 		const emptyState = document.getElementById('emptyState');
 		const messageInput = document.getElementById('messageInput');
+		const jumpToLatest = document.getElementById('jumpToLatest');
+		let followingLatest = true;
+		let scrollFrame = null;
+		let streamingFrame = null;
+		const pendingText = new Map();
+		const streamingSources = new WeakMap();
+		messageList.addEventListener('scroll', () => {
+			// Hidden panes have zero geometry; retain the user's reading position.
+			if (!messageList.clientHeight) return;
+			followingLatest = messageList.scrollHeight - messageList.scrollTop - messageList.clientHeight < 48;
+			if (jumpToLatest) jumpToLatest.hidden = followingLatest;
+		}, { passive: true });
+		if (jumpToLatest) jumpToLatest.addEventListener('click', () => scrollToBottom(true));
+		const providerSearch = document.getElementById('providerSearch');
+		if (providerSearch) providerSearch.addEventListener('input', () => {
+			const query = providerSearch.value.trim().toLocaleLowerCase();
+			const cards = Array.from(document.querySelectorAll('#emptyStateProviders .provider-card'));
+			for (const card of cards) card.hidden = !card.textContent.toLocaleLowerCase().includes(query);
+			const empty = document.getElementById('providerSearchEmpty');
+			if (empty) empty.hidden = cards.some(card => !card.hidden);
+		});
+
 		const sendBtn = document.getElementById('sendBtn');
 		const newChatBtn = document.getElementById('newChatBtn');
 		const tokenCount = document.getElementById('tokenCount');
@@ -20,6 +50,9 @@
 		const sessionUsageTurns = document.getElementById('sessionUsageTurns');
 		const attachBtn = document.getElementById('attachBtn');
 		const attachMenu = document.getElementById('attachMenu');
+		document.getElementById('browseAcpAdapters')?.addEventListener('click', () => vscode.postMessage({ type: 'browseAcpAdapters' }));
+		document.getElementById('councilBtn')?.addEventListener('click', () => vscode.postMessage({ type: 'reviewWithCouncil' }));
+		document.getElementById('councilHistoryBtn')?.addEventListener('click', () => vscode.postMessage({ type: 'councilHistory' }));
 		const modelChip = document.getElementById('modelChip');
 		const modelMenu = document.getElementById('modelMenu');
 		const modelLabel = document.getElementById('modelLabel');
@@ -212,6 +245,7 @@
 			'fireworks-qwen-2-5-coder': 'Qwen 2.5 Coder (Fireworks)',
 			'fireworks-custom': 'Fireworks (custom)',
 			// OpenAI Codex CLI (subscription).
+			'codex-default': 'Codex CLI Default',
 			'codex-gpt-5': 'GPT-5 via Codex CLI',
 			'codex-gpt-5-mini': 'GPT-5 mini via Codex CLI',
 			'codex-gpt-5-codex': 'GPT-5 Codex via Codex CLI',
@@ -353,6 +387,11 @@
 		// can find the user bubble by `data-conversation-index === turnIndex`.
 		// Reset on `loadConversation` / `conversationCleared`.
 		let nextConversationIndex = 0;
+		let renderingHistory = false;
+		let conversationHasUnmeteredUsage = false;
+		let earlierHistory = [];
+		let historySpecialist = 'anton';
+		let historyButton = null;
 		// Pending checkpoints keyed by turnIndex → array of entries. Populated
 		// by `checkpointCaptured`/`checkpointsLoaded` messages; consumed by
 		// `insertCheckpointStripe` once the user bubble lands in the DOM. The
@@ -412,14 +451,9 @@
 		// missing) joined with `from->to`. Reset on conversation load/clear
 		// and on every fresh `agentPlan`.
 		const renderedHandoffPairs = new Set();
-		// Cache the most recent user message text so the assistant's
-		// "Regenerate" inline action can re-emit it without round-tripping
-		// to the host. Cleared on `clearConversation`.
+		// Keep the visible prompt separate from its reusable composer references.
 		let lastUserPrompt = '';
-		// Mirror used by Up-Arrow recall when the textarea is empty. Distinct
-		// from `lastUserPrompt` because regenerate consumes the persisted
-		// content (which may be a mention summary), whereas recall wants the
-		// exact text the user typed last time.
+		let lastPromptDraft = null;
 		let lastSentUserText = '';
 
 		// --- Phase 87: command history recall -----------------------------
@@ -445,6 +479,123 @@
 		let historyIndex = -1;
 		// Saved draft so Down-arrow can restore the user's pre-recall input.
 		let historyDraft = '';
+
+		// Store text and references per conversation. Image bytes remain in memory;
+		// copying them into every persisted keystroke would bloat webview state.
+		let activeConversationId = null;
+		const drafts = new Map();
+		const savedDrafts = vscode.getState()?.conversationDrafts;
+		if (Array.isArray(savedDrafts)) {
+			for (const [id, draft] of savedDrafts.slice(-20).filter(entry => Array.isArray(entry) && entry.length === 2)) {
+				if (typeof id === 'string' && draft && typeof draft.text === 'string') drafts.set(id, draft);
+			}
+		}
+		const draftStatus = document.getElementById('draftStatus');
+		const contextDetails = document.getElementById('workspaceContextDetails');
+		const includeContext = document.getElementById('includeWorkspaceContext');
+		const contextPreview = document.getElementById('workspaceContextPreview');
+		const contextSummary = document.getElementById('workspaceContextSummary');
+		const refreshContext = document.getElementById('refreshContext');
+		const promptRestoreNotice = document.getElementById('promptRestoreNotice');
+		let previousPromptDraft = null;
+		function captureComposerDraft() {
+			return { text: messageInput.value, attachments: [...attachments], mentions: mentions.map(mention => ({ ...mention })), images: [...imageAttachments], model: currentModel, agent: currentAgent, mode: currentMode, includeContext: includeContext.checked };
+		}
+		function clearPromptRestore() { previousPromptDraft = null; promptRestoreNotice.hidden = true; }
+		function applyPromptDraft(draft) {
+			messageInput.value = draft.text || '';
+			attachments = [...(draft.attachments || [])];
+			mentions = (draft.mentions || []).map(mention => ({ ...mention }));
+			imageAttachments = [...(draft.images || [])];
+			includeContext.checked = draft.includeContext !== false;
+			if (Object.hasOwn(MODEL_METADATA_RAW, draft.model)) currentModel = draft.model;
+			if (SPECIALISTS.some(specialist => specialist.id === draft.agent)) currentAgent = draft.agent;
+			if (draft.mode === 'plan' || draft.mode === 'act') currentMode = draft.mode;
+			updateModelLabel(); updateModelMenuChecks(); updateAgentLabel(); updateAgentMenuChecks(); updateHeaderSubtitle(); updateModeUi();
+			historyIndex = -1; historyDraft = '';
+			closeSlashPopup(); closeMentionPopup(); closeMenus();
+			renderContextChips(); updateContextPreview();
+			messageInput.style.height = 'auto';
+			messageInput.style.height = Math.min(Math.max(messageInput.scrollHeight, 64), 240) + 'px';
+			vscode.postMessage({ type: 'selectModel', conversationId: activeConversationId, model: currentModel });
+			vscode.postMessage({ type: 'selectSpecialist', conversationId: activeConversationId, specialistId: currentAgent });
+			vscode.postMessage({ type: 'modeChange', conversationId: activeConversationId, chatMode: currentMode });
+			selectTab('chat'); messageInput.focus();
+		}
+		function reusePrompt(draft, conversationId) {
+			if (!draft || isStreaming || conversationId !== activeConversationId) return;
+			previousPromptDraft = captureComposerDraft();
+			applyPromptDraft(draft);
+			promptRestoreNotice.hidden = false;
+		}
+		document.getElementById('undoPromptRestore').addEventListener('click', () => {
+			const previous = previousPromptDraft;
+			clearPromptRestore();
+			if (previous) applyPromptDraft(previous);
+		});
+		function promptDraftFromHistory(msg) {
+			const request = msg.request;
+			const parts = Array.isArray(msg.content) ? msg.content : [{ type: 'text', text: msg.content }];
+			const kinded = Array.isArray(request?.mentionsKinded) ? request.mentionsKinded : (request?.mentions || []).map(path => ({ kind: path === '[workspace]' ? 'workspace' : 'file', path }));
+			const restoredMentions = kinded.filter(mention => mention && typeof mention.kind === 'string').map(mention => ({ ...mention, label: mention.kind === 'url' ? '@url ' + mention.url : mention.path || '@' + mention.kind }));
+			return {
+				text: typeof request?.text === 'string' ? request.text : parts.filter(part => part.type === 'text').map(part => part.text).join('\n'),
+				attachments: Array.isArray(request?.attachments) ? request.attachments.filter(id => Object.hasOwn(ATTACH_LABELS, id)) : [],
+				mentions: restoredMentions,
+				images: parts.filter(part => part.type === 'image').map((part, index) => ({ id: 'reused-' + index, mime: part.mimeType, base64: part.base64Data, name: part.name })),
+				model: msg.model, agent: msg.specialistId || 'anton', mode: request?.chatMode || 'act', includeContext: request?.includeWorkspaceContext !== false,
+			};
+		}
+		function persistDraft() {
+			if (!activeConversationId) return;
+			const draft = captureComposerDraft();
+			drafts.delete(activeConversationId);
+			drafts.set(activeConversationId, draft);
+			while (drafts.size > 20) drafts.delete(drafts.keys().next().value);
+			const serialized = Array.from(drafts, ([id, value]) => [id, { ...value, images: undefined }]);
+			vscode.setState({ ...vscode.getState(), conversationDrafts: serialized });
+			draftStatus.hidden = !draft.text && !draft.attachments.length && !draft.mentions.length && !draft.images.length;
+			draftStatus.textContent = uiText(draft.images.length ? 'draftImages' : 'draftSaved');
+		}
+		function activateDraft(id, savedModel) {
+			if (typeof id !== 'string' || !id) return;
+			if (id === activeConversationId) {
+				if (typeof savedModel === 'string' && Object.hasOwn(MODEL_METADATA_RAW, savedModel)) currentModel = savedModel;
+				updateModelLabel();
+				updateModelMenuChecks();
+				return;
+			}
+			persistDraft();
+			clearPromptRestore();
+			activeConversationId = id;
+			const draft = drafts.get(id);
+			messageInput.value = draft?.text || '';
+			attachments = Array.isArray(draft?.attachments) ? [...draft.attachments] : [];
+			mentions = Array.isArray(draft?.mentions) ? [...draft.mentions] : [];
+			imageAttachments = Array.isArray(draft?.images) ? [...draft.images] : [];
+			includeContext.checked = draft?.includeContext !== false;
+			currentModel = [savedModel, draft?.model, document.body.dataset.defaultModel, 'sonnet'].find(model => typeof model === 'string' && Object.hasOwn(MODEL_METADATA_RAW, model));
+			historyIndex = -1;
+			historyDraft = '';
+			messageInput.style.height = 'auto';
+			messageInput.style.height = Math.min(Math.max(messageInput.scrollHeight, 64), 240) + 'px';
+			updateModelLabel();
+			updateModelMenuChecks();
+			renderContextChips();
+			updateSendAffordance();
+			updateContextPreview();
+		}
+		function updateContextPreview() {
+			contextSummary.textContent = uiText(includeContext.checked ? 'on' : 'off');
+			refreshContext.disabled = !includeContext.checked;
+			contextPreview.textContent = uiText(includeContext.checked ? 'contextLoading' : 'contextOff');
+			if (contextDetails.open && includeContext.checked) vscode.postMessage({ type: 'previewWorkspaceContext' });
+		}
+		contextDetails.addEventListener('toggle', updateContextPreview);
+		includeContext.addEventListener('change', () => { persistDraft(); updateContextPreview(); });
+		refreshContext.addEventListener('click', updateContextPreview);
+		window.addEventListener('pagehide', persistDraft);
+
 
 		function persistCommandHistory() {
 			try {
@@ -531,8 +682,14 @@
 		// Keeps the visible pane in sync with `currentTab`. The composer is
 		// only painted on the Chat tab — every other tab fills the available
 		// vertical space.
+		let settingsVisible = false;
 		function applyActiveTab(tab) {
 			const next = VALID_TABS.indexOf(tab) >= 0 ? tab : 'chat';
+			if (next === 'settings' && !settingsVisible) {
+				vscode.postMessage({ type: 'requestSettings' });
+				vscode.postMessage({ type: 'requestMcpServers' });
+			}
+			settingsVisible = next === 'settings';
 			currentTab = next;
 			for (const pane of chatPanes) {
 				if (!pane) continue;
@@ -554,7 +711,7 @@
 				// Chat tab feels natural even after a long stream finished
 				// while the user was on a different tab.
 				if (messageList) {
-					messageList.scrollTop = messageList.scrollHeight;
+					scrollToBottom();
 				}
 			}
 		}
@@ -579,6 +736,16 @@
 				const tab = target.getAttribute('data-tab');
 				if (!tab) return;
 				selectTab(tab);
+			});
+			chatTabsBar.addEventListener('keydown', (ev) => {
+				if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(ev.key)) return;
+				const tabs = Array.from(chatTabsBar.querySelectorAll('.chat-tab'));
+				const index = tabs.indexOf(document.activeElement);
+				if (index < 0) return;
+				ev.preventDefault();
+				const nextIndex = ev.key === 'Home' ? 0 : ev.key === 'End' ? tabs.length - 1 : (index + (ev.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+				selectTab(tabs[nextIndex].dataset.tab);
+				tabs[nextIndex].focus();
 			});
 		}
 
@@ -739,11 +906,48 @@
 			}
 		}
 
+		const historySearch = document.getElementById('historySearch');
+		const historyShowMore = document.getElementById('historyShowMore');
+		let historyLimit = 50;
+		const historySaved = vscode.getState()?.historyFilters;
+		let historyScope = historySaved?.scope === 'workspace' ? 'workspace' : 'all';
+		historySearch.value = typeof historySaved?.query === 'string' ? historySaved.query : '';
+		const historyClearFilters = document.getElementById('historyClearFilters');
+		function updateHistoryFilters() {
+			historyLimit = 50;
+			vscode.setState({ ...vscode.getState(), historyFilters: { query: historySearch.value, scope: historyScope } });
+			renderHistoryPane(lastHistorySnapshot);
+		}
+		historySearch.addEventListener('input', updateHistoryFilters);
+		document.querySelectorAll('[data-history-scope]').forEach(button => button.addEventListener('click', () => { historyScope = button.dataset.historyScope; updateHistoryFilters(); }));
+		historyClearFilters.addEventListener('click', () => { historyScope = 'all'; historySearch.value = ''; updateHistoryFilters(); historySearch.focus(); });
+		historyShowMore.addEventListener('click', () => { historyLimit += 50; renderHistoryPane(lastHistorySnapshot); });
+		function historyGroup(timestamp) {
+			const date = new Date();
+			date.setHours(0, 0, 0, 0);
+			if (timestamp >= date.getTime()) return 'today';
+			date.setDate(date.getDate() - 1);
+			if (timestamp >= date.getTime()) return 'yesterday';
+			date.setDate(date.getDate() - 6);
+			return timestamp >= date.getTime() ? 'pastWeek' : 'earlier';
+		}
 		function renderHistoryPane(snapshot) {
 			lastHistorySnapshot = snapshot || null;
 			if (!historyPaneList || !historyPaneEmpty) return;
 			const conversations = snapshot && Array.isArray(snapshot.conversations) ? snapshot.conversations : [];
 			const activeId = snapshot && typeof snapshot.activeId === 'string' ? snapshot.activeId : '';
+			const active = conversations.find(conversation => conversation.id === activeId);
+			const heading = document.getElementById('conversationTitle');
+			heading.textContent = active?.title || uiText('newConversation');
+			heading.title = heading.textContent;
+			const query = historySearch.value.trim().toLocaleLowerCase();
+			document.querySelectorAll('[data-history-scope]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.historyScope === historyScope)));
+			historyClearFilters.hidden = !query && historyScope === 'all';
+			const matches = conversations.filter(conversation => (historyScope === 'all' || conversation.inCurrentWorkspace || conversation.id === activeId) && [conversation.title, conversation.lastSpecialist, conversation.workspaceName].filter(Boolean).join(' ').toLocaleLowerCase().includes(query)).sort((a, b) => b.updatedAt - a.updatedAt);
+			document.getElementById('historyResults').textContent = uiText(matches.length === 1 ? 'conversationResult' : 'conversationResults', matches.length.toLocaleString());
+			document.getElementById('historyNoResults').hidden = !conversations.length || matches.length > 0;
+			historyShowMore.hidden = matches.length <= historyLimit;
+			const focused = historyPaneList.contains(document.activeElement) ? { id: document.activeElement.dataset.conversationId, action: document.activeElement.dataset.action } : null;
 			historyPaneList.textContent = '';
 			if (conversations.length === 0) {
 				historyPaneEmpty.hidden = false;
@@ -753,7 +957,17 @@
 			historyPaneEmpty.hidden = true;
 			historyPaneList.hidden = false;
 
-			for (const conv of conversations) {
+			let group;
+			for (const conv of matches.slice(0, historyLimit)) {
+				const nextGroup = historyGroup(conv.updatedAt);
+				if (nextGroup !== group) {
+					group = nextGroup;
+					const title = document.createElement('h3');
+					title.className = 'history-group-title';
+					title.textContent = uiText(group);
+					historyPaneList.appendChild(title);
+				}
+
 				if (!conv || typeof conv.id !== 'string') continue;
 				const row = document.createElement('div');
 				row.className = 'history-pane-row';
@@ -764,6 +978,7 @@
 				body.type = 'button';
 				body.className = 'history-pane-row-open';
 				body.setAttribute('data-action', 'open');
+				if (conv.id === activeId) body.setAttribute('aria-current', 'true');
 				body.setAttribute('data-conversation-id', conv.id);
 				const titleEl = document.createElement('div');
 				titleEl.className = 'history-pane-row-title';
@@ -774,7 +989,7 @@
 				metaEl.className = 'history-pane-row-meta';
 				const count = Number(conv.messageCount || 0);
 				const messageWord = count === 1 ? 'message' : 'messages';
-				metaEl.textContent = formatRelativeTime(conv.updatedAt) + ' · ' + count + ' ' + messageWord;
+				metaEl.textContent = [conv.workspaceName || uiText('historyWorkspaceUnknown'), formatRelativeTime(conv.updatedAt), count + ' ' + messageWord].join(' · ');
 				body.appendChild(metaEl);
 				row.appendChild(body);
 
@@ -802,11 +1017,15 @@
 
 				historyPaneList.appendChild(row);
 			}
+			if (focused) {
+				const target = Array.from(historyPaneList.querySelectorAll('button')).find(button => button.dataset.conversationId === focused.id && button.dataset.action === focused.action);
+				(target || historySearch).focus({ preventScroll: true });
+			}
 		}
 
 		if (historyNewBtn) {
 			historyNewBtn.addEventListener('click', () => {
-				vscode.postMessage({ type: 'runCommand', command: 'sota.newConversation' });
+				vscode.postMessage({ type: 'clearConversation' });
 			});
 		}
 		if (historyPaneList) {
@@ -900,6 +1119,7 @@
 				if (!target) return;
 				const id = target.getAttribute('data-specialist-id') || 'anton';
 				currentAgent = id;
+				vscode.postMessage({ type: 'selectSpecialist', conversationId: activeConversationId, specialistId: currentAgent });
 				updateAgentLabel();
 				updateAgentMenuChecks();
 				updateHeaderSubtitle();
@@ -1007,6 +1227,51 @@
 			});
 		}
 
+		/** Render table blocks after escaping text, before applying inline Markdown. */
+		function renderMarkdownTables(text) {
+			const cells = line => {
+				const value = line.trim().replace(/^\|/, '').replace(/(?<!\\)\|$/, '');
+				const result = []; let current = ''; let inCode = false;
+				for (let i = 0; i < value.length; i++) {
+					const char = value[i];
+					if (char === '\\' && value[i + 1] === '|') { current += '|'; i++; continue; }
+					if (char === '`') { inCode = !inCode; }
+					if (char === '|' && !inCode) { result.push(current.trim()); current = ''; }
+					else { current += char; }
+				}
+				result.push(current.trim()); return result;
+			};
+			const lines = text.split('\n'); const output = [];
+			for (let i = 0; i < lines.length; i++) {
+				if (!lines[i].includes('|') || i + 1 >= lines.length) { output.push(lines[i]); continue; }
+				const headings = cells(lines[i]); const dividers = cells(lines[i + 1]);
+				if (headings.length !== dividers.length || !dividers.every(cell => /^:?-{3,}:?$/.test(cell))) { output.push(lines[i]); continue; }
+				const alignments = dividers.map(cell => cell.endsWith(':') ? (cell.startsWith(':') ? 'center' : 'right') : 'left');
+				const row = (values, tag) => '<tr>' + values.map((value, index) => '<' + tag + (tag === 'th' ? ' scope="col"' : '') + ' class="align-' + alignments[index] + '">' + value + '</' + tag + '>').join('') + '</tr>';
+				let table = '<div class="markdown-table" role="region" aria-label="' + escapeHtml(uiText('responseTable')) + '" tabindex="0"><table><thead>' + row(headings, 'th') + '</thead><tbody>';
+				i++;
+				while (i + 1 < lines.length && lines[i + 1].includes('|')) {
+					const values = cells(lines[i + 1]);
+					if (values.length !== headings.length) { break; }
+					table += row(values, 'td'); i++;
+				}
+				output.push(table + '</tbody></table></div>');
+			}
+			return output.join('\n');
+		}
+
+		/** Hide protocol fragments and render an unfinished code fence as code while streaming. */
+		function renderStreamingMarkdown(raw) {
+			const marker = '<<sota:suggestions>>';
+			const start = raw.indexOf(marker);
+			let visible = start >= 0 ? raw.slice(0, start) : raw;
+			for (let size = Math.min(marker.length - 1, visible.length); size > 0; size--) {
+				if (visible.endsWith(marker.slice(0, size))) { visible = visible.slice(0, -size); break; }
+			}
+			if ((visible.match(/^```/gm) || []).length % 2) { visible += '\n```'; }
+			return renderMarkdown(visible);
+		}
+
 		/**
 		 * Convert a small subset of Markdown to safe HTML. All input is
 		 * escaped before tag insertion; only the markdown shapes we recognise
@@ -1092,7 +1357,7 @@
 			});
 
 			// 2. Escape everything else.
-			let html = escapeHtml(sansCode);
+			let html = renderMarkdownTables(escapeHtml(sansCode));
 
 			// 3. Block-level (anchored to line start).
 			html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
@@ -1114,7 +1379,10 @@
 
 			// 6. Remaining newlines become hard breaks, but not directly after a closing block tag.
 			html = html.replace(/\n/g, '<br>');
-			html = html.replace(/(<\/(h1|h2|h3|blockquote|ul|li)>)<br>/g, '$1');
+			html = html.replace(/(<\/(h1|h2|h3|blockquote|ul|li|div)>)(?:<br>)+/g, '$1');
+			// Fenced blocks provide their own spacing. Blank source lines must
+			// not add empty text rows above and below them in narrow sidebars.
+			html = html.replace(/(?:<br>)*(@@CB\d+@@)(?:<br>)*/g, '$1');
 
 			// 7. Restore code blocks (escaping their bodies).
 			html = html.replace(/@@CB(\d+)@@/g, (_, idxStr) => {
@@ -1133,7 +1401,7 @@
 				const escapedCode = escapeHtml(block.code.replace(/\n+$/, ''));
 				const detectedPath = detectPathHint(block.code);
 				const saveBtn = detectedPath
-					? '<button class="code-save" data-path="' + escapeHtml(detectedPath) + '" onclick="saveCodeToFile(this)" title="Save to ' + escapeHtml(detectedPath) + '">Save</button>'
+					? '<button class="code-save" data-path="' + escapeHtml(detectedPath) + '" title="Save to ' + escapeHtml(detectedPath) + '">Save</button>'
 					: '';
 				// If this is a diff/patch fence with a recognisable target path,
 				// emit a Preview button that ships the full diff payload as
@@ -1145,7 +1413,7 @@
 				if (isDiff && diffPath) {
 					try {
 						const encodedDiff = btoa(unescape(encodeURIComponent(block.code)));
-						diffBtn = '<button class="code-diff" data-diff="' + escapeHtml(encodedDiff) + '" onclick="previewDiff(this)" title="Preview as diff">Preview</button>';
+						diffBtn = '<button class="code-diff" data-diff="' + escapeHtml(encodedDiff) + '" title="Preview as diff">Preview</button>';
 					} catch (e) {
 						diffBtn = '';
 					}
@@ -1156,8 +1424,8 @@
 						'<div class="code-actions">' +
 							diffBtn +
 							saveBtn +
-							'<button class="code-open" onclick="openCodeInEditor(this)" title="Open in new editor tab">Open</button>' +
-							'<button class="code-copy" onclick="copyCode(this)">Copy</button>' +
+							'<button class="code-open" title="Open in new editor tab">Open</button>' +
+							'<button class="code-copy">Copy</button>' +
 						'</div>' +
 					'</div>' +
 					'<pre><code class="language-' + escapeHtml(lang) + '">' + escapedCode + '</code></pre>' +
@@ -1629,13 +1897,13 @@
 			const collapsed =
 				'<pre class="terminal-block-body terminal-collapsed">' +
 					headHtml +
-					'\n<button type="button" class="terminal-show-more" onclick="toggleTerminalExpand(this)">Show ' + hidden + ' more lines</button>\n' +
+					'\n<button type="button" class="terminal-show-more">Show ' + hidden + ' more lines</button>\n' +
 					tailHtml +
 				'</pre>';
 			const expanded =
 				'<pre class="terminal-block-body terminal-expanded" hidden>' +
 					fullHtml +
-					'<button type="button" class="terminal-show-more" onclick="toggleTerminalExpand(this)">Show less</button>' +
+					'<button type="button" class="terminal-show-more">Show less</button>' +
 				'</pre>';
 			return collapsed + expanded;
 		}
@@ -1643,9 +1911,8 @@
 		/**
 		 * Toggle the collapsed/expanded variants of a terminal block. The
 		 * two `<pre>` siblings carry the same content; we just flip
-		 * which one is hidden so the click is essentially free. Exposed on
-		 * `window` so inline `onclick` handlers in the rendered HTML can
-		 * reach it (matches the pattern used by copyCode / saveCodeToFile).
+		 * which one is hidden so the click is essentially free. The transcript's
+		 * delegated listener works for both streamed and restored controls.
 		 */
 		window.toggleTerminalExpand = function (btn) {
 			const block = btn.closest('.terminal-block');
@@ -1758,17 +2025,18 @@
 		}
 
 		/**
-		 * Build the inline action toolbar (copy / regenerate / feedback)
-		 * for a finalised assistant message. The toolbar is positioned
-		 * absolutely inside the body and fades in on hover. Wired to
+		 * Build the inline action toolbar (copy / reuse prompt / feedback)
+		 * for a finalised assistant message. The toolbar sits below the response. Wired to
 		 * `postMessage`-driven handlers; feedback events are visual-only
 		 * pending host-side wiring in a future phase.
 		 *
-		 * `source` is the raw markdown text we want copy/regenerate to
+		 * `source` is the raw markdown text we want copy/reuse to
 		 * reference; passed in rather than scraped from the DOM so the
 		 * exact authored content survives the markdown round-trip.
 		 */
-		function buildAssistantActions(source, isLatest) {
+		function buildAssistantActions(source) {
+			const prompt = lastPromptDraft;
+			const conversationId = activeConversationId;
 			const bar = document.createElement('div');
 			bar.className = 'msg-actions';
 			bar.setAttribute('role', 'toolbar');
@@ -1789,33 +2057,16 @@
 			});
 			bar.appendChild(copy);
 
-			// Regenerate — only meaningful on the most recent assistant turn.
-			const regen = document.createElement('button');
-			regen.type = 'button';
-			regen.className = 'msg-action msg-action-regen';
-			regen.title = 'Regenerate response';
-			regen.setAttribute('aria-label', 'Regenerate response');
-			regen.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13 8a5 5 0 1 1-1.46-3.54"/><path d="M13 3v3h-3"/></svg>';
-			if (!isLatest) {
-				regen.hidden = true;
-			}
-			regen.addEventListener('click', () => {
-				if (isStreaming || !lastUserPrompt) return;
-				// Re-emit the last user prompt as a fresh send. We don't
-				// rebuild a user bubble — the previous one stays visible —
-				// so the replay matches the typical "regenerate" UX.
-				setStreamingState(true);
-				startStreamingMessage(getCurrentAgentDisplayName(), currentAgent);
-				vscode.postMessage({
-					type: 'sendMessage',
-					text: lastUserPrompt,
-					model: currentModel,
-					attachments: [],
-					specialistId: currentAgent,
-					chatMode: currentMode,
-				});
-			});
-			bar.appendChild(regen);
+			const reuse = document.createElement('button');
+			reuse.type = 'button';
+			reuse.className = 'msg-action msg-action-reuse';
+			reuse.title = uiText('reusePrompt');
+			reuse.setAttribute('aria-label', uiText('reusePrompt'));
+			reuse.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13 8a5 5 0 1 1-1.46-3.54"/><path d="M13 3v3h-3"/></svg>';
+			reuse.hidden = !prompt;
+			reuse.disabled = isStreaming;
+			reuse.addEventListener('click', () => reusePrompt(prompt, conversationId));
+			bar.appendChild(reuse);
 
 			// Feedback (visual only). The host-side handler is a future phase;
 			// we still emit `feedback` postMessage events for the eventual
@@ -1849,19 +2100,9 @@
 			return bar;
 		}
 
-		/**
-		 * Hide the regenerate button on every assistant message except the
-		 * most recent. Called when a new assistant turn is started so prior
-		 * regenerate buttons disappear.
-		 */
-		function refreshRegenerateAffordance() {
-			const all = messageList.querySelectorAll('.msg-assistant');
-			all.forEach((node, idx) => {
-				const regen = node.querySelector('.msg-action-regen');
-				if (regen) {
-					regen.hidden = idx !== all.length - 1;
-				}
-			});
+		/** Keep request actions unavailable while their agent is still running. */
+		function refreshPromptReuseAffordance() {
+			messageList.querySelectorAll('.msg-action-reuse').forEach(button => { button.disabled = isStreaming; });
 		}
 
 		/**
@@ -2107,6 +2348,29 @@
 			}
 		});
 
+		function resetEarlierHistory() {
+			earlierHistory = []; historyButton?.remove(); historyButton = null;
+		}
+		function historyOptions(msg) { return { timestamp: msg.timestamp, specialistId: msg.specialistId || historySpecialist, usageUnavailable: msg.usageUnavailable === true, promptDraft: msg.role === 'user' ? promptDraftFromHistory(msg) : undefined }; }
+		function loadEarlierHistory() {
+			if (!earlierHistory.length) return;
+			const before = new Set(messageList.children);
+			const anchor = messageList.querySelector('.msg');
+			const anchorTop = anchor?.getBoundingClientRect().top;
+			const saved = { index: nextConversationIndex, role: lastSenderRole, assistant: lastAssistantSpecialist, prompt: lastUserPrompt, promptDraft: lastPromptDraft };
+			const page = earlierHistory.splice(Math.max(0, earlierHistory.length - 100));
+			nextConversationIndex = earlierHistory.length; lastSenderRole = null; lastAssistantSpecialist = null; lastPromptDraft = null;
+			renderingHistory = true;
+			try { for (const msg of page) addMessage(msg.role, msg.content, historyOptions(msg)); }
+			finally { renderingHistory = false; nextConversationIndex = saved.index; lastSenderRole = saved.role; lastAssistantSpecialist = saved.assistant; lastUserPrompt = saved.prompt; lastPromptDraft = saved.promptDraft; }
+			const fragment = document.createDocumentFragment();
+			for (const child of [...messageList.children]) { if (!before.has(child)) fragment.appendChild(child); }
+			messageList.insertBefore(fragment, anchor);
+			if (earlierHistory.length) historyButton.textContent = 'Show Earlier Messages (' + earlierHistory.length + ')';
+			else { historyButton.remove(); historyButton = null; }
+			if (anchor && anchorTop !== undefined) messageList.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
+			refreshPromptReuseAffordance();
+		}
 		function addMessage(role, content, opts) {
 			opts = opts || {};
 			const wrapper = document.createElement('div');
@@ -2128,7 +2392,7 @@
 
 			if (role === 'assistant') {
 				const specialistId = opts.specialistId || currentAgent;
-				const displayName = opts.displayName || getCurrentAgentDisplayName();
+				const displayName = opts.displayName || SPECIALISTS.find(specialist => specialist.id === specialistId)?.displayName || getCurrentAgentDisplayName();
 				applyPersonaToWrapper(wrapper, specialistId);
 				const meta = buildAssistantMeta(displayName, specialistId, opts.timestamp);
 				wrapper.appendChild(meta);
@@ -2137,14 +2401,18 @@
 				body.className = 'msg-body';
 				if (isStructured) {
 					const text = renderStructuredContent(body, content);
-					body.appendChild(buildAssistantActions(text, true));
+					body.appendChild(buildAssistantActions(text));
 				} else {
 					body.innerHTML = renderMarkdown(content);
-					body.appendChild(buildAssistantActions(content, true));
+					body.appendChild(buildAssistantActions(content));
 				}
 				// Hydrate any persisted ui-block placeholders to live blocks.
 				if (typeof window.__sotaHydrateUiBlocks === 'function') {
 					window.__sotaHydrateUiBlocks(body);
+				}
+				if (opts.usageUnavailable) {
+					const status = document.createElement('p'); status.className = 'response-status'; status.textContent = uiText('usageUnavailable'); body.appendChild(status);
+					const meter = document.getElementById('transcriptTaskMeter'); if (meter && !renderingHistory) meter.textContent = uiText('usageUnavailable');
 				}
 				wrapper.appendChild(body);
 
@@ -2164,6 +2432,7 @@
 				if (role === 'user') {
 					lastAssistantSpecialist = null;
 					lastUserPrompt = userText;
+					lastPromptDraft = opts.promptDraft || { ...captureComposerDraft(), text: userText };
 					// Phase 68 — record the rendered prompt length so the user
 					// tooltip can show "Length: N chars" without re-walking the
 					// DOM. Uses the visible text (post-attachment-resolution) so
@@ -2171,7 +2440,7 @@
 					wrapper.dataset.contentLength = String((userText || '').length);
 					// Phase 66 — refresh the sticky transcript header so it
 					// always reflects the most recent user prompt.
-					updateTranscriptTaskHeader(conversationIndex, userText);
+					if (!renderingHistory) updateTranscriptTaskHeader(conversationIndex, userText);
 				}
 			}
 
@@ -2182,6 +2451,7 @@
 			// array so multiple checkpoints on the same turn render
 			// back-to-back (Phase 59 edge case).
 			if (role === 'user') {
+				if (!renderingHistory) scrollToBottom(true);
 				const pending = checkpointsByTurnIndex.get(conversationIndex);
 				if (Array.isArray(pending)) {
 					for (const cp of pending) {
@@ -2190,9 +2460,7 @@
 				}
 			}
 			lastSenderRole = role;
-			refreshRegenerateAffordance();
-			scrollToBottom();
-			updateEmptyState();
+			if (!renderingHistory) { refreshPromptReuseAffordance(); scrollToBottom(); updateEmptyState(); }
 			return wrapper;
 		}
 
@@ -2261,19 +2529,40 @@
 			messageList.appendChild(wrapper);
 			lastSenderRole = 'assistant';
 			lastAssistantSpecialist = resolvedId;
-			refreshRegenerateAffordance();
+			refreshPromptReuseAffordance();
 			scrollToBottom();
 			currentAssistantDiv = body;
 			updateEmptyState();
 			return wrapper;
 		}
 
-		/**
-		 * Smoothly scroll the message list to the bottom. Used after each
-		 * append so streaming feels alive without yanking the viewport.
-		 */
-		function scrollToBottom() {
-			messageList.scrollTo({ top: messageList.scrollHeight, behavior: 'smooth' });
+		/** Follow new content without interrupting reading or keyboard focus. */
+		function scrollToBottom(force = false) {
+			if (force) followingLatest = true;
+			if (!followingLatest) {
+				if (jumpToLatest) jumpToLatest.hidden = false;
+				return;
+			}
+			if (jumpToLatest) jumpToLatest.hidden = true;
+			if (scrollFrame !== null) return;
+			scrollFrame = requestAnimationFrame(() => {
+				scrollFrame = null;
+				if (followingLatest) messageList.scrollTop = messageList.scrollHeight;
+			});
+		}
+
+		/** Append each stream's text once per frame, preserving sibling controls. */
+		function flushStreamingText() {
+			if (streamingFrame !== null) cancelAnimationFrame(streamingFrame);
+			streamingFrame = null;
+			for (const [element, text] of pendingText) {
+				if (!element.isConnected) continue;
+				const raw = (streamingSources.get(element) || '') + text;
+				streamingSources.set(element, raw);
+				element.innerHTML = renderStreamingMarkdown(raw);
+			}
+			pendingText.clear();
+			scrollToBottom();
 		}
 
 		function clearStreamingIndicator() {
@@ -2286,6 +2575,7 @@
 
 		function setStreamingState(streaming) {
 			isStreaming = streaming;
+			refreshPromptReuseAffordance();
 			sendBtn.classList.toggle('is-streaming', streaming);
 			sendBtn.title = streaming ? 'Stop generating' : 'Send (Enter)';
 			sendBtn.setAttribute('aria-label', streaming ? 'Stop generating' : 'Send');
@@ -2341,6 +2631,9 @@
 
 			if (!text && mentions.length === 0 && attachments.length === 0 && imageAttachments.length === 0) return;
 
+			clearPromptRestore();
+			const submittedDraft = { ...captureComposerDraft(), text };
+
 			// Build the user bubble. When images are attached we render them
 			// as a structured array (image parts followed by the text part)
 			// so the bubble shows thumbnails BEFORE the typed text — mirrors
@@ -2351,6 +2644,7 @@
 			if (mentions.length > 0) {
 				bubbleParts.push(mentions.map(m => '`' + (m.label || m.path || m.kind || '') + '`').join(' '));
 			}
+			if (attachments.length) bubbleParts.push(attachments.map(id => '`' + (ATTACH_LABELS[id] || id) + '`').join(' '));
 			const bubbleText = bubbleParts.join(' ');
 			if (imageAttachments.length > 0) {
 				const structured = imageAttachments.map(img => ({
@@ -2360,11 +2654,11 @@
 					name: img.name,
 				}));
 				structured.push({ type: 'text', text: bubbleText || '(image attachment)' });
-				addMessage('user', structured, { timestamp: Date.now() });
+				addMessage('user', structured, { timestamp: Date.now(), promptDraft: submittedDraft });
 			} else {
-				addMessage('user', bubbleText || '(no text)', { timestamp: Date.now() });
+				addMessage('user', bubbleText || '(no text)', { timestamp: Date.now(), promptDraft: submittedDraft });
 			}
-			// Regenerate / Up-Arrow recall both want the user's typed text
+			// Up-Arrow recall keeps the user's typed text
 			// without the mention-chip annotation tail, so they round-trip
 			// cleanly when re-sent.
 			lastUserPrompt = text;
@@ -2400,6 +2694,7 @@
 				.filter(p => typeof p === 'string' && p.length > 0);
 			vscode.postMessage({
 				type: 'sendMessage',
+				conversationId: activeConversationId,
 				text: text,
 				model: currentModel,
 				attachments: [...attachments],
@@ -2408,6 +2703,7 @@
 				images: imageAttachments.map(img => ({ mime: img.mime, base64: img.base64, name: img.name })),
 				specialistId: currentAgent,
 				chatMode: currentMode,
+				includeWorkspaceContext: includeContext.checked,
 			});
 
 			attachments = [];
@@ -2485,6 +2781,18 @@
 				console.warn('Failed to decode diff payload', err);
 			}
 		};
+
+		// The webview disallows inline event handlers. Delegate on the stable
+		// transcript so controls also work after streaming replaces its HTML.
+		messageList.addEventListener('click', event => {
+			const button = event.target instanceof Element ? event.target.closest('button') : null;
+			if (!button) { return; }
+			if (button.classList.contains('code-copy')) { window.copyCode(button); }
+			else if (button.classList.contains('code-open')) { window.openCodeInEditor(button); }
+			else if (button.classList.contains('code-save')) { window.saveCodeToFile(button); }
+			else if (button.classList.contains('code-diff')) { window.previewDiff(button); }
+			else if (button.classList.contains('terminal-show-more')) { window.toggleTerminalExpand(button); }
+		});
 
 		function updateEmptyState() {
 			const hasMessages = messageList.querySelector('.msg') !== null;
@@ -2582,11 +2890,14 @@
 		}
 
 		function renderContextChips() {
+			persistDraft();
+			updateSendAffordance();
 			contextChips.textContent = '';
 			attachments.forEach((id, i) => {
 				const chip = document.createElement('span');
 				chip.className = 'context-chip';
 				chip.textContent = ATTACH_LABELS[id] || id;
+				if (id === 'terminal-output') { chip.title = uiText('terminalAttachmentHelp'); }
 				const remove = document.createElement('button');
 				remove.className = 'context-chip-remove';
 				remove.title = 'Remove';
@@ -2655,7 +2966,7 @@
 					displayLabel = '@url ' + trimmed;
 					titleText = mention.url;
 				} else if (mention.kind === 'terminal') {
-					titleText = 'Terminal buffer capture not yet supported \u2014 paste output manually.';
+					titleText = uiText('terminalAttachmentHelp');
 				} else if (mention.path) {
 					chip.dataset.path = mention.path;
 				}
@@ -2677,8 +2988,16 @@
 		}
 
 		function updateModelLabel() {
-			modelLabel.textContent = MODEL_LABELS[currentModel] || currentModel;
+			const acpAgent = getCurrentAcpAgent();
+			modelLabel.textContent = acpAgent ? uiText('managedByAcp') : MODEL_LABELS[currentModel] || currentModel;
+			modelChip.disabled = Boolean(acpAgent);
+			modelChip.title = acpAgent ? uiText('acpModelHelp', acpAgent) : '';
+			if (acpAgent) { modelMenu.hidden = true; }
 			updateReasoningChipVisibility();
+		}
+
+		function getCurrentAcpAgent() {
+			return SPECIALISTS.find(specialist => specialist.id === currentAgent)?.acpAgent || '';
 		}
 
 		function updateModelMenuChecks() {
@@ -2701,8 +3020,8 @@
 		function updateReasoningChipVisibility() {
 			const effortChip = document.getElementById('reasoningEffortChip');
 			const thinkingChip = document.getElementById('thinkingBudgetChip');
-			if (effortChip) effortChip.hidden = !modelSupportsReasoningEffort(currentModel);
-			if (thinkingChip) thinkingChip.hidden = !modelSupportsThinkingBudget(currentModel);
+			if (effortChip) effortChip.hidden = Boolean(getCurrentAcpAgent()) || !modelSupportsReasoningEffort(currentModel);
+			if (thinkingChip) thinkingChip.hidden = Boolean(getCurrentAcpAgent()) || !modelSupportsThinkingBudget(currentModel);
 		}
 
 		function getCurrentAgentDisplayName() {
@@ -2738,6 +3057,7 @@
 		function updateAgentLabel() {
 			agentLabel.textContent = getCurrentAgentDisplayName();
 			applyPersonaAccentToRoot();
+			updateComposerPlaceholder();
 		}
 
 		/**
@@ -2814,6 +3134,7 @@
 		}
 
 		function updateAgentMenuChecks() {
+			updateModelLabel();
 			agentMenu.querySelectorAll('.popover-item').forEach((item) => {
 				const check = item.querySelector('.item-check');
 				if (!check) return;
@@ -2867,19 +3188,33 @@
 			messageInput.placeholder = personaPrompt || DEFAULT_COMPOSER_PLACEHOLDER;
 		}
 
+		let menuAnchor = null;
 		function toggleMenu(menu, anchor) {
-			const isHidden = menu.hasAttribute('hidden');
-			document.querySelectorAll('.popover').forEach(m => m.setAttribute('hidden', ''));
-			if (!isHidden) return;
-			menu.removeAttribute('hidden');
+			const wasHidden = menu.hidden;
+			closeMenus();
+			if (!wasHidden) return;
+			menuAnchor = anchor;
+			anchor.setAttribute('aria-expanded', 'true');
+			menu.hidden = false;
 			const rect = anchor.getBoundingClientRect();
-			menu.style.left = rect.left + 'px';
+			menu.style.maxHeight = Math.max(100, Math.min(420, rect.top - 12)) + 'px';
+			menu.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - menu.offsetWidth - 8)) + 'px';
 			menu.style.bottom = (window.innerHeight - rect.top + 4) + 'px';
 		}
-
 		function closeMenus() {
-			document.querySelectorAll('.popover').forEach(m => m.setAttribute('hidden', ''));
+			document.querySelectorAll('.popover').forEach(menu => { menu.hidden = true; });
+			if (menuAnchor) menuAnchor.setAttribute('aria-expanded', 'false');
+			hideModelTooltip();
+			menuAnchor = null;
 		}
+		document.addEventListener('keydown', event => {
+			if (event.key === 'Escape' && menuAnchor) {
+				event.preventDefault();
+				const anchor = menuAnchor;
+				closeMenus();
+				anchor.focus();
+			}
+		});
 
 		// --- Slash + @-mention popups ---
 		// Shared pattern: track an "active token" inside the textarea (a leading
@@ -3273,6 +3608,7 @@
 		}
 
 		messageInput.addEventListener('keydown', (e) => {
+			if (e.isComposing) return;
 			// Slash/mention popups intercept arrow/enter/tab/escape first so
 			// the textarea's default handling doesn't fight the popup UX.
 			if (handlePopupKeydown(e)) {
@@ -3303,13 +3639,14 @@
 					}
 				}
 			}
-			if (e.key === 'Enter' && !e.shiftKey) {
+			if (e.key === 'Enter' && !e.shiftKey && !isStreaming) {
 				e.preventDefault();
 				sendMessage();
 			}
 		});
 
 		messageInput.addEventListener('input', (e) => {
+			persistDraft();
 			messageInput.style.height = 'auto';
 			// The CSS sets a 64px min-height (3 rows) and 240px max-height
 			// to keep the composer inviting when empty without runaway
@@ -3453,6 +3790,7 @@
 		modelChip.addEventListener('click', (e) => {
 			e.stopPropagation();
 			toggleMenu(modelMenu, modelChip);
+			if (!modelMenu.hidden) { modelSearch.value = ''; filterModels(); modelSearch.focus(); }
 		});
 
 		// Phase 5 — model description tooltips. Decorate each picker entry
@@ -3534,13 +3872,53 @@
 			item.appendChild(icon);
 		});
 
+		const modelSearch = document.getElementById('modelSearch');
+		const modelSearchEmpty = document.getElementById('modelSearchEmpty');
+		const modelItems = Array.from(modelMenu.querySelectorAll('[data-model]'));
+		for (const item of modelItems) {
+			item.removeAttribute('role');
+			// A focusable element nested in a button is not a separate control.
+			const info = item.querySelector('.popover-item-info');
+			if (info) { info.removeAttribute('role'); info.removeAttribute('tabindex'); info.setAttribute('aria-hidden', 'true'); }
+			item.addEventListener('focus', () => showModelTooltip(item.dataset.model, item));
+			item.addEventListener('blur', hideModelTooltip);
+		}
+		function filterModels() {
+			const query = modelSearch.value.trim().toLocaleLowerCase();
+			let group = null;
+			for (const node of modelMenu.children) {
+				if (node.classList.contains('popover-section-label')) { group = node; group.hidden = true; }
+				if (node.matches('[data-model]')) {
+					node.hidden = ![node.dataset.model, node.textContent, group?.textContent].join(' ').toLocaleLowerCase().includes(query);
+					if (!node.hidden && group) group.hidden = false;
+				}
+			}
+			modelSearchEmpty.hidden = Array.from(modelMenu.querySelectorAll('[data-model]')).some(item => !item.hidden);
+		}
+		modelSearch.addEventListener('input', filterModels);
+		modelMenu.addEventListener('keydown', event => {
+			const visible = Array.from(modelMenu.querySelectorAll('[data-model]')).filter(item => !item.hidden);
+			if (event.key === 'Enter' && event.target === modelSearch) {
+				event.preventDefault(); visible[0]?.click(); return;
+			}
+			if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+			event.preventDefault();
+			const index = visible.indexOf(document.activeElement);
+			if (index < 0) { (event.key === 'ArrowDown' ? visible[0] : visible.at(-1))?.focus(); return; }
+			const next = index + (event.key === 'ArrowDown' ? 1 : -1);
+			if (next < 0 || next >= visible.length) modelSearch.focus();
+			else visible[next].focus();
+		});
 		modelMenu.addEventListener('click', (e) => {
 			const target = e.target.closest('.popover-item');
 			if (!target) return;
 			currentModel = target.dataset.model;
+			vscode.postMessage({ type: 'selectModel', conversationId: activeConversationId, model: currentModel });
+			persistDraft();
 			updateModelLabel();
 			updateModelMenuChecks();
 			closeMenus();
+			modelChip.focus();
 		});
 
 		// Phase 4 — reasoning effort + thinking budget chip menus.
@@ -3625,6 +4003,7 @@
 			const target = e.target.closest('.popover-item');
 			if (!target) return;
 			currentAgent = target.dataset.agent || 'anton';
+			vscode.postMessage({ type: 'selectSpecialist', conversationId: activeConversationId, specialistId: currentAgent });
 			updateAgentLabel();
 			updateAgentMenuChecks();
 			updateHeaderSubtitle();
@@ -3641,7 +4020,7 @@
 			if (normalised === currentMode) return;
 			currentMode = normalised;
 			updateModeUi();
-			vscode.postMessage({ type: 'modeChange', chatMode: currentMode });
+			vscode.postMessage({ type: 'modeChange', conversationId: activeConversationId, chatMode: currentMode });
 		}
 
 		planActButtons.forEach((btn) => {
@@ -3804,6 +4183,31 @@
 					// with the assistant's prose.
 					mountUiBlock(message);
 					break;
+				case 'requestSettled':
+					if (isStreaming) {
+						finalizeStreamingText();
+						clearStreamingIndicator();
+						if (message.cancelled && currentAssistantDiv) {
+							for (const card of currentAssistantDiv.querySelectorAll('[data-tool-status="running"]')) {
+								card.dataset.toolStatus = 'cancelled';
+								card.dataset.active = 'false';
+								const pill = card.querySelector('.tool-card-status');
+								if (pill) pill.textContent = uiText('responseStopped');
+								const icon = card.querySelector('.tool-card-icon');
+								if (icon) icon.textContent = '—';
+							}
+							const status = document.createElement('div');
+							status.className = 'response-status';
+							status.textContent = uiText('responseStopped');
+							currentAssistantDiv.appendChild(status);
+						}
+						attachAssistantActions();
+						setStreamingState(false);
+						currentAssistantDiv = null;
+						currentAssistantTextSpan = null;
+						hideActiveTaskHeader();
+					}
+					break;
 				case 'messageComplete':
 					finalizeStreamingText();
 					clearStreamingIndicator();
@@ -3812,7 +4216,13 @@
 					currentAssistantDiv = null;
 					currentAssistantTextSpan = null;
 					tokenCount.textContent = (message.totalTokens || 0) + ' tokens';
-					costEstimate.textContent = '$' + (message.estimatedCost || '0.00');
+					updateTranscriptTaskMeter(message.inputTokens, message.outputTokens, Number(message.estimatedCost));
+					costEstimate.textContent = message.usageUnavailable ? '—' : '$' + (message.estimatedCost || '0.00');
+					if (message.usageUnavailable) {
+						conversationHasUnmeteredUsage = true;
+						tokenCount.textContent = uiText('usageUnavailable');
+						document.getElementById('transcriptTaskMeter').textContent = uiText('usageUnavailable');
+					}
 					hideActiveTaskHeader();
 					break;
 				case 'messageMetrics': {
@@ -3830,6 +4240,10 @@
 					if (wrapper) {
 						wrapper.dataset.model = String(message.model || '');
 						wrapper.dataset.latencyMs = String(message.latencyMs || 0);
+						if (message.usageUnavailable) {
+							delete wrapper.dataset.inputTokens; delete wrapper.dataset.outputTokens; delete wrapper.dataset.cachedTokens; delete wrapper.dataset.cost;
+							break;
+						}
 						wrapper.dataset.inputTokens = String(message.inputTokens || 0);
 						wrapper.dataset.outputTokens = String(message.outputTokens || 0);
 						wrapper.dataset.cachedTokens = String(message.cachedTokens || 0);
@@ -3839,9 +4253,17 @@
 					}
 					break;
 				}
+				case 'workspaceContextPreview':
+					if (message.conversationId === activeConversationId && includeContext.checked) {
+						contextPreview.textContent = message.error || message.markdown || uiText('contextEmpty');
+						contextSummary.textContent = message.markdown ? uiText('contextTokens', Number(message.estimatedTokens || 0).toLocaleString()) : uiText('on');
+					}
+					break;
 				case 'streamError':
+					flushStreamingText();
 					if (currentAssistantTextSpan) {
-						currentAssistantTextSpan.textContent += '\n\nError: ' + message.error;
+						appendStreamingText('\n\nError: ' + message.error);
+						finalizeStreamingText();
 					} else if (currentAssistantDiv) {
 						const errSpan = document.createElement('div');
 						errSpan.textContent = 'Error: ' + message.error;
@@ -3855,6 +4277,18 @@
 					hideActiveTaskHeader();
 					break;
 				case 'loadConversation':
+					resetEarlierHistory();
+					currentAgent = message.lastSpecialist || 'anton';
+					updateAgentLabel();
+					updateAgentMenuChecks();
+					updateHeaderSubtitle();
+					updateComposerPlaceholder();
+					activateDraft(message.conversationId, message.lastModel);
+					setStreamingState(false);
+					flushStreamingText();
+					currentAssistantDiv = null;
+					currentAssistantTextSpan = null;
+					scrollToBottom(true);
 					messageList.querySelectorAll('.msg').forEach(n => n.remove());
 					messageList.querySelectorAll('.checkpoint-stripe').forEach(n => n.remove());
 					messageList.querySelectorAll('.handoff-banner').forEach(n => n.remove());
@@ -3866,31 +4300,51 @@
 					lastSubtaskAssignee = null;
 					renderedHandoffPairs.clear();
 					lastUserPrompt = '';
+					lastPromptDraft = null;
+					clearPromptRestore();
 					nextConversationIndex = 0;
 					checkpointsByTurnIndex.clear();
 					if (message.lastMode === 'plan' || message.lastMode === 'act') {
 						currentMode = message.lastMode;
 						updateModeUi();
 					}
-					if (message.messages) {
-						// Persisted messages don't carry a per-message specialist
-						// (yet — Phase 47 records it at the conversation summary
-						// level). Use the conversation's `lastSpecialist` as the
-						// best available approximation so reloaded assistant
-						// bubbles still pick up persona avatars and accent
-						// stripes instead of a sea of muted "?" fallbacks.
-						const reloadSpecialist = message.lastSpecialist || 'anton';
-						for (const msg of message.messages) {
-							const opts = { timestamp: msg.timestamp };
-							if (msg.role === 'assistant') {
-								opts.specialistId = msg.specialistId || reloadSpecialist;
-							}
-							addMessage(msg.role, msg.content, opts);
+					if (Array.isArray(message.messages)) {
+						conversationHasUnmeteredUsage = message.messages.some(msg => msg.role === 'assistant' && msg.usageUnavailable);
+						historySpecialist = message.lastSpecialist || 'anton';
+						const start = Math.max(0, message.messages.length - 200);
+						earlierHistory = message.messages.slice(0, start); nextConversationIndex = start;
+						renderingHistory = true;
+						try { for (const msg of message.messages.slice(start)) addMessage(msg.role, msg.content, historyOptions(msg)); }
+						finally { renderingHistory = false; }
+						if (start) {
+							historyButton = document.createElement('button'); historyButton.className = 'secondary-button'; historyButton.textContent = 'Show Earlier Messages (' + start + ')';
+							historyButton.addEventListener('click', loadEarlierHistory); messageList.prepend(historyButton);
 						}
+						refreshPromptReuseAffordance();
+						const lastUser = messageList.querySelector('.msg-user:last-of-type') || [...messageList.querySelectorAll('.msg-user')].pop();
+						if (lastUser) updateTranscriptTaskHeader(Number(lastUser.dataset.conversationIndex), lastUserPrompt);
+						const meter = document.getElementById('transcriptTaskMeter'); if (meter && message.messages.findLast(msg => msg.role === 'assistant')?.usageUnavailable) meter.textContent = uiText('usageUnavailable');
+						scrollToBottom(true);
 					}
 					updateEmptyState();
 					break;
+				case 'conversationDeleted':
+					if (typeof message.conversationId === 'string') {
+						drafts.delete(message.conversationId);
+						persistDraft();
+					}
+					break;
 				case 'conversationCleared':
+					tokenCount.textContent = '0 tokens';
+					costEstimate.textContent = '$0.00';
+					conversationHasUnmeteredUsage = false;
+					resetEarlierHistory();
+					activateDraft(message.conversationId, message.lastModel);
+					setStreamingState(false);
+					flushStreamingText();
+					currentAssistantDiv = null;
+					currentAssistantTextSpan = null;
+					scrollToBottom(true);
 					messageList.querySelectorAll('.msg').forEach(n => n.remove());
 					messageList.querySelectorAll('.checkpoint-stripe').forEach(n => n.remove());
 					messageList.querySelectorAll('.handoff-banner').forEach(n => n.remove());
@@ -3902,10 +4356,9 @@
 					lastSubtaskAssignee = null;
 					renderedHandoffPairs.clear();
 					lastUserPrompt = '';
+					lastPromptDraft = null;
+					clearPromptRestore();
 					lastSentUserText = '';
-					mentions = [];
-					attachments = [];
-					imageAttachments = [];
 					nextConversationIndex = 0;
 					checkpointsByTurnIndex.clear();
 					renderContextChips();
@@ -3983,8 +4436,18 @@
 				case 'providerProfiles':
 					applyProviderProfiles(message);
 					break;
+				case 'systemIntegrationsChanged':
+					if (document.querySelector('[data-subtab="integrations"][aria-selected="true"]') && !chatSettingsView.hidden) { requestIntegrations('list'); }
+					break;
+				case 'systemIntegrationsState':
+					integrationState = message.state || { entries: [], issues: [] };
+					integrationError = message.error || '';
+					document.getElementById('integrationRefresh').disabled = false;
+					renderIntegrations();
+					break;
 				case 'settingsState':
 					applySettingsState(message.settings);
+					document.getElementById('settingsAboutVersion').textContent = uiText('extensionVersion', message.version || '—');
 					break;
 				case 'specialistModelsState':
 					applySpecialistModelsState(Array.isArray(message.entries) ? message.entries : []);
@@ -4013,9 +4476,14 @@
 						updateComposerPlaceholder();
 					}
 					break;
+				case 'showProviderSettings':
+					applyActiveTab('settings');
+					document.getElementById('settingsProviders')?.scrollIntoView({ block: 'start' });
+					break;
 				case 'modelChange':
 					if (message.model) {
 						currentModel = message.model;
+						persistDraft();
 						updateModelLabel();
 						updateModelMenuChecks();
 					}
@@ -4057,6 +4525,16 @@
 					break;
 				case 'tasksSnapshot':
 					renderTasksPane(message);
+					if (!message.conversationId || message.conversationId === activeConversationId) {
+						const checklist = [...messageList.querySelectorAll('.plan-checklist')].at(-1);
+						if (checklist) {
+							for (const task of message.tasks || []) {
+								const item = [...checklist.querySelectorAll('.plan-checklist-item')].find(item => item.dataset.subtaskId === task.id || (!item.dataset.subtaskId && item.dataset.assignee === task.assignee && item.dataset.instruction === task.instruction));
+								if (item) { item.dataset.subtaskId = task.id; item.dataset.state = task.state === 'in-progress' ? 'running' : task.state; }
+							}
+							updatePlanChecklistProgress(checklist);
+						}
+					}
 					break;
 				case 'historySnapshot':
 					renderHistoryPane(message);
@@ -4114,14 +4592,15 @@
 		 * rendering on the accumulated text.
 		 */
 		function appendStreamingText(token) {
-			if (!currentAssistantDiv) return;
+			if (!currentAssistantDiv || !token) return;
+			clearStreamingIndicator();
 			if (!currentAssistantTextSpan || currentAssistantTextSpan.parentNode !== currentAssistantDiv) {
 				currentAssistantTextSpan = document.createElement('span');
 				currentAssistantTextSpan.className = 'msg-text-stream';
 				currentAssistantDiv.appendChild(currentAssistantTextSpan);
 			}
-			currentAssistantTextSpan.textContent += token;
-			messageList.scrollTop = messageList.scrollHeight;
+			pendingText.set(currentAssistantTextSpan, (pendingText.get(currentAssistantTextSpan) || '') + token);
+			if (streamingFrame === null) streamingFrame = requestAnimationFrame(flushStreamingText);
 		}
 
 		/**
@@ -4130,8 +4609,9 @@
 		 * streaming text span's content rather than the whole message body.
 		 */
 		function finalizeStreamingText() {
+			flushStreamingText();
 			if (!currentAssistantTextSpan) return;
-			const raw = currentAssistantTextSpan.textContent || '';
+			const raw = streamingSources.get(currentAssistantTextSpan) || '';
 			if (raw.length === 0) {
 				currentAssistantTextSpan.remove();
 				return;
@@ -4162,9 +4642,8 @@
 		 * Extract a `<<sota:suggestions>>[...]<<sota:end>>` JSON array from
 		 * the raw assistant text and append a row of quick-pick chips below
 		 * the assistant message. Clicking a chip drops the suggestion into
-		 * the composer and submits it as the next user turn — fast follow-
-		 * ups without retyping. Silently no-ops when the sentinel is absent
-		 * or the JSON is malformed.
+		 * the composer for review, preserving the previous draft with Undo.
+		 * Silently no-ops when the sentinel is absent or its JSON is malformed.
 		 */
 		function renderFollowupSuggestions(rawText, assistantDiv) {
 			const match = rawText.match(/<<sota:suggestions>>\s*([\s\S]*?)\s*<<sota:end>>/);
@@ -4197,16 +4676,8 @@
 				chip.type = 'button';
 				chip.className = 'msg-followup-chip';
 				chip.textContent = suggestion;
-				chip.addEventListener('click', () => {
-					const input = document.getElementById('chatInput');
-					if (input) {
-						input.value = suggestion;
-						input.focus();
-					}
-					if (typeof sendMessage === 'function') {
-						sendMessage();
-					}
-				});
+				const conversationId = activeConversationId;
+				chip.addEventListener('click', () => reusePrompt({ ...captureComposerDraft(), text: suggestion }, conversationId));
 				strip.appendChild(chip);
 			}
 			assistantDiv.appendChild(strip);
@@ -4225,8 +4696,8 @@
 			// content — sufficient for clipboard use without needing to
 			// reassemble the markdown source.
 			const source = currentAssistantDiv.textContent || '';
-			currentAssistantDiv.appendChild(buildAssistantActions(source, true));
-			refreshRegenerateAffordance();
+			currentAssistantDiv.appendChild(buildAssistantActions(source));
+			refreshPromptReuseAffordance();
 		}
 
 		// --- Phase 68: per-message hover details popover ---
@@ -4474,7 +4945,7 @@
 			// to the exit code (0 + not cancelled = ok; otherwise error /
 			// cancelled). Non-shell tools fall back to the host-reported
 			// status verbatim.
-			let effectiveStatus = message.status || 'running';
+			let effectiveStatus = message.status === 'done' ? 'ok' : message.status || 'running';
 			let effectiveStatusLabel = effectiveStatus === 'ok' ? 'Ok'
 				: effectiveStatus === 'error' ? 'Error'
 				: 'Running';
@@ -4613,7 +5084,7 @@
 					card.appendChild(diffBtn);
 				}
 			}
-			messageList.scrollTop = messageList.scrollHeight;
+			scrollToBottom();
 		}
 
 		/**
@@ -4869,7 +5340,7 @@
 			}
 
 			currentAssistantDiv.appendChild(card);
-			messageList.scrollTop = messageList.scrollHeight;
+			scrollToBottom();
 		}
 
 		/**
@@ -5248,7 +5719,7 @@
 			}
 			card.appendChild(list);
 			currentAssistantDiv.appendChild(card);
-			messageList.scrollTop = messageList.scrollHeight;
+			scrollToBottom();
 		}
 
 		/**
@@ -5785,7 +6256,7 @@
 			} else if (bodyEl && status === 'ok' && message.summary) {
 				bodyEl.textContent = message.summary;
 			}
-			messageList.scrollTop = messageList.scrollHeight;
+			scrollToBottom();
 		}
 
 		/**
@@ -5822,7 +6293,7 @@
 				{
 					re: /No OpenAI credentials/i,
 					provider: 'openai',
-					suggestedModel: 'codex-gpt-5-mini',
+					suggestedModel: 'codex-default',
 					buttonLabel: 'Use Codex CLI subscription instead',
 				},
 				{
@@ -6051,7 +6522,7 @@
 			root.dataset.uiComponent = component;
 			host.appendChild(root);
 			if (messageList) {
-				messageList.scrollTop = messageList.scrollHeight;
+				scrollToBottom();
 			}
 		}
 
@@ -6606,7 +7077,7 @@
 				const id = el.getAttribute('data-status');
 				if (!id || !(id in flags)) return;
 				const ok = flags[id];
-				el.textContent = ok ? 'Connected' : 'Not configured';
+				el.textContent = ok ? uiText('providerConfigured') : uiText('providerUnconfigured');
 				el.classList.toggle('connected', ok);
 				el.classList.toggle('not-configured', !ok);
 				const card = el.closest('.provider-card');
@@ -7132,7 +7603,7 @@
 
 		function submitProviderForm(provider) {
 			const root = providerFormHost.querySelector('.provider-form');
-			if (!root) return;
+			if (!root || root.querySelector('[data-action="save"]')?.disabled) return;
 			const fields = {};
 			root.querySelectorAll('input,select').forEach((el) => {
 				const name = el.getAttribute('name');
@@ -7158,7 +7629,7 @@
 		 */
 		function testProviderConnection(provider) {
 			const root = providerFormHost.querySelector('.provider-form');
-			if (!root) return;
+			if (!root || root.querySelector('[data-action="test-connection"]')?.disabled) return;
 			const fields = {};
 			root.querySelectorAll('input,select').forEach((el) => {
 				const name = el.getAttribute('name');
@@ -7331,11 +7802,8 @@
 				const label = PROVIDER_LABELS[id] || id;
 				const tagline = PROVIDER_TAGLINES[id] || '';
 				const glyph = PROVIDER_GLYPHS[id] || id.charAt(0).toUpperCase();
-				// "Connected" = currently usable for the active model. We keep
-				// a single state today (any present credential = connected) but
-				// the badge class "configured" is reserved for a near-future
-				// "saved but not active" distinction; both render green.
-				const statusText = ok ? 'Connected' : 'Not configured';
+				// Credential presence indicates configuration; Test Connection verifies access.
+				const statusText = ok ? uiText('providerConfigured') : uiText('providerUnconfigured');
 				const statusClass = ok ? 'connected' : 'not-configured';
 				const checkIcon = ok ? '<svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 6.5l2.5 2.5L10 3.5"/></svg>' : '';
 				return ''
@@ -7377,12 +7845,9 @@
 		// gear-button click) don't have to change.
 		function openChatSettings() {
 			selectTab('settings');
-			renderSettingsProviderCards(window.__SOTA_PROVIDER_FLAGS || {});
-			vscode.postMessage({ type: 'requestSettings' });
 			// Always close any MCP form left open from a previous visit so the
 			// user lands on the list — we never re-hydrate stale form state.
 			closeMcpServerForm();
-			vscode.postMessage({ type: 'requestMcpServers' });
 		}
 
 		// Programmatic transitions (e.g. "Saved" → return to the chat) used to
@@ -7444,13 +7909,7 @@
 				}
 				if (action === 'reset-all-settings') {
 					ev.preventDefault();
-					// Cheap modal — host won't act unless confirm() returns
-					// true. Avoids inventing a custom confirmation modal for
-					// a destructive-but-revertible action.
-					const ok = window.confirm('Reset every Son of Anton toggle, slider, and dropdown back to its default? Provider keys will be preserved.');
-					if (ok) {
-						vscode.postMessage({ type: 'resetAllSettings' });
-					}
+					vscode.postMessage({ type: 'resetAllSettings' });
 					return;
 				}
 			});
@@ -7554,6 +8013,20 @@
 					vscode.postMessage({ type: 'reloadWindow' });
 				}
 			});
+			chatSettingsView.querySelector('.settings-subtab-nav').addEventListener('keydown', (event) => {
+				const tabs = Array.from(chatSettingsView.querySelectorAll('.settings-subtab'));
+				const index = tabs.indexOf(event.target);
+				if (index < 0) { return; }
+				let next;
+				if (event.key === 'Home') { next = 0; }
+				else if (event.key === 'End') { next = tabs.length - 1; }
+				else if (event.key === 'ArrowRight' || event.key === 'ArrowDown') { next = (index + 1) % tabs.length; }
+				else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') { next = (index + tabs.length - 1) % tabs.length; }
+				else { return; }
+				event.preventDefault();
+				setActiveSettingsSubtab(tabs[next].dataset.subtab);
+				tabs[next].focus();
+			});
 			// Initial sub-tab attribute (default to 'api').
 			setActiveSettingsSubtab(chatSettingsView.getAttribute('data-active-subtab') || 'api');
 		}
@@ -7564,6 +8037,7 @@
 			chatSettingsView.querySelectorAll('.settings-subtab').forEach((btn) => {
 				const active = btn.getAttribute('data-subtab') === id;
 				btn.classList.toggle('settings-subtab-active', active);
+				btn.tabIndex = active ? 0 : -1;
 				btn.setAttribute('aria-selected', active ? 'true' : 'false');
 			});
 			chatSettingsView.querySelectorAll('.settings-subtab-pane').forEach((pane) => {
@@ -7573,10 +8047,64 @@
 			// in the bulk `settingsState` push, so request a fresh state when
 			// the user lands on it. Cheap — the host just reads 10 config
 			// keys and posts them back.
+			if (id === 'integrations') { requestIntegrations('list'); }
 			if (id === 'specialists') {
 				vscode.postMessage({ type: 'getSpecialistModelsState' });
 			}
 		}
+
+		let integrationState = { entries: [], issues: [] };
+		let integrationError = '';
+		let integrationLimit = 50;
+		function requestIntegrations(action, id) {
+			document.getElementById('integrationStatus').textContent = uiText('integrationLoading');
+			document.getElementById('integrationRefresh').disabled = true;
+			vscode.postMessage({ type: 'systemIntegrations', integrationAction: action, integrationId: id });
+		}
+		function renderIntegrations() {
+			const query = document.getElementById('integrationSearch').value.trim().toLowerCase();
+			const kind = document.getElementById('integrationKind').value;
+			const entries = (integrationState.entries || []).filter(entry => (kind === 'all' || kind === entry.kind) && [entry.name, entry.description, entry.source, entry.scope].join(' ').toLowerCase().includes(query));
+			document.getElementById('integrationStatus').textContent = integrationError || uiText('integrationResults', entries.length, (integrationState.issues || []).length);
+			const list = document.getElementById('integrationList');
+			const focused = list.contains(document.activeElement) ? document.activeElement.dataset.integrationAction : undefined;
+			list.replaceChildren();
+			if ((integrationState.issues || []).length) {
+				const warnings = document.createElement('details'); warnings.className = 'integration-warnings';
+				const summary = document.createElement('summary'); summary.textContent = uiText('integrationWarnings', integrationState.issues.length); warnings.appendChild(summary);
+				for (const issue of integrationState.issues) { const warning = document.createElement('p'); warning.textContent = issue.message + ' ' + issue.path; warnings.appendChild(warning); }
+				list.appendChild(warnings);
+			}
+			for (const entry of entries.slice(0, integrationLimit)) {
+				const card = document.createElement('article'); card.className = 'integration-card';
+				const title = document.createElement('strong'); title.textContent = entry.name;
+				const source = document.createElement('small'); source.textContent = [entry.source, entry.scope, entry.kind, entry.version].filter(Boolean).join(' · ');
+				const description = document.createElement('p'); description.className = 'integration-description'; description.textContent = entry.description; description.title = entry.description;
+				const status = document.createElement('p'); status.textContent = entry.state === 'ready' ? uiText('integrationReady') : entry.reason || (entry.configured ? entry.state || uiText('integrationConfigured') : uiText('integrationAvailable'));
+				const actions = document.createElement('div'); actions.className = 'integration-actions';
+				const button = (label, action) => {
+					const element = document.createElement('button'); element.type = 'button'; element.textContent = uiText(label);
+					element.dataset.integrationAction = entry.id + ':' + (action === 'open' ? 'open' : 'connection');
+					element.addEventListener('click', () => {
+						if (element.getAttribute('aria-disabled') === 'true') { return; }
+						// Native disabled buttons lose focus in some Chromium builds.
+						// Preserve keyboard position while preventing duplicate requests.
+						element.setAttribute('aria-disabled', 'true'); requestIntegrations(action, entry.id);
+					});
+					actions.appendChild(element);
+				};
+				button('integrationOpen', 'open');
+				if (entry.kind === 'mcp' && (entry.enabled || entry.configured)) { button(entry.configured ? 'integrationDisconnect' : 'integrationConnect', entry.configured ? 'disconnect' : 'connect'); }
+				card.append(title, source, description, status, actions); list.appendChild(card);
+			}
+			if (!entries.length && !integrationError) { const empty = document.createElement('p'); empty.textContent = uiText('integrationEmpty'); list.appendChild(empty); }
+			if (focused) { for (const element of list.querySelectorAll('button')) { if (element.dataset.integrationAction === focused) { element.focus({ preventScroll: true }); break; } } }
+			document.getElementById('integrationMore').hidden = entries.length <= integrationLimit;
+		}
+		document.getElementById('integrationSearch').addEventListener('input', () => { integrationLimit = 50; renderIntegrations(); });
+		document.getElementById('integrationKind').addEventListener('change', () => { integrationLimit = 50; renderIntegrations(); });
+		document.getElementById('integrationRefresh').addEventListener('click', () => requestIntegrations('refresh'));
+		document.getElementById('integrationMore').addEventListener('click', () => { integrationLimit += 50; renderIntegrations(); });
 
 		// --- Specialist Models sub-tab ----------------------------------
 		//
@@ -7689,7 +8217,8 @@
 				const value = typeof entry.value === 'string' ? entry.value : '';
 				const pinned = Boolean(entry.pinned);
 				const statusClass = pinned ? 'is-pinned' : 'is-default';
-				const statusLabel = pinned ? 'Pinned' : 'Default';
+				const acpAgent = typeof entry.acpAgent === 'string' ? entry.acpAgent : '';
+				const statusLabel = acpAgent ? uiText('managedByAcp') : pinned ? 'Pinned' : 'Default';
 				const options = buildSpecialistModelOptions(defaultModel);
 				return ''
 					+ '<div class="specialist-row" data-handle="' + escapeHtml(handle) + '" role="listitem">'
@@ -7697,8 +8226,8 @@
 					+ '<span class="specialist-row-handle">@' + escapeHtml(handle) + '</span>'
 					+ '<span class="specialist-row-display">' + escapeHtml(display) + '</span>'
 					+ '</div>'
-					+ '<select class="specialist-row-model" data-handle="' + escapeHtml(handle) + '" aria-label="Model for @' + escapeHtml(handle) + '">'
-					+ options
+					+ '<select ' + (acpAgent ? 'disabled title="' + escapeHtml(uiText('acpModelHelp', acpAgent)) + '" ' : '') + 'class="specialist-row-model" data-handle="' + escapeHtml(handle) + '" aria-label="Model for @' + escapeHtml(handle) + '">'
+					+ (acpAgent ? '<option value="">' + escapeHtml(acpAgent) + '</option>' : options)
 					+ '</select>'
 					+ '<span class="specialist-row-status ' + statusClass + '" data-handle="' + escapeHtml(handle) + '">' + statusLabel + '</span>'
 					+ '</div>';
@@ -7713,7 +8242,7 @@
 				const handle = typeof entry.handle === 'string' ? entry.handle : '';
 				const value = typeof entry.value === 'string' ? entry.value : '';
 				const sel = list.querySelector('select.specialist-row-model[data-handle="' + handle + '"]');
-				if (sel) sel.value = value;
+				if (sel) sel.value = entry.acpAgent ? '' : value;
 			});
 		}
 
@@ -7740,6 +8269,14 @@
 				}
 				const sel = chatSettingsView.querySelector('select[data-setting-select="' + id + '"]');
 				if (sel && (typeof value === 'string' || typeof value === 'number')) {
+					if (sel.id === 'settingsDefaultModel' && !sel.dataset.modelsReady) {
+						sel.innerHTML = buildSpecialistModelOptions('sonnet');
+						sel.querySelector('option[value=""]')?.remove();
+						sel.dataset.modelsReady = 'true';
+					}
+					if (![...sel.options].some(option => option.value === String(value))) {
+						sel.add(new Option(String(value), String(value)));
+					}
 					sel.value = String(value);
 					return;
 				}
@@ -8020,7 +8557,6 @@
 				ev.preventDefault();
 				const name = actionEl.getAttribute('data-server-name') || '';
 				if (!name) return true;
-				if (!window.confirm('Delete MCP server "' + name + '"?')) return true;
 				vscode.postMessage({ type: 'mcpServerDelete', name: name });
 				return true;
 			}
@@ -8122,8 +8658,10 @@
 			const totalTokens = Number(message && message.totalTokens) || 0;
 			const totalCost = Number(message && message.totalCost) || 0;
 			const turnCount = Number(message && message.turnCount) || 0;
-			sessionUsageTokens.textContent = formatSessionTokens(totalTokens);
-			sessionUsageCost.textContent = formatSessionDollars(totalCost);
+			const incomplete = Number(message.unmeteredTurns) > 0;
+			sessionUsage.title = incomplete ? uiText('externalUsage') : '';
+			sessionUsageTokens.textContent = incomplete ? uiText('usageUnavailable') : formatSessionTokens(totalTokens);
+			sessionUsageCost.textContent = incomplete ? '—' : formatSessionDollars(totalCost);
 			sessionUsageTurns.textContent = turnCount === 1
 				? '1 turn'
 				: turnCount + ' turns';
@@ -8392,6 +8930,7 @@
 			if (!meter) {
 				return;
 			}
+			if (conversationHasUnmeteredUsage) { meter.textContent = uiText('usageUnavailable'); return; }
 			const input = Number(inputTokens) || 0;
 			const output = Number(outputTokens) || 0;
 			const cost = Number(dollars) || 0;
@@ -8466,6 +9005,8 @@
 			hdrCostPopover.style.right = (window.innerWidth - rect.right) + 'px';
 			hdrCostPopover.style.left = 'auto';
 			hdrCostPopover.hidden = false;
+			const width = hdrCostPopover.getBoundingClientRect().width;
+			hdrCostPopover.style.right = Math.max(8, Math.min(window.innerWidth - rect.right, window.innerWidth - width - 8)) + 'px';
 		}
 
 		function closeCostPopover() {
@@ -8740,3 +9281,6 @@
 				}
 			});
 		}
+
+		activateDraft(document.body.dataset.conversationId, document.body.dataset.defaultModel);
+		vscode.postMessage({ type: 'webviewReady' });

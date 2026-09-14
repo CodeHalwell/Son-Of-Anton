@@ -116,7 +116,10 @@ export class BrokerClient {
 				socket.write(JSON.stringify({ auth: sessionToken }) + '\n');
 			});
 
+			socket.setTimeout(5000, () => fail(new Error('Credential broker timed out')));
+
 			socket.on('data', (chunk: Buffer) => {
+				if (buffer.length + chunk.length > 1024 * 1024) { fail(new Error('Credential broker response too large')); return; }
 				buffer += chunk.toString('utf-8');
 				const lines = buffer.split('\n');
 				buffer = lines.pop() ?? '';
@@ -129,7 +132,7 @@ export class BrokerClient {
 					try {
 						msg = JSON.parse(line) as Record<string, unknown>;
 					} catch {
-						fail(new Error(`broker returned invalid JSON: ${line}`));
+						fail(new Error('Credential broker returned invalid JSON'));
 						return;
 					}
 
@@ -148,7 +151,7 @@ export class BrokerClient {
 					} else if ('result' in msg) {
 						settle({ result: msg['result'] });
 					} else {
-						fail(new Error(`broker returned malformed response: ${line}`));
+						fail(new Error('Credential broker returned a malformed response'));
 					}
 				}
 			});

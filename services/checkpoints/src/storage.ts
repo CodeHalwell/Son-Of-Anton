@@ -62,7 +62,8 @@ export class CheckpointStorage {
 		try {
 			const data = await fs.readFile(filePath, 'utf-8');
 			return JSON.parse(data) as SessionManifest;
-		} catch {
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { throw error; }
 			const manifest: SessionManifest = {
 				sessionId,
 				createdAt: Date.now(),
@@ -79,6 +80,7 @@ export class CheckpointStorage {
 	}
 
 	async saveFileSnapshot(sessionId: string, hash: string, content: string): Promise<void> {
+		if (!/^[a-f0-9]{64}$/.test(hash)) { throw new Error('Invalid snapshot hash'); }
 		const filePath = path.join(this.sessionPath(sessionId), 'files', `${hash}.snap`);
 		try {
 			await fs.access(filePath);
@@ -89,8 +91,11 @@ export class CheckpointStorage {
 	}
 
 	async loadFileSnapshot(sessionId: string, hash: string): Promise<string> {
+		if (!/^[a-f0-9]{64}$/.test(hash)) { throw new Error('Invalid snapshot hash'); }
 		const filePath = path.join(this.sessionPath(sessionId), 'files', `${hash}.snap`);
-		return fs.readFile(filePath, 'utf-8');
+		const content = await fs.readFile(filePath, 'utf-8');
+		if (CheckpointStorage.hashContent(content) !== hash) { throw new Error('Snapshot content hash mismatch'); }
+		return content;
 	}
 
 	async listSessions(): Promise<string[]> {

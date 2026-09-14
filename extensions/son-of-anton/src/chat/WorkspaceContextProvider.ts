@@ -147,33 +147,31 @@ export class WorkspaceContextProvider implements vscode.Disposable {
 		return `## URL: ${url}\n\n${result.text ?? ''}\n`;
 	}
 
-	/**
-	 * Resolve `@terminal` into a markdown block containing the active
-	 * terminal's most recently completed command and output. Requires shell
-	 * integration to be enabled — without it, VS Code's stable API exposes no
-	 * way to read terminal scrollback, and we surface a placeholder so the
-	 * LLM understands why the context is missing.
-	 */
+	/** Resolve both terminal attachment entry points from the same bounded capture. */
 	async resolveTerminalMention(): Promise<string> {
+		const section = (message: string) => `## Terminal\n\n[${message}]\n`;
+		if (!vscode.workspace.getConfiguration('sota.terminal').get<boolean>('shellIntegration', true)) {
+			return section(vscode.l10n.t('Terminal capture is off. Enable Capture Terminal Output in Settings → Terminal, then run the command again.'));
+		}
 		const terminal = vscode.window.activeTerminal;
-		if (!terminal) {
-			return '## Terminal\n\n[no active terminal]\n';
-		}
-		const integration = terminal.shellIntegration;
-		if (!integration) {
-			return '## Terminal\n\n[shell integration disabled — enable terminal.integrated.shellIntegration.enabled in settings to capture terminal output]\n';
-		}
+		if (!terminal) { return section(vscode.l10n.t('No active terminal. Open a terminal and run a command to attach its output.')); }
 		const captured = this.terminalCapture.lastOutputFor(terminal);
 		if (!captured) {
-			return '## Terminal\n\n[no command has run in this terminal yet — once you run something, @terminal will surface its output]\n';
+			return section(terminal.shellIntegration
+				? vscode.l10n.t('No command captured yet. Run a command after Anton starts, then attach its output.')
+				: vscode.l10n.t('Shell integration is unavailable. Enable terminal.integrated.shellIntegration.enabled, open a new terminal, and run a command.'));
 		}
-		const header = captured.commandLine
-			? `## Terminal: ${captured.commandLine}`
-			: '## Terminal';
-		const body = captured.output.trim().length > 0
-			? captured.output
-			: '[command produced no output]';
-		return `${header}\n\n${body}\n`;
+		const status = captured.running ? vscode.l10n.t('Running — output so far')
+			: captured.exitCode === undefined ? vscode.l10n.t('Finished — exit code unavailable') : vscode.l10n.t('Exited with code {0}', captured.exitCode);
+		const body = captured.output || (captured.running ? vscode.l10n.t('[No output yet]') : vscode.l10n.t('[Command produced no output]'));
+		const content = [captured.commandLine ? `$ ${captured.commandLine}` : '', body].filter(Boolean).join('\n\n');
+		const fence = '`'.repeat(Math.max(3, ...Array.from(content.matchAll(/`+/g), match => match[0].length + 1)));
+		const notes = [
+			status,
+			captured.truncated ? vscode.l10n.t('Showing the latest output within the configured line limit and 16 KiB cap.') : '',
+			captured.readFailed ? vscode.l10n.t('Output capture was interrupted; this excerpt may be incomplete.') : '',
+		].filter(Boolean).join('\n');
+		return `## Terminal\n\n${notes}\n\n${fence}text\n${content}\n${fence}\n`;
 	}
 
 	async collect(opts?: CollectOptions): Promise<WorkspaceContext> {

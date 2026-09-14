@@ -1,3 +1,4 @@
+import { workspacePath, readWorkspaceFile } from '../_shared/auth/dist/workspaceFs.js';
 // Son of Anton — Main Indexer
 // Orchestrates file watching, AST parsing, graph writing, and embedding generation.
 
@@ -147,6 +148,7 @@ export class Indexer {
 	 * Returns true if the file was actually updated, false if skipped.
 	 */
 	async indexFile(filePath: string): Promise<boolean> {
+		filePath = await workspacePath(this.config.project.path, filePath);
 		try {
 			// Check if the file is supported
 			const language = this.treeSitter.getLanguageForFile(filePath);
@@ -155,7 +157,8 @@ export class Indexer {
 			}
 
 			// Read the file
-			const source = await fs.promises.readFile(filePath, 'utf-8');
+			const source = await readWorkspaceFile(this.config.project.path, filePath);
+			if (source === undefined) { await this.removeFile(filePath); return false; }
 
 			// Check if content has changed (Merkle-tree approach)
 			const contentHash = crypto.createHash('sha256').update(source).digest('hex');

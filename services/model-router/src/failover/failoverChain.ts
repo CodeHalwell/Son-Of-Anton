@@ -30,11 +30,8 @@ function isContentEvent(event: AgentEvent): boolean {
  *   attempt. Pre-content events (message_start, usage, etc.) are buffered and
  *   discarded on retry so the fallback adapter starts cleanly.
  *
- *   Mid-stream failover — error after content events have already been
- *   yielded: the chain advances to the next adapter, which replays the full
- *   request from the beginning. The caller receives a new `message_start`
- *   event from the fallback adapter, signalling the provider switch. The
- *   chat UI can clear the partial message on `message_start`.
+ *   After visible content, an error terminates the request. Replaying a tool
+ *   request could execute the same action twice and cannot be made transparent.
  *
  * A non-retryable error from any adapter terminates the stream immediately —
  * the error event is passed through to the caller and no further adapters
@@ -57,6 +54,7 @@ export class FailoverChain implements ProviderAdapter {
 		slots: readonly FailoverSlot[],
 		id: string = 'failover-chain',
 		displayName: string = 'Failover Chain',
+		private readonly retryError: (error: unknown) => boolean = () => true,
 	) {
 		if (slots.length === 0) {
 			throw new Error('FailoverChain requires at least one slot');
@@ -98,76 +96,43 @@ export class FailoverChain implements ProviderAdapter {
 	}
 
 	async *send(req: UniformRequest, signal: AbortSignal): AsyncIterable<AgentEvent> {
-		let lastErrorCode: string | undefined;
-		let lastErrorMessage: string | undefined;
-
+		let lastError: Extract<AgentEvent, { type: 'error' }> = { type: 'error', code: 'all_providers_failed', message: 'All providers failed', retryable: false };
 		for (const { adapter, model } of this.slots) {
-			const adapterReq: UniformRequest = { ...req, model };
-			let shouldAdvance = false;
-
-			// Buffer events that arrive before the first content event.  If a
-			// retryable error occurs before any content is seen, discard the buffer
-			// so the caller never observes the failed adapter's preamble.
-			const preContentBuffer: AgentEvent[] = [];
+			const buffered: AgentEvent[] = [];
 			let contentSeen = false;
-
 			try {
-				for await (const event of adapter.send(adapterReq, signal)) {
-					// Retryable error — advance to next adapter (consuming the event
-					// so the caller never sees the failed-provider error).
-					if (event.type === 'error' && event.retryable) {
-						lastErrorCode = event.code;
-						lastErrorMessage = event.message;
-						shouldAdvance = true;
-						break;
+				signal.throwIfAborted();
+				for await (const event of adapter.send({ ...req, model }, signal)) {
+					signal.throwIfAborted();
+					if (event.type === 'error') {
+						lastError = { ...event, retryable: false };
+						if (event.retryable && !contentSeen) { break; }
+						for (const previous of buffered) { yield previous; }
+						yield lastError;
+						yield { type: 'message_stop', stopReason: 'error' };
+						return;
 					}
-
-					if (!contentSeen) {
-						if (isContentEvent(event)) {
-							// First content seen — flush the buffered preamble then yield
-							// the content event itself.
-							contentSeen = true;
-							for (const buffered of preContentBuffer) {
-								yield buffered;
-							}
-							preContentBuffer.length = 0;
-						} else {
-							// Not content yet — buffer and continue.
-							preContentBuffer.push(event);
-							continue;
-						}
+					if (!contentSeen && isContentEvent(event)) {
+						contentSeen = true;
+						for (const previous of buffered) { yield previous; }
+						buffered.length = 0;
 					}
-
-					yield event;
-				}
-			} catch (err) {
-				// Network / connection error — always retryable.
-				lastErrorCode = 'connection_reset';
-				lastErrorMessage = err instanceof Error ? err.message : String(err);
-				shouldAdvance = true;
-			}
-
-			if (!shouldAdvance) {
-				// Adapter completed normally (or emitted a non-retryable error).
-				// Flush any remaining buffered pre-content events so the caller gets
-				// the full picture (e.g. usage or message_stop with no content).
-				if (!contentSeen) {
-					for (const buffered of preContentBuffer) {
-						yield buffered;
+					if (contentSeen) { yield event; } else { buffered.push(event); }
+					if (event.type === 'message_stop') {
+						for (const previous of buffered) { yield previous; }
+						return;
 					}
 				}
-				return;
+				if (contentSeen) {
+					lastError = { type: 'error', code: 'incomplete_stream', message: 'Provider stream ended before completion', retryable: false };
+				}
+			} catch (error) {
+				lastError = { type: 'error', code: signal.aborted ? 'cancelled' : (error as NodeJS.ErrnoException)?.code ?? (this.retryError(error) ? 'connection_reset' : 'PROVIDER_ERROR'), message: signal.aborted ? 'Request cancelled' : error instanceof Error ? error.message : 'Provider connection failed', retryable: false };
+				if (!this.retryError(error)) { break; }
 			}
-			// Loop continues to try the next adapter — buffer is discarded.
+			if (contentSeen || signal.aborted) { break; }
 		}
-
-		// All adapters exhausted.
-		yield {
-			type: 'error',
-			code: lastErrorCode ?? 'all_providers_failed',
-			message: `All providers failed. Last error: ${lastErrorMessage ?? 'unknown'}`,
-			retryable: false,
-		};
+		yield lastError;
 		yield { type: 'message_stop', stopReason: 'error' };
 	}
 }

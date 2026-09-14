@@ -8,8 +8,8 @@
  * `TaskBoardPanel.ts`:
  *
  *   - ready -> in-progress     => dispatch the subtask.
- *   - done -> ready/in-progress (with confirm) => rerun.
- *   - failed -> ready/in-progress (with confirm) => rerun.
+ *   - done -> ready/in-progress => request a host-confirmed rerun.
+ *   - failed -> ready/in-progress => request a host-confirmed rerun.
  *   - same column => no-op.
  *   - other transitions => silently ignored (undefined behaviour by design).
  */
@@ -35,6 +35,7 @@ interface DropPayload {
 
 export function KanbanColumn({ title, state, tasks, personasById }: KanbanColumnProps): JSX.Element {
 	const [dragOver, setDragOver] = useState(false);
+	const [visibleCount, setVisibleCount] = useState(50);
 
 	const onDragOver = useCallback((ev: DragEvent<HTMLDivElement>): void => {
 		ev.preventDefault();
@@ -78,15 +79,11 @@ export function KanbanColumn({ title, state, tasks, personasById }: KanbanColumn
 			return;
 		}
 		if (fromState === 'done' && (state === 'ready' || state === 'in-progress')) {
-			if (window.confirm('Re-run this subtask?')) {
-				postToHost({ type: 'rerun', taskId });
-			}
+			postToHost({ type: 'rerun', taskId });
 			return;
 		}
 		if (fromState === 'failed' && (state === 'ready' || state === 'in-progress')) {
-			if (window.confirm('Retry this failed subtask?')) {
-				postToHost({ type: 'rerun', taskId });
-			}
+			postToHost({ type: 'rerun', taskId });
 			return;
 		}
 		// Other transitions intentionally fall through to no-op.
@@ -101,13 +98,15 @@ export function KanbanColumn({ title, state, tasks, personasById }: KanbanColumn
 			onDrop={onDrop}
 		>
 			<div className="column-header">
-				{title}
+				<span className="status-dot" aria-hidden="true" /><h2>{title}</h2>
 				<span className="column-count">{tasks.length}</span>
 			</div>
 			<div className="column-body">
-				{tasks.map(task => (
+				{tasks.length === 0 && <div className="column-empty">{state === 'failed' ? 'Nothing needs attention' : state === 'done' ? 'Completed work lands here' : 'No tasks here'}</div>}
+				{tasks.slice(0, visibleCount).map(task => (
 					<KanbanCard key={task.id} task={task} persona={personasById.get(task.assignee)} />
 				))}
+				{tasks.length > visibleCount && <button type="button" className="quiet-button" onClick={() => setVisibleCount(count => count + 50)}>Show More ({tasks.length - visibleCount} remaining)</button>}
 			</div>
 		</div>
 	);

@@ -8,8 +8,7 @@ import {
 import {
   type CodegraphEngine,
   type EngineConfig,
-  loadEngine,
-  placeholder,
+  EngineSession,
 } from './engine.js';
 import { TOOLS } from './tools.js';
 
@@ -37,12 +36,12 @@ function parseArgs(argv: string[]): CliArgs {
     } else if (arg === '--local-embedder') {
       out.embedder = { kind: 'local' };
     } else if (arg.startsWith('--provider-embedder=')) {
-      // Format: --provider-embedder=ENDPOINT|MODEL|DIMS[|API_KEY]
+      // Format: --provider-embedder=ENDPOINT|MODEL|DIMS (set CODEGRAPH_EMBEDDING_API_KEY separately)
       const parts = arg.slice('--provider-embedder='.length).split('|');
-      if (parts.length >= 3) {
+      if (parts.length === 3) {
         const endpoint = parts[0]!.trim();
         const model = parts[1]!.trim();
-        const dims = Number.parseInt(parts[2]!, 10);
+        const dims = Number(parts[2]);
         if (!endpoint || !model) {
           console.error(
             '[codegraph] --provider-embedder requires non-empty ENDPOINT and MODEL; ignoring flag',
@@ -57,12 +56,12 @@ function parseArgs(argv: string[]): CliArgs {
             endpoint,
             model,
             dims,
-            apiKey: parts[3],
+            apiKey: process.env.CODEGRAPH_EMBEDDING_API_KEY,
           };
         }
       } else {
         console.error(
-          '[codegraph] --provider-embedder expects ENDPOINT|MODEL|DIMS[|API_KEY]; ignoring flag',
+          '[codegraph] --provider-embedder expects ENDPOINT|MODEL|DIMS (set CODEGRAPH_EMBEDDING_API_KEY separately); ignoring flag',
         );
       }
     }
@@ -92,8 +91,8 @@ function optionalNumber(
 ): number {
   const v = args[key];
   if (v === undefined || v === null) return fallback;
-  if (typeof v !== 'number' || !Number.isFinite(v)) {
-    throw new ToolInputError(`argument '${key}' must be a finite number`);
+  if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > (key === 'depth' ? 20 : 100)) {
+    throw new ToolInputError(`argument '${key}' must be a positive integer within the supported limit`);
   }
   return v;
 }
@@ -107,7 +106,8 @@ async function dispatch(
     case 'semantic_search': {
       const query = requireString(args, 'query');
       const limit = optionalNumber(args, 'limit', 10);
-      const scope = Array.isArray(args['scope']) ? (args['scope'] as string[]) : undefined;
+      if (args.scope !== undefined && (!Array.isArray(args.scope) || !args.scope.every(value => typeof value === 'string'))) { throw new ToolInputError('scope must be an array of paths'); }
+      const scope = args.scope as string[] | undefined;
       return await engine.semanticSearch(query, limit, scope);
     }
     case 'file_summary':
@@ -135,74 +135,39 @@ async function dispatch(
 }
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2));
-
-  // Docker backend is not implemented on the napi side; we still load
-  // placeholders so the server stays JSON-RPC compatible.
-  const engine =
-    args.backend === 'embedded'
-      ? await loadEngine({
-          dbPath: args.db,
-          indexRoot: args.indexRoot,
-          embedder: args.embedder,
-        })
-      : null;
-
-  const server = new Server(
-    { name: 'codegraph', version: '0.1.0' },
-    { capabilities: { tools: {} } },
-  );
-
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: TOOLS,
-  }));
-
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
-    const { name, arguments: toolArgs = {} } = req.params;
-
-    if (!engine) {
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: JSON.stringify(placeholder(name, toolArgs), null, 2),
-          },
-        ],
-      };
-    }
-
-    try {
-      const result = await dispatch(engine, name, toolArgs as Record<string, unknown>);
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: JSON.stringify(result, null, 2),
-          },
-        ],
-      };
-    } catch (err) {
-      return {
-        isError: true,
-        content: [
-          {
-            type: 'text' as const,
-            text: `tool ${name} failed: ${(err as Error).message}`,
-          },
-        ],
-      };
-    }
-  });
-
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-
-  console.error(
-    `[codegraph] mcp server ready (backend=${args.backend}, engine=${engine ? 'loaded' : 'placeholder'})`,
-  );
+	const args = parseArgs(process.argv.slice(2));
+	if (args.backend !== 'embedded') { throw new Error('Use the dedicated Docker MCP gateway for the Docker backend.'); }
+	const server = new Server({ name: 'codegraph', version: '0.1.0' }, { capabilities: { tools: { listChanged: true } } });
+	const session = new EngineSession({ dbPath: args.db, indexRoot: args.indexRoot, embedder: args.embedder }, status => {
+		console.error(`[codegraph-status] ${JSON.stringify(status)}`);
+		void server.notification({ method: 'notifications/tools/list_changed' }).catch(() => {});
+	});
+	const statusTool = { name: 'codegraph_status', description: 'Read graph indexing, semantic search and watcher readiness.', inputSchema: { type: 'object' as const, properties: {} }, annotations: { readOnlyHint: true, openWorldHint: false } };
+	server.setRequestHandler(ListToolsRequestSchema, async () => ({
+		tools: [statusTool, ...(session.status.structural ? TOOLS.filter(tool => tool.name !== 'semantic_search' || session.status.semantic === 'ready').map(tool => ({ ...tool, annotations: { readOnlyHint: true, openWorldHint: false } })) : [])],
+	}));
+	server.setRequestHandler(CallToolRequestSchema, async req => {
+		const { name, arguments: inputs = {} } = req.params;
+		try {
+			let result: unknown;
+			if (name === 'codegraph_status') { result = session.status; }
+			else {
+				if (!session.engine || !session.status.structural) { throw new Error(session.status.reason || 'Code graph is still indexing. Check codegraph_status.'); }
+				if (name === 'semantic_search' && session.status.semantic !== 'ready') { throw new Error(`Semantic search is ${session.status.semantic}. Configure an embedder and check codegraph_status.`); }
+				result = await dispatch(session.engine, name, inputs);
+			}
+			return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+		} catch (error) {
+			return { isError: true, content: [{ type: 'text' as const, text: error instanceof Error ? error.message : String(error) }] };
+		}
+	});
+	const shutdown = (): void => { session.dispose(); void server.close(); };
+	process.once('SIGTERM', shutdown);
+	process.once('SIGINT', shutdown);
+	process.stdin.once('end', shutdown);
+	await server.connect(new StdioServerTransport());
+	// The MCP handshake is available while the initial scan/model download runs.
+	void session.start();
 }
 
-main().catch((err) => {
-  console.error('[codegraph] fatal:', err);
-  process.exit(1);
-});
+main().catch(error => { console.error('[codegraph] fatal:', error); process.exitCode = 1; });

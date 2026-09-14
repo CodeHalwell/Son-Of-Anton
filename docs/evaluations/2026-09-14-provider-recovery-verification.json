@@ -1,0 +1,219 @@
+{
+  "date": "2026-09-14",
+  "source": "uncommitted workspace based on 1dc6348acb53d23a012e93d503f39b1e0c47e3c7",
+  "providerChanges": {
+    "maximumConcurrentRequests": 8,
+    "timeoutIncludingQueueMs": 30000,
+    "bodyLimit": "32 bytes per requested vector component plus 16 KiB API metadata, capped at 64 MiB",
+    "redirects": "rejected",
+    "diagnostics": "HTTP errors omit URLs and response bodies"
+  },
+  "before": {
+    "installedProviderCasesFailed": 4,
+    "observedConcurrentProviderRequests": 24
+  },
+  "verification": {
+    "rustCorePassed": 40,
+    "rustCoreIgnored": 2,
+    "packagedGraphPassed": 18,
+    "packagedGraphFailed": 0,
+    "providerCasesPassed": 5,
+    "freshDmgInstall": "passed",
+    "ui": "Semantic search ready at 16:06:56; saved four-stage Council review retained; terminal npm test 2/2 passed"
+  },
+  "soak": {
+    "durationMs": 300649.994958,
+    "copiedSourceFiles": [
+      "acp/AcpConnection.ts",
+      "acp/AcpDiagnostics.ts",
+      "acp/AcpPeer.ts",
+      "acp/AcpRuntime.ts",
+      "acp/protocol.ts",
+      "agents/AcpAgent.ts",
+      "agents/agentEvents.ts",
+      "agents/AgentManager.ts",
+      "agents/AgentStackFactory.ts",
+      "agents/BaseAgent.ts",
+      "agents/CiRetryAgent.ts",
+      "agents/CodeGeneratorAgent.ts",
+      "agents/ContextSanitiser.ts",
+      "agents/DesignAgent.ts",
+      "agents/DocumentationAgent.ts",
+      "agents/E2eTestAgent.ts",
+      "agents/MetricsTracker.ts",
+      "agents/ModerniserAgent.ts",
+      "agents/OrchestratorAgent.ts",
+      "agents/PenTestCoordinatorAgent.ts",
+      "agents/PrGenerationAgent.ts",
+      "agents/ProjectMemory.ts",
+      "agents/promptLoader.ts",
+      "agents/RequirementsAgent.ts",
+      "agents/ReviewAgent.ts",
+      "agents/RoutedAgent.ts",
+      "agents/SecurityScannerAgent.ts",
+      "agents/SessionBudget.ts",
+      "agents/SpecialistMemory.ts",
+      "agents/SpecPipelineManager.ts",
+      "agents/specTypes.ts",
+      "agents/TaskDecompositionAgent.ts",
+      "agents/TestWriterAgent.ts",
+      "agents/types.ts",
+      "auth/BrokerServer.ts",
+      "auth/CredentialBroker.ts",
+      "auth/types.ts",
+      "chat/personas.ts",
+      "chat/specialistRegistry.ts",
+      "chatStream.ts",
+      "checkpoint/CheckpointManager.ts",
+      "checkpoint/GitSnapshotStore.ts",
+      "council/config.ts",
+      "council/CouncilModelRunner.ts",
+      "council/CouncilService.ts",
+      "council/CouncilStore.ts",
+      "council/prompts.ts",
+      "council/snapshot.ts",
+      "council/types.ts",
+      "credentials/credentialDetection.ts"
+    ],
+    "indexedSymbols": 186,
+    "cycles": 179,
+    "searches": 3580,
+    "maxStatusMs": 31.35133400000268,
+    "workerRss": {
+      "baselineBytes": 56426496,
+      "peakBytes": 56770560,
+      "finalBytes": 53035008
+    },
+    "embedding": "generated vectors: capacity and lifecycle only, not relevance quality"
+  },
+  "packagedLoad": {
+    "symbols": 2002,
+    "dimensions": 384,
+    "initialReadyMs": 14757.543708,
+    "concurrent100Ms": 497.65166600000157,
+    "maxStatusLatencyMs": 82.27737499999967,
+    "replacedFiles": 10
+  },
+  "packagedLocalModel": {
+    "model": "BGE-small-en-v1.5",
+    "fixture": "local-paraphrase-v1",
+    "coldReadyMs": 8466.661333,
+    "warmReadyMs": 1317.6597079999992,
+    "concurrent32Ms": 866.2820420000007,
+    "maxStatusLatencyMs": 35.75316600000042,
+    "recallAt1": 1,
+    "samples": [
+      {
+        "query": "calculate the shopping basket bill",
+        "expected": "cartTotal",
+        "retrieved": [
+          "cartTotal",
+          "scheduleRetry",
+          "exportCsv"
+        ],
+        "latencyMs": 213.82237500000156
+      },
+      {
+        "query": "securely hash a secret for authentication",
+        "expected": "passwordDigest",
+        "retrieved": [
+          "passwordDigest",
+          "createThumbnail",
+          "evictExpiredEntries"
+        ],
+        "latencyMs": 44.79591600000094
+      },
+      {
+        "query": "find the soonest upcoming meeting",
+        "expected": "nextAppointment",
+        "retrieved": [
+          "nextAppointment",
+          "scheduleRetry",
+          "evictExpiredEntries"
+        ],
+        "latencyMs": 10.271582999999737
+      },
+      {
+        "query": "make a small preview picture",
+        "expected": "createThumbnail",
+        "retrieved": [
+          "createThumbnail",
+          "nextAppointment",
+          "cartTotal"
+        ],
+        "latencyMs": 46.415750000000116
+      },
+      {
+        "query": "remove cached values whose lifetime has elapsed",
+        "expected": "evictExpiredEntries",
+        "retrieved": [
+          "evictExpiredEntries",
+          "exportCsv",
+          "nextAppointment"
+        ],
+        "latencyMs": 130.0919589999994
+      },
+      {
+        "query": "save tabular records as comma separated text",
+        "expected": "exportCsv",
+        "retrieved": [
+          "exportCsv",
+          "evictExpiredEntries",
+          "cartTotal"
+        ],
+        "latencyMs": 121.03420799999913
+      }
+    ]
+  },
+  "installerManifest": {
+    "version": 1,
+    "product": "Son of Anton IDE",
+    "ideVersion": "1.112.0",
+    "commit": "1dc6348acb53d23a012e93d503f39b1e0c47e3c7",
+    "target": "darwin-arm64",
+    "createdAt": "2026-09-14T15:05:03.713Z",
+    "signing": "ad-hoc",
+    "files": [
+      {
+        "name": "son-of-anton-1.112.0-darwin-arm64.zip",
+        "bytes": 221485219,
+        "sha256": "78e4b385848d179eea0b0da18bc4b6ddf70cb1efcfce1f19ceda68bddfc8f80f"
+      },
+      {
+        "name": "son-of-anton-1.112.0-darwin-arm64.dmg",
+        "bytes": 277475849,
+        "sha256": "0d753b49a532edd1592c40f1288cdbecf522baaf4f5ec7e1204b7863dd883cbd"
+      }
+    ]
+  },
+  "limitations": [
+    "Provider fixtures use a loopback HTTP endpoint; no live commercial embedding provider was validated.",
+    "Five-minute soak uses generated vectors over 50 copied application source files; this does not establish general semantic relevance or day-long stability.",
+    "Native Windows/Linux installation and production signing/notarization remain open."
+  ],
+  "logs": {
+    "before": "/tmp/sota-production-provider-before.log",
+    "core": "/tmp/sota-production-provider-core-suite.log",
+    "providerCases": "/tmp/sota-production-provider-final-errors.log",
+    "soak": "/tmp/sota-production-provider-soak.log",
+    "packagedGraph": "/tmp/sota-production-provider-packaged-tests.log",
+    "installer": "/tmp/sota-production-provider-desktop-install.log"
+  },
+  "runtimeIdentities": [
+    {
+      "file": "index.cjs",
+      "packagedSha256": "064b57859dbf30860433c8be822e916399dd324d12211ff8b0a9e4c4259c26f3",
+      "soakSourceSha256": "064b57859dbf30860433c8be822e916399dd324d12211ff8b0a9e4c4259c26f3"
+    },
+    {
+      "file": "engine-worker.cjs",
+      "packagedSha256": "8d254c4d2d46d0a3b250f4d032944ec8e590ab88985f27011e1811df5e486cc6",
+      "soakSourceSha256": "8d254c4d2d46d0a3b250f4d032944ec8e590ab88985f27011e1811df5e486cc6"
+    },
+    {
+      "file": "node_modules/@son-of-anton/codegraph-napi/engine.node",
+      "packagedSha256": "f92c02ce5084be4b51f24ddab2e257cc3acc624155c50e1dcf95f8efd3430397",
+      "soakSourceSha256": "f92c02ce5084be4b51f24ddab2e257cc3acc624155c50e1dcf95f8efd3430397"
+    }
+  ]
+}

@@ -1,13 +1,13 @@
 {
 	"name": "soa-visual-regression",
 	"version": "1.0.0",
-	"description": "Son of Anton — Visual Regression Testing service",
+	"description": "Son of Anton \u2014 Visual Regression Testing service",
 	"main": "dist/index.js",
 	"scripts": {
-		"build": "tsc",
+		"build": "tsc && tsc -p tsconfig.test.json",
 		"start": "node dist/index.js",
 		"dev": "tsc --watch & nodemon dist/index.js",
-		"test": "node --test test/**/*.test.js"
+		"test": "npm run build && node --test test/*.test.js dist-test/test/*.test.js"
 	},
 	"dependencies": {
 		"pixelmatch": "^6.0.0",

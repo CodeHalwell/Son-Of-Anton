@@ -4,6 +4,7 @@
 import { readFile, watch } from 'fs/promises';
 import path from 'path';
 import { EventEmitter } from 'events';
+import { validateAgent, object } from '../../_shared/acp/dist/protocol';
 import type {
 	AgentRegistryConfig,
 	AgentRegistryEntry,
@@ -19,8 +20,9 @@ import type {
  */
 export class AgentRegistry extends EventEmitter {
 	private agents = new Map<string, AgentRegistryEntry>();
-	private watcher: AsyncIterable<unknown> | null = null;
+
 	private watchAbort: AbortController | null = null;
+	private revision = 0;
 
 	constructor(private readonly configPath: string) {
 		super();
@@ -28,15 +30,20 @@ export class AgentRegistry extends EventEmitter {
 
 	/** Load agents from the configuration file. */
 	async load(): Promise<void> {
+		const revision = ++this.revision;
 		try {
 			const raw = await readFile(this.configPath, 'utf-8');
+			if (Buffer.byteLength(raw) > 1024 * 1024) { throw new Error('ACP registry exceeds 1 MiB'); }
 			const config: AgentRegistryConfig = JSON.parse(raw);
-
-			this.agents.clear();
+			if (!object(config) || !Array.isArray(config.agents) || config.agents.length > 64) { throw new Error('ACP registry requires an agents array with at most 64 entries'); }
+			const next = new Map<string, AgentRegistryEntry>();
 			for (const entry of config.agents) {
 				this.validateEntry(entry);
-				this.agents.set(entry.id, entry);
+				if (next.has(entry.id)) { throw new Error(`Duplicate ACP agent id: ${entry.id}`); }
+				next.set(entry.id, entry);
 			}
+			if (revision !== this.revision) { return; }
+			this.agents = next;
 
 			this.emit('loaded', this.listDescriptors());
 		} catch (err) {
@@ -50,6 +57,7 @@ export class AgentRegistry extends EventEmitter {
 
 	/** Start watching the config file for changes. */
 	async startWatching(): Promise<void> {
+		if (this.watchAbort) { return; }
 		this.watchAbort = new AbortController();
 		const dir = path.dirname(this.configPath);
 		const filename = path.basename(this.configPath);
@@ -61,8 +69,8 @@ export class AgentRegistry extends EventEmitter {
 					const fileEvent = event as { eventType: string; filename: string };
 					if (fileEvent.filename === filename) {
 						console.log('[acp-registry] Config file changed, reloading...');
-						await this.load();
-						this.emit('change', this.listDescriptors());
+						try { await this.load(); this.emit('change', this.listDescriptors()); }
+						catch (error) { this.emit('reloadError', error); }
 					}
 				}
 			}
@@ -85,7 +93,7 @@ export class AgentRegistry extends EventEmitter {
 			id: entry.id,
 			name: entry.name,
 			transport: entry.transport,
-			capabilities: entry.capabilities,
+			capabilities: [...entry.capabilities],
 			contextWindow: entry.contextWindow,
 			costTier: entry.costTier,
 		}));
@@ -93,7 +101,8 @@ export class AgentRegistry extends EventEmitter {
 
 	/** Get a specific agent entry by ID. */
 	getEntry(agentId: string): AgentRegistryEntry | undefined {
-		return this.agents.get(agentId);
+		const entry = this.agents.get(agentId);
+		return entry ? structuredClone(entry) : undefined;
 	}
 
 	/** Check if an agent is registered. */
@@ -105,30 +114,18 @@ export class AgentRegistry extends EventEmitter {
 	static entryToCapabilities(entry: AgentRegistryEntry): AgentCapabilities {
 		return {
 			agentId: entry.id,
-			capabilities: entry.capabilities,
+			capabilities: [...entry.capabilities],
 			supportsPause: false,
 			supportsResume: false,
 		};
 	}
 
 	private validateEntry(entry: AgentRegistryEntry): void {
-		if (!entry.id || typeof entry.id !== 'string') {
-			throw new Error('Agent entry must have a string id');
-		}
-		if (!entry.name || typeof entry.name !== 'string') {
-			throw new Error(`Agent ${entry.id}: must have a string name`);
-		}
-		if (entry.transport !== 'stdio' && entry.transport !== 'http') {
-			throw new Error(`Agent ${entry.id}: transport must be "stdio" or "http"`);
-		}
-		if (entry.transport === 'stdio' && !entry.command) {
-			throw new Error(`Agent ${entry.id}: stdio transport requires a "command"`);
-		}
-		if (entry.transport === 'http' && !entry.url) {
-			throw new Error(`Agent ${entry.id}: http transport requires a "url"`);
-		}
-		if (!Array.isArray(entry.capabilities)) {
-			throw new Error(`Agent ${entry.id}: must have a capabilities array`);
-		}
+		if (!object(entry)) { throw new Error('Agent entry must be an object'); }
+		if (entry.transport !== 'stdio') { throw new Error('ACP agents must use stdio; the former /rpc + /events HTTP transport was not standard ACP'); }
+		validateAgent(entry);
+		if (typeof entry.name !== 'string' || !entry.name.trim()) { throw new Error(`Agent ${entry.id}: must have a name`); }
+		if (!Array.isArray(entry.capabilities) || !entry.capabilities.every(capability => typeof capability === 'string')) { throw new Error(`Agent ${entry.id}: must have a capabilities array`); }
+		if (!['free', 'subscription', 'pay-per-use', 'local'].includes(entry.costTier)) { throw new Error(`Agent ${entry.id}: invalid costTier`); }
 	}
 }
