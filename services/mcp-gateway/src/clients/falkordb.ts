@@ -1,10 +1,11 @@
+import { parameterizedQuery, decodeCompactResult, type CypherValue } from '../../_shared/cypher/dist/index.js';
 // Copyright (c) Son of Anton Contributors. All rights reserved.
 // Licensed under the MIT License.
 
 import { createClient, RedisClientType } from 'redis';
 
 export interface GraphRecord {
-	[key: string]: string | number | boolean | null | GraphRecord[] | GraphRecord;
+	[key: string]: CypherValue;
 }
 
 export interface GraphQueryResult {
@@ -29,89 +30,94 @@ export class FalkorDBClient {
 			return;
 		}
 		this.client = createClient({
-			socket: { host: this.host, port: this.port },
+			socket: {
+				host: this.host, port: this.port, connectTimeout: 3000,
+				reconnectStrategy: retries => Math.min(250 * 2 ** Math.min(retries, 5), 5000),
+			},
+			disableOfflineQueue: true,
+			commandsQueueMaxLength: 1000,
 			password: process.env.FALKORDB_PASSWORD || undefined,
 		}) as RedisClientType;
+		// Redis emits errors during outages even while it is reconnecting.
+		// Handle them so a datastore restart cannot terminate the gateway.
+		this.client.on('error', (error: Error) => {
+			console.error('[falkordb] Connection error:', error.message);
+		});
 		await this.client.connect();
 	}
 
 	async disconnect(): Promise<void> {
-		if (this.client) {
-			await this.client.disconnect();
-			this.client = null;
+		const client = this.client;
+		this.client = null;
+		if (client?.isOpen) {
+			await client.disconnect();
 		}
 	}
 
 	async query(cypher: string, params?: Record<string, unknown>, timeout?: number): Promise<GraphQueryResult> {
-		if (!this.client) {
-			throw new Error('FalkorDB client is not connected. Call connect() first.');
+		if (!this.client?.isReady) {
+			throw new Error('FalkorDB client is not connected. Retry when the service is healthy.');
 		}
 
 		const timeoutMs = timeout ?? 500;
-		const args = ['GRAPH.QUERY', this.graphName, cypher];
-		if (params && Object.keys(params).length > 0) {
-			// FalkorDB supports parameter passing via CYPHER prefix
-			const paramStr = Object.entries(params)
-				.map(([k, v]) => `${k}=${JSON.stringify(v)}`)
-				.join(' ');
-			args[2] = `CYPHER ${paramStr} ${cypher}`;
-		}
-		args.push('TIMEOUT', String(timeoutMs));
+		const args = ['GRAPH.QUERY', this.graphName, parameterizedQuery(cypher, params)];
+		args.push('TIMEOUT', String(timeoutMs), '--compact');
 
-		const result = await this.client.sendCommand(args) as unknown[];
+		const result = await this.sendWithDeadline(args, Math.max(1000, timeoutMs + 1000)) as unknown[];
 
 		return this.parseResult(result);
 	}
 
 	async isHealthy(): Promise<boolean> {
 		try {
-			if (!this.client) {
+			if (!this.client?.isReady) {
 				return false;
 			}
-			const result = await this.client.sendCommand(['GRAPH.QUERY', this.graphName, 'RETURN 1', 'TIMEOUT', '1000']);
+			const result = await this.sendWithDeadline(['GRAPH.QUERY', this.graphName, 'RETURN 1', 'TIMEOUT', '1000'], 2000);
 			return Array.isArray(result);
 		} catch {
 			return false;
 		}
 	}
 
-	private parseResult(raw: unknown[]): GraphQueryResult {
-		if (!Array.isArray(raw) || raw.length < 2) {
-			return { headers: [], rows: [] };
+	private async sendWithDeadline(args: string[], milliseconds: number): Promise<unknown> {
+		const client = this.client;
+		if (!client?.isReady) {
+			throw new Error('FalkorDB client is not ready');
 		}
-
-		const headerRow = raw[0] as string[];
-		const dataRows = raw[1] as unknown[][];
-
-		const headers = Array.isArray(headerRow) ? headerRow.map(String) : [];
-		const rows: GraphRecord[][] = [];
-
-		if (Array.isArray(dataRows)) {
-			for (const row of dataRows) {
-				if (Array.isArray(row)) {
-					rows.push(row.map(cell => this.parseCell(cell)));
-				}
-			}
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			return await Promise.race([
+				client.sendCommand(args),
+				new Promise<never>((_, reject) => {
+					timer = setTimeout(() => {
+						reject(new Error('FalkorDB request timed out; its completion is unknown'));
+						// A server-side query timeout cannot bound a stalled socket.
+						// Discard pending commands and reconnect; never replay writes.
+						void this.reconnectAfterTimeout(client);
+					}, milliseconds);
+				}),
+			]);
+		} finally {
+			clearTimeout(timer);
 		}
-
-		return { headers, rows };
 	}
 
-	private parseCell(cell: unknown): GraphRecord {
-		if (cell === null || cell === undefined) {
-			return {};
+	private async reconnectAfterTimeout(client: RedisClientType): Promise<void> {
+		try {
+			if (this.client !== client || !client.isOpen) { return; }
+			await client.disconnect();
+			if (this.client === client) { await client.connect(); }
+		} catch (error) {
+			console.error('[falkordb] Reconnection failed:', error instanceof Error ? error.message : String(error));
 		}
-		if (Array.isArray(cell)) {
-			// FalkorDB returns nodes/edges as arrays of [type, properties]
-			const props = cell[cell.length - 1];
-			if (typeof props === 'object' && props !== null) {
-				return props as GraphRecord;
-			}
-			return {};
-		}
-		if (typeof cell === 'object') {
-			return cell as GraphRecord;
-		}
-		return { value: cell as string | number | boolean };
+	}
+
+	private parseResult(raw: unknown[]): GraphQueryResult {
+		const result = decodeCompactResult(raw);
+		return {
+			headers: result.headers,
+			rows: result.rows.map(row => row.map((value, index) => ({ [result.headers[index]]: value }))),
+		};
 	}
 }

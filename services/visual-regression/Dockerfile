@@ -1,18 +1,19 @@
 # Son of Anton — Visual Regression Testing Service
 
-FROM node:20-slim
+FROM node:22-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-COPY package*.json tsconfig.json ./
-RUN npm install
+COPY package*.json tsconfig*.json ./
+RUN npm ci --no-audit --no-fund
 
 COPY src/ ./src/
+COPY test/ ./test/
 COPY _shared/auth/dist/ ./_shared/auth/dist/
-RUN npx tsc --noCheck
+RUN npm run build
 
 EXPOSE 8094
 

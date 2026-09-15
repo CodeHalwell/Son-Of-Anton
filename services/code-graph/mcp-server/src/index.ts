@@ -133,7 +133,7 @@ async function dispatch(
     case 'impact_analysis': {
       const path = requireString(args, 'path');
       const depth = optionalNumber(args, 'depth', 3);
-      return args.details === true ? { ...dependencyImpact(engine, path, depth), unsavedDocuments: overlay.status } : engine.impactAnalysis(path, depth);
+      return args.details === true ? { ...await dependencyImpact(engine, path, depth), unsavedDocuments: overlay.status } : engine.impactAnalysis(path, depth);
     }
     case 'find_references':
       return engine.findReferences(requireString(args, 'name'));

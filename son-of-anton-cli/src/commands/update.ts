@@ -101,16 +101,18 @@ async function fetchLatestVersion(): Promise<string | null> {
  */
 export async function maybeNagAboutUpdate(): Promise<void> {
 	try {
+		const mode = isRunningUnderSea() ? 'sea' : 'npm';
 		const cached = readCache();
-		if (cached && Date.now() - cached.checkedAt < QUIET_CHECK_INTERVAL_MS) {
+		if (cached?.mode === mode && Date.now() - cached.checkedAt < QUIET_CHECK_INTERVAL_MS) {
 			return;
 		}
-		const latest = await fetchLatestVersion();
+		const release = mode === 'sea' ? await fetchLatestSeaRelease() : null;
+		const latest = mode === 'sea' ? release && tagToVersion(release.tag_name) : await fetchLatestVersion();
 		if (!latest) {
 			return;
 		}
 		const current = SOTA_VERSION;
-		writeCache({ checkedAt: Date.now(), latest });
+		writeCache({ checkedAt: Date.now(), latest, mode });
 		if (isStrictlyGreater(latest, current)) {
 			const cmd = isRunningUnderSea() ? 'sota update' : 'npm i -g son-of-anton-cli@latest';
 			process.stderr.write(
@@ -125,13 +127,14 @@ export async function maybeNagAboutUpdate(): Promise<void> {
 interface UpdateCache {
 	checkedAt: number;
 	latest: string;
+	mode: 'npm' | 'sea';
 }
 
 function readCache(): UpdateCache | null {
 	try {
 		const raw = fs.readFileSync(CACHE_FILE, 'utf8');
 		const parsed = JSON.parse(raw) as UpdateCache;
-		if (typeof parsed.checkedAt === 'number' && typeof parsed.latest === 'string') {
+		if (typeof parsed.checkedAt === 'number' && typeof parsed.latest === 'string' && (parsed.mode === 'npm' || parsed.mode === 'sea')) {
 			return parsed;
 		}
 		return null;
@@ -209,7 +212,7 @@ async function runNpmUpdateCheck(opts: UpdateOptions): Promise<void> {
 		mode: 'npm',
 	};
 
-	writeCache({ checkedAt: Date.now(), latest });
+	writeCache({ checkedAt: Date.now(), latest, mode: 'npm' });
 
 	if (opts.output === 'json') {
 		process.stdout.write(JSON.stringify(result, null, 2) + '\n');
@@ -272,23 +275,27 @@ function pickSeaArtefact(): SeaArtefactPick | null {
  * REST API. Returns the parsed release or null if the API is unreachable or
  * no matching release exists.
  */
-async function fetchLatestSeaRelease(): Promise<GitHubRelease | null> {
+export async function fetchLatestSeaRelease(): Promise<GitHubRelease | null> {
 	try {
-		const res = await fetch(`${RELEASES_API}?per_page=10`, {
-			headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }, signal: AbortSignal.timeout(10_000),
-		});
-		if (!res.ok) {
-			return null;
+		const candidates: GitHubRelease[] = [];
+		const signal = AbortSignal.timeout(10_000);
+		// IDE and CLI releases share a repository. A recent page may contain
+		// only IDE releases, or a patch to an older supported CLI version.
+		for (let page = 1; page <= 10; page++) {
+			const res = await fetch(`${RELEASES_API}?per_page=100&page=${page}`, {
+				headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }, signal,
+			});
+			if (!res.ok) { return null; }
+			const body = (await res.json()) as GitHubRelease[];
+			if (!Array.isArray(body)) { return null; }
+			candidates.push(...body.filter(r => r && !r.draft && !r.prerelease && /^sota-v\d+\.\d+\.\d+(?:\+[a-zA-Z0-9.-]+)?$/.test(r.tag_name)));
+			if (body.length < 100) {
+				candidates.sort((a, b) => compareSemver(tagToVersion(b.tag_name), tagToVersion(a.tag_name)));
+				return candidates[0] ?? null;
+			}
 		}
-		const body = (await res.json()) as GitHubRelease[];
-		// Sort by semver descending so the newest release is `candidates[0]`.
-		// A lexicographic sort on the raw tag would rank `sota-v0.9.0` above
-		// `sota-v0.10.0` (because the character '9' > '1'), silently offering
-		// the older release as the "latest".
-		const candidates = body
-			.filter((r) => !r.draft && !r.prerelease && r.tag_name?.startsWith('sota-v'))
-			.sort((a, b) => compareSemver(tagToVersion(b.tag_name), tagToVersion(a.tag_name)));
-		return candidates[0] ?? null;
+		// An incomplete catalog cannot establish the latest version.
+		return null;
 	} catch {
 		return null;
 	}
@@ -425,7 +432,7 @@ async function runSeaSelfUpdate(opts: UpdateOptions): Promise<void> {
 
 	const latest = tagToVersion(release.tag_name);
 	const upToDate = !isStrictlyGreater(latest, current);
-	writeCache({ checkedAt: Date.now(), latest });
+	writeCache({ checkedAt: Date.now(), latest, mode: 'sea' });
 
 	if (opts.output === 'json' && (upToDate || opts.check)) {
 		const result: UpdateCheckResult = {

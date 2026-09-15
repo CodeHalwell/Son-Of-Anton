@@ -103,12 +103,13 @@ const httpServer = http.createServer(async (req, res) => {
 
 async function start(): Promise<void> {
 	requireServiceToken('mcp-gateway');
-	try {
-		await db.connect();
+	// Serve health/readiness while Redis reconnects, including at first startup.
+	// Data tools fail promptly until the graph connection is ready.
+	void db.connect().then(() => {
 		console.log('[mcp-gateway] Connected to FalkorDB');
-	} catch (err) {
-		console.warn('[mcp-gateway] FalkorDB not available, will retry on requests:', (err as Error).message);
-	}
+	}).catch((err: Error) => {
+		console.warn('[mcp-gateway] FalkorDB connection failed:', err.message);
+	});
 
 	httpServer.listen(PORT, () => {
 		console.log(`[mcp-gateway] MCP server listening on port ${PORT}`);

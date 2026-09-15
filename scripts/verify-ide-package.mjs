@@ -52,6 +52,17 @@ try {
 	const product = JSON.parse(await readFile(path.join(resources, 'product.json')));
 	assert.equal(product.commit, manifest.commit); assert.equal(product.version, manifest.ideVersion);
 	assert.equal(product.nameLong, 'Son of Anton IDE');
+	const sourceProduct = JSON.parse(await readFile(path.join(root, 'product.json')));
+	assert.ok(sourceProduct.builtInExtensions.some(item => item.name === 'ms-vscode.js-debug'), 'JavaScript debugger must be bundled');
+	for (const expected of sourceProduct.builtInExtensions) {
+		const folder = path.join(resources, 'extensions', expected.name);
+		const bundled = JSON.parse(await readFile(path.join(folder, 'package.json')));
+		assert.equal(`${bundled.publisher}.${bundled.name}`, expected.name);
+		assert.equal(bundled.version, expected.version);
+		for (const file of [bundled.main, 'LICENSE.txt', 'ThirdPartyNotices.txt']) {
+			assert.ok((await readFile(path.join(folder, file))).length, `Missing ${expected.name}/${file}`);
+		}
+	}
 	const binary = path.join(app, process.platform === 'darwin' ? `Contents/MacOS/${product.nameShort}` : process.platform === 'win32' ? `${product.nameShort}.exe` : product.applicationName);
 	const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
 	// Suppress the test harness's unsupported modal prompt, while keeping workspace trust disabled.
@@ -61,7 +72,7 @@ try {
 	const cli = path.join(resources, 'out/cli.js');
 	assert.match(run(binary, [cli, '--version', '--user-data-dir', path.join(directory, 'profile')], { env: { ...env, ELECTRON_RUN_AS_NODE: '1' } }), new RegExp(manifest.ideVersion.replaceAll('.', '\\.')));
 	const extension = path.join(resources, 'extensions/son-of-anton');
-	for (const file of ['dist/extension.js', 'dist/board.js', 'media/chat-webview.js', 'dist/prompts/anton-orchestrator.prompt.md', 'runtime/codegraph/index.cjs', 'runtime/codegraph/node_modules/@son-of-anton/codegraph-napi/engine.node']) { assert.ok((await readFile(path.join(extension, file))).length, `Missing bundled ${file}`); }
+	for (const file of ['dist/extension.js', 'dist/board.js', 'media/chat-webview.js', 'dist/prompts/anton-orchestrator.prompt.md', 'runtime/codegraph/index.cjs', 'runtime/codegraph/engine-worker.cjs', 'runtime/codegraph/node_modules/@son-of-anton/codegraph-napi/engine.node']) { assert.ok((await readFile(path.join(extension, file))).length, `Missing bundled ${file}`); }
 	const runtime = JSON.parse(await readFile(path.join(extension, 'runtime/codegraph/manifest.json')));
 	assert.deepEqual([runtime.platform, runtime.arch], [process.platform, process.arch]);
 	const helper = path.join(directory, 'test-extension'); await mkdir(helper);

@@ -18,6 +18,11 @@ test('doctor reports compatible runtime and credential presence without leaking 
 	const diagnostics = await collectDiagnostics({ ...host, secrets: { get: async () => 'synthetic-secret-do-not-print', store: async () => {}, delete: async () => {} } }, runtime);
 	assert.equal(diagnostics.find(item => item.name === 'Code graph')?.status, 'ok');
 	assert.equal(JSON.stringify(diagnostics).includes('synthetic-secret-do-not-print'), false);
+	await writeFile(path.join(runtime, 'manifest.json'), JSON.stringify({ platform: process.platform, arch: process.arch, nodeMajor: 22, worker: 'engine-worker.cjs' }));
+	const fixtureHost = { ...host, secrets: { get: async () => undefined, store: async () => {}, delete: async () => {} } };
+	assert.equal((await collectDiagnostics(fixtureHost, runtime)).find(item => item.name === 'Code graph')?.status, 'repair');
+	await writeFile(path.join(runtime, 'engine-worker.cjs'), '');
+	assert.equal((await collectDiagnostics(fixtureHost, runtime)).find(item => item.name === 'Code graph')?.status, 'ok');
 	await writeFile(path.join(runtime, 'manifest.json'), JSON.stringify({ platform: 'other', arch: 'other', nodeMajor: 22 }));
 	const broken = await collectDiagnostics({ ...host, secrets: { get: async () => { throw new Error('locked'); }, store: async () => {}, delete: async () => {} } }, runtime);
 	assert.deepEqual(broken.filter(item => ['Credentials', 'Code graph'].includes(item.name)).map(item => item.status), ['repair', 'repair']);

@@ -43,14 +43,14 @@ export class EditorOverlay {
 		this.documents = next; this.revision = snapshot.revision; return true;
 	}
 	contains(filename: string): boolean { return this.documents.has(this.filename(filename)); }
-	fileSummary(engine: CodegraphEngine, filename: string): FileSummary & { source?: string; documentVersion?: number; outlineAvailable?: boolean } {
+	async fileSummary(engine: CodegraphEngine, filename: string): Promise<FileSummary & { source?: string; documentVersion?: number; outlineAvailable?: boolean }> {
 		const document = this.documents.get(this.filename(filename));
 		return document ? { path: document.path, language: document.language, symbols: document.symbols, source: 'unsaved-editor', documentVersion: document.version, outlineAvailable: document.outlineAvailable } : engine.fileSummary(filename);
 	}
-	symbolLookup(engine: CodegraphEngine, query: string, limit: number): (SymbolMatch & { source?: string; documentVersion?: number })[] {
+	async symbolLookup(engine: CodegraphEngine, query: string, limit: number): Promise<(SymbolMatch & { source?: string; documentVersion?: number })[]> {
 		const lowered = query.toLowerCase();
 		const matches = [...this.documents.values()].flatMap(document => document.symbols.filter(symbol => symbol.name.toLowerCase().includes(lowered)).map(symbol => ({ ...symbol, file: document.path, source: 'unsaved-editor', documentVersion: document.version })));
-		return [...matches, ...engine.symbolLookup(query, Math.min(100, limit + 32)).filter(match => !this.contains(match.file))].sort((a, b) => Number(b.name.toLowerCase() === lowered) - Number(a.name.toLowerCase() === lowered)).slice(0, limit);
+		return [...matches, ...(await engine.symbolLookup(query, Math.min(100, limit + 32))).filter(match => !this.contains(match.file))].sort((a, b) => Number(b.name.toLowerCase() === lowered) - Number(a.name.toLowerCase() === lowered)).slice(0, limit);
 	}
 	search(query: string, saved: SearchHit[], limit: number, scope?: string[]): (SearchHit & { source?: string; documentVersion?: number; retrieval?: string })[] {
 		const terms = query.toLowerCase().split(/[^\p{L}\p{N}_]+/u).filter(term => term.length > 1);
@@ -73,7 +73,7 @@ export class EditorOverlay {
  * already discovered file. Query each file once, using its shortest BFS witness;
  * enumerating every equivalent root path would grow exponentially in diamonds.
  */
-export function dependencyImpact(engine: CodegraphEngine, target: string, depth: number): { fileBased: true; paths: string[][]; truncated: boolean } {
+export async function dependencyImpact(engine: CodegraphEngine, target: string, depth: number): Promise<{ fileBased: true; paths: string[][]; truncated: boolean }> {
 	const queue = [[target]], seen = new Set([target]), paths: string[][] = [];
 	const maxNodes = 200, maxPaths = 1000, maxExaminedEdges = 10_000;
 	let truncated = false, examinedEdges = 0;
@@ -81,7 +81,7 @@ export function dependencyImpact(engine: CodegraphEngine, target: string, depth:
 		const chain = queue[index];
 		if (chain.length > depth) { continue; }
 		const callers = new Set<string>();
-		for (const caller of engine.impactAnalysis(chain[0], 1)) {
+		for (const caller of await engine.impactAnalysis(chain[0], 1)) {
 			if (++examinedEdges > maxExaminedEdges) { return { fileBased: true, paths, truncated: true }; }
 			if (callers.has(caller) || chain.includes(caller)) { continue; }
 			callers.add(caller);

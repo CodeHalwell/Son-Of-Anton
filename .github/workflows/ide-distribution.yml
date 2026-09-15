@@ -22,11 +22,19 @@ on:
   pull_request:
     paths:
       - '.github/workflows/ide-distribution.yml'
-      - 'scripts/*ide*'
-      - 'extensions/son-of-anton/**'
+      - 'scripts/**'
+      - 'src/**'
+      - 'extensions/**'
       - 'son-of-anton-core/**'
+      - 'son-of-anton-cli/**'
+      - 'services/code-graph/**'
+      - 'crates/**'
       - 'build/**'
+      - 'resources/**'
+      - 'package*.json'
       - 'product.json'
+      - '.nvmrc'
+      - '.npmrc'
   workflow_dispatch:
     inputs:
       draft_release:
@@ -40,6 +48,15 @@ on:
         default: preview
       require_signing:
         description: Require Developer ID, notarization and Windows Authenticode credentials
+        type: boolean
+        default: false
+
+      test_graph_soak:
+        description: Run five minutes of edit/search and worker-memory checks on copied application source
+        type: boolean
+        default: false
+      test_local_embeddings:
+        description: Download the local embedding model and test real retrieval in each packaged runtime
         type: boolean
         default: false
 
@@ -182,8 +199,8 @@ jobs:
           node --test son-of-anton-core/dist/util/readBoundedFile.test.js son-of-anton-core/dist/credentials/ProtectedSecretStore.test.js
           node --test son-of-anton-core/dist/llm/LmStudioEndpointSecurity.test.js son-of-anton-core/dist/llm/OllamaEndpointSecurity.test.js son-of-anton-core/dist/llm/BedrockDiscovery.test.js son-of-anton-core/dist/llm/ProviderDiscoveryAcp.test.js
           node --test son-of-anton-core/dist/agents/OrchestratorReassignment.test.js
-          node --test son-of-anton-cli/dist/test/updateInstall.test.js
-          node --test scripts/test/ide-release.test.mjs scripts/test/ide-package.test.mjs
+          node --test son-of-anton-cli/dist/test/updateInstall.test.js son-of-anton-cli/dist/test/updateDiscovery.test.js
+          node --test scripts/test/ide-release.test.mjs scripts/test/ide-package.test.mjs scripts/test/staged-directory.test.mjs
       - name: IDE host regressions
         working-directory: extensions/son-of-anton
         run: npm test -- --grep '^(Chat transcript write ownership|Conversation revision compare-and-swap|Conversation branch failure recovery|Provider Finder configuration boundary|Conversation history activation|Chat checkpoint index recovery|Durable checkpoint conversation rewind|Permanent conversation deletion|ACP chat model routing|Impact navigation identities|Chat turn ownership|Chat workflow upgrades|IDE releases and integration profiles|Integration profile route persistence|Board reassignment execution integration|Board dependency planning and agent proposals) ' --fail-zero
@@ -229,16 +246,19 @@ jobs:
           desktop-file-validate /usr/share/applications/son-of-anton.desktop
           SOTA_TEST_INSTALLED_APP=/usr/share/son-of-anton xvfb-run -a node scripts/verify-ide-package.mjs
       - name: Packaged native graph lifecycle and retrieval
-        timeout-minutes: 5
+        timeout-minutes: 10
         env:
           IDE_TARGET: ${{ matrix.target }}
+          SOTA_TEST_LOCAL_EMBEDDINGS: ${{ inputs.test_local_embeddings && '1' || '0' }}
+          SOTA_TEST_GRAPH_LOAD: '1'
+          SOTA_TEST_GRAPH_SOAK: ${{ inputs.test_graph_soak && '1' || '0' }}
         run: |
           if [[ "$RUNNER_OS" == 'macOS' ]]; then
             export SOTA_RUNTIME_SOURCE="$GITHUB_WORKSPACE/../Son of Anton-$IDE_TARGET/Son of Anton IDE.app/Contents/Resources/app/extensions/son-of-anton/runtime/codegraph"
           else
             export SOTA_RUNTIME_SOURCE="$GITHUB_WORKSPACE/../Son of Anton-$IDE_TARGET/resources/app/extensions/son-of-anton/runtime/codegraph"
           fi
-          node --test services/code-graph/mcp-server/test/offline.test.mjs
+          node --test services/code-graph/mcp-server/test/offline.test.mjs services/code-graph/mcp-server/test/local-embedding.test.mjs services/code-graph/mcp-server/test/responsiveness.test.mjs services/code-graph/mcp-server/test/load.test.mjs services/code-graph/mcp-server/test/provider-recovery.test.mjs services/code-graph/mcp-server/test/soak.test.mjs services/code-graph/mcp-server/test/editor-overlay.test.mjs
       - name: Retain install diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4

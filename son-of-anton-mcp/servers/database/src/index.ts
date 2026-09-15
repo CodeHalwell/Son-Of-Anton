@@ -6,7 +6,7 @@ import { enforceHttpAuth, requireServiceToken } from '../_shared/auth/dist/index
 import { Pool } from 'pg';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
-import { z } from 'zod';
+import { z } from 'zod/v4';
 
 const PORT = parseInt(process.env.MCP_DATABASE_PORT ?? '3102', 10);
 const QUERY_TIMEOUT_MS = 10_000;
@@ -31,12 +31,11 @@ function createServer(): McpServer {
 	});
 
 	// --- query_schema ---
-	server.tool(
+	server.registerTool(
 		'query_schema',
-		'List tables, columns, types, relationships, and indices. Optionally filter by table name.',
-		{
+		{ description: 'List tables, columns, types, relationships, and indices. Optionally filter by table name.', inputSchema: {
 			table: z.string().optional().describe('Filter to a specific table name'),
-		},
+		} },
 		async ({ table }) => {
 			try {
 				let query: string;
@@ -78,13 +77,12 @@ function createServer(): McpServer {
 	);
 
 	// --- sample_data ---
-	server.tool(
+	server.registerTool(
 		'sample_data',
-		'Retrieve sample rows from a table. Maximum 100 rows.',
-		{
+		{ description: 'Retrieve sample rows from a table. Maximum 100 rows.', inputSchema: {
 			table: z.string().describe('Table name to sample from'),
 			limit: z.number().min(1).max(100).optional().describe('Number of rows to return (default 10, max 100)'),
-		},
+		} },
 		async ({ table, limit }) => {
 			try {
 				// Validate table name to prevent injection (alphanumeric + underscores only)
@@ -107,12 +105,11 @@ function createServer(): McpServer {
 	);
 
 	// --- explain_query ---
-	server.tool(
+	server.registerTool(
 		'explain_query',
-		'Run EXPLAIN on a SQL query without executing it. Returns the execution plan.',
-		{
+		{ description: 'Run EXPLAIN on a SQL query without executing it. Returns the execution plan.', inputSchema: {
 			query: z.string().describe('SQL query to explain'),
-		},
+		} },
 		async ({ query: sqlQuery }) => {
 			try {
 				validateReadOnly(sqlQuery);
@@ -127,13 +124,12 @@ function createServer(): McpServer {
 	);
 
 	// --- run_read_query ---
-	server.tool(
+	server.registerTool(
 		'run_read_query',
-		'Execute a SELECT query. Only read operations are allowed. Row limit enforced server-side.',
-		{
+		{ description: 'Execute a SELECT query. Only read operations are allowed. Row limit enforced server-side.', inputSchema: {
 			query: z.string().describe('SQL SELECT query to execute'),
 			limit: z.number().min(1).max(1000).optional().describe('Maximum rows to return (default 100, max 1000)'),
-		},
+		} },
 		async ({ query: sqlQuery, limit }) => {
 			try {
 				// Normalize query to avoid syntax errors when embedding in a subquery.

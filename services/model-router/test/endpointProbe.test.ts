@@ -54,14 +54,19 @@ describe('EndpointProber', () => {
 		assert.ok(urls.includes('https://api-eu.anthropic.com/v1/models'));
 	});
 
-	test('getBestEndpoint returns fastest successful endpoint', async () => {
+	test('getBestEndpoint returns fastest successful endpoint', async t => {
+		t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1000 });
 		const { fetch } = makeFetch({
 			'https://api.anthropic.com/v1/models': 100,
 			'https://api-eu.anthropic.com/v1/models': 10,
 		});
 
 		const prober = new EndpointProber([anthropicConfig], { fetchFn: fetch });
-		await prober.probeAll();
+		const probing = prober.probeAll();
+		t.mock.timers.tick(10);
+		await new Promise<void>(resolve => setImmediate(resolve));
+		t.mock.timers.tick(90);
+		await probing;
 
 		assert.strictEqual(prober.getBestEndpoint('anthropic'), 'https://api-eu.anthropic.com');
 	});

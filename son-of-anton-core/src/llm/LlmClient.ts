@@ -3444,6 +3444,7 @@ export class LlmClient {
 				}
 				// system / done are informational; ignore.
 			}
+			if (options.signal?.aborted) { return; }
 			this.totalInputTokens += inputTokens;
 			this.totalOutputTokens += outputTokens;
 			yield {

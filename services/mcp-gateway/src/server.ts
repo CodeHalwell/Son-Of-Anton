@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { z } from 'zod';
+import { z } from 'zod/v4';
 import { FalkorDBClient } from './clients/falkordb';
 import { QdrantClient } from './clients/qdrant';
 import { QDRANT_VECTOR_SIZE, EMBEDDING_CONFIG } from './config';
@@ -47,15 +47,13 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 	const retrievalWeightsConfig = loadRetrievalWeightsConfig();
 
 	// --- symbol_lookup ---
-	// @ts-ignore TS2589: MCP SDK z.enum() schema inference hits TypeScript's instantiation depth limit
-	server.tool(
+	server.registerTool(
 		'symbol_lookup',
-		'Look up a symbol (function, class, type, module) by name. Returns definition location, type, signature, file path, and line range.',
-		{
+		{ description: 'Look up a symbol (function, class, type, module) by name. Returns definition location, type, signature, file path, and line range.', inputSchema: {
 			name: z.string().describe('Symbol name to look up'),
 			type: z.enum(['function', 'class', 'type', 'module']).optional()
 				.describe('Filter by symbol type'),
-		},
+		} },
 		withSanitisedResult('symbol_lookup', async ({ name, type }) => {
 			try {
 				const results = await symbolLookup(db, { name, type });
@@ -72,13 +70,12 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 	));
 
 	// --- find_references ---
-	server.tool(
+	server.registerTool(
 		'find_references',
-		'Find all references to a symbol across the codebase. Returns file, line, column, and context for each reference.',
-		{
+		{ description: 'Find all references to a symbol across the codebase. Returns file, line, column, and context for each reference.', inputSchema: {
 			name: z.string().describe('Symbol name to find references for'),
 			file: z.string().optional().describe('Limit to references of the symbol defined in this file'),
-		},
+		} },
 		withSanitisedResult('find_references', async ({ name, file }) => {
 			try {
 				const results = await findReferences(db, { name, file });
@@ -95,15 +92,13 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 	));
 
 	// --- dependency_traversal ---
-	// @ts-ignore TS2589: MCP SDK z.enum() schema inference hits TypeScript's instantiation depth limit
-	server.tool(
+	server.registerTool(
 		'dependency_traversal',
-		'Traverse the dependency tree of a file or function. Shows what a symbol/file depends on (imports, calls) at configurable depth.',
-		{
+		{ description: 'Traverse the dependency tree of a file or function. Shows what a symbol/file depends on (imports, calls) at configurable depth.', inputSchema: {
 			file: z.string().optional().describe('File path to traverse dependencies for'),
 			function: z.string().optional().describe('Function name to traverse call dependencies for'),
 			depth: z.number().min(1).max(5).optional().describe('Traversal depth (default 2, max 5)'),
-		},
+		} },
 		withSanitisedResult('dependency_traversal', async (params) => {
 			try {
 				const results = await dependencyTraversal(db, {
@@ -124,13 +119,12 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 	));
 
 	// --- impact_analysis ---
-	server.tool(
+	server.registerTool(
 		'impact_analysis',
-		'Analyze the downstream impact of changing a symbol. Returns all callers, test files, and documentation referencing this symbol, categorised as direct or transitive.',
-		{
+		{ description: 'Analyze the downstream impact of changing a symbol. Returns all callers, test files, and documentation referencing this symbol, categorised as direct or transitive.', inputSchema: {
 			symbol: z.string().describe('Symbol name to analyze impact for'),
 			file: z.string().optional().describe('File where the symbol is defined (for disambiguation)'),
-		},
+		} },
 		withSanitisedResult('impact_analysis', async ({ symbol, file }) => {
 			try {
 				const results = await impactAnalysis(db, { symbol, file });
@@ -176,25 +170,23 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 		yield { kind: 'done', summary: { total: results.length, query, language } };
 	};
 
-	server.tool(
+	server.registerTool(
 		'semantic_search',
-		'Search for code semantically using natural language. Results are ranked by a combination of semantic similarity and structural importance (PageRank-style). Streams partial results as they are scored.',
-		{
+		{ description: 'Search for code semantically using natural language. Results are ranked by a combination of semantic similarity and structural importance (PageRank-style). Streams partial results as they are scored.', inputSchema: {
 			query: z.string().describe('Natural language search query'),
 			maxResults: z.number().min(1).max(50).optional().describe('Maximum results to return (default 10)'),
 			language: z.string().optional().describe('Filter results by programming language'),
 			agentRole: z.string().optional().describe('Calling agent handle (e.g. "anton-code"). Selects per-agent semantic/structural ranking weights from .son-of-anton/retrieval-weights.json; falls back to the "*" entry when unset or unmatched.'),
-		},
+		} },
 		withSanitisedResult('semantic_search', wrapStreamingTool('semantic_search', semanticSearchStreaming)
 	));
 
 	// --- file_summary ---
-	server.tool(
+	server.registerTool(
 		'file_summary',
-		'Get a structural summary of a file: exports, classes, functions, imports, and dependencies.',
-		{
+		{ description: 'Get a structural summary of a file: exports, classes, functions, imports, and dependencies.', inputSchema: {
 			path: z.string().describe('Project-relative file path'),
-		},
+		} },
 		withSanitisedResult('file_summary', async ({ path }) => {
 			try {
 				const results = await fileSummary(db, { path });
@@ -211,10 +203,9 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 	));
 
 	// --- project_overview ---
-	server.tool(
+	server.registerTool(
 		'project_overview',
-		'Get a high-level overview of the project: modules, entry points, key abstractions, file count, and language breakdown.',
-		{},
+		{ description: 'Get a high-level overview of the project: modules, entry points, key abstractions, file count, and language breakdown.', inputSchema: {} },
 		withSanitisedResult('project_overview', async () => {
 			try {
 				const results = await projectOverview(db);
@@ -231,11 +222,9 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 	));
 
 	// --- memory_query ---
-	// @ts-ignore TS2589: MCP SDK z.enum() schema inference hits TypeScript's instantiation depth limit
-	server.tool(
+	server.registerTool(
 		'memory_query',
-		'Search long-term project memory by keyword, type, topic, or time range. Returns decisions, conventions, warnings, and preferences stored across sessions.',
-		{
+		{ description: 'Search long-term project memory by keyword, type, topic, or time range. Returns decisions, conventions, warnings, and preferences stored across sessions.', inputSchema: {
 			type: z.enum(['Decision', 'Convention', 'Warning', 'Preference']).optional()
 				.describe('Filter by memory entity type'),
 			keyword: z.string().optional().describe('Search by keyword in content'),
@@ -243,7 +232,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 			currentOnly: z.boolean().optional().describe('Only return current (non-superseded) entries, default true'),
 			since: z.number().optional().describe('Filter entries created after this timestamp'),
 			limit: z.number().min(1).max(100).optional().describe('Maximum results (default 50)'),
-		},
+		} },
 		withSanitisedResult('memory_query', async (params) => {
 			try {
 				const results = await memoryQuery(db, {
@@ -267,11 +256,9 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 	));
 
 	// --- memory_record ---
-	// @ts-ignore TS2589: MCP SDK z.enum() schema inference hits TypeScript's instantiation depth limit
-	server.tool(
+	server.registerTool(
 		'memory_record',
-		'Record a new entry in long-term project memory. Only the orchestrator agent and humans can write. Creates temporal entries that track how project knowledge evolves.',
-		{
+		{ description: 'Record a new entry in long-term project memory. Only the orchestrator agent and humans can write. Creates temporal entries that track how project knowledge evolves.', inputSchema: {
 			type: z.enum(['Decision', 'Convention', 'Warning', 'Preference'])
 				.describe('Type of memory entity'),
 			content: z.string().describe('The knowledge content to record'),
@@ -279,7 +266,7 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 			topics: z.array(z.string()).describe('Topic tags for categorization'),
 			supersedesId: z.string().optional()
 				.describe('ID of an existing entry this supersedes (marks old entry as outdated)'),
-		},
+		} },
 		withSanitisedResult('memory_record', async ({ type, content, source, topics, supersedesId }) => {
 			try {
 				const result = await memoryRecord(db, {
@@ -302,12 +289,11 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 	));
 
 	// --- memory_history ---
-	server.tool(
+	server.registerTool(
 		'memory_history',
-		'Show how knowledge about a specific topic has changed over time. Returns a chronological list of all memory entries (including superseded ones) for a topic.',
-		{
+		{ description: 'Show how knowledge about a specific topic has changed over time. Returns a chronological list of all memory entries (including superseded ones) for a topic.', inputSchema: {
 			topic: z.string().describe('Topic to view history for'),
-		},
+		} },
 		withSanitisedResult('memory_history', async ({ topic }) => {
 			try {
 				const results = await memoryHistory(db, { topic });
@@ -324,10 +310,9 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 	));
 
 	// --- spec_list ---
-	server.tool(
+	server.registerTool(
 		'spec_list',
-		'List all features that have spec definitions in .son-of-anton/specs/. Returns feature names and which phases (requirements, design, tasks, properties) exist.',
-		{},
+		{ description: 'List all features that have spec definitions in .son-of-anton/specs/. Returns feature names and which phases (requirements, design, tasks, properties) exist.', inputSchema: {} },
 		withSanitisedResult('spec_list', async () => {
 			try {
 				const projectPath = process.env['PROJECT_PATH'] ?? '/workspace';
@@ -345,15 +330,13 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 	));
 
 	// --- spec_read ---
-	// @ts-ignore TS2589: MCP SDK z.enum() schema inference hits TypeScript's instantiation depth limit
-	server.tool(
+	server.registerTool(
 		'spec_read',
-		'Read the content of a spec file (requirements, design, tasks, or properties) for a specific feature.',
-		{
+		{ description: 'Read the content of a spec file (requirements, design, tasks, or properties) for a specific feature.', inputSchema: {
 			feature: z.string().describe('Feature name (or slug)'),
 			phase: z.enum(['requirements', 'design', 'tasks', 'properties'])
 				.describe('Which spec phase to read'),
-		},
+		} },
 		withSanitisedResult('spec_read', async ({ feature, phase }) => {
 			try {
 				const projectPath = process.env['PROJECT_PATH'] ?? '/workspace';
@@ -371,13 +354,12 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 	));
 
 	// --- spec_sync_check ---
-	server.tool(
+	server.registerTool(
 		'spec_sync_check',
-		'Check if a changed file affects any spec for a feature. Returns warnings if the code change may put the spec out of sync.',
-		{
+		{ description: 'Check if a changed file affects any spec for a feature. Returns warnings if the code change may put the spec out of sync.', inputSchema: {
 			feature: z.string().describe('Feature name to check sync for'),
 			changedFile: z.string().describe('Path of the changed file'),
-		},
+		} },
 		withSanitisedResult('spec_sync_check', async ({ feature, changedFile }) => {
 			try {
 				const projectPath = process.env['PROJECT_PATH'] ?? '/workspace';
@@ -395,12 +377,11 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 	));
 
 	// --- build_targets ---
-	server.tool(
+	server.registerTool(
 		'build_targets',
-		'List all build/run/test targets in the project with their commands, dependencies, and ecosystem. Answers "how do I build/test/run this project?"',
-		{
+		{ description: 'List all build/run/test targets in the project with their commands, dependencies, and ecosystem. Answers "how do I build/test/run this project?"', inputSchema: {
 			ecosystem: z.string().optional().describe('Filter targets by ecosystem (node, rust, python, docker, make, just, task)'),
-		},
+		} },
 		withSanitisedResult('build_targets', async ({ ecosystem }) => {
 			try {
 				const results = await buildTargets({ ecosystem });
@@ -417,12 +398,11 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 	));
 
 	// --- build_order ---
-	server.tool(
+	server.registerTool(
 		'build_order',
-		'Get the ordered list of targets that must run to reach a given target (topological sort of the build DAG). Answers "what do I need to run before X?"',
-		{
+		{ description: 'Get the ordered list of targets that must run to reach a given target (topological sort of the build DAG). Answers "what do I need to run before X?"', inputSchema: {
 			target: z.string().describe('Target name to get build order for'),
-		},
+		} },
 		withSanitisedResult('build_order', async ({ target }) => {
 			try {
 				const results = await buildOrder({ target });
@@ -439,12 +419,11 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 	));
 
 	// --- environment_requirements ---
-	server.tool(
+	server.registerTool(
 		'environment_requirements',
-		'Get all environment variables needed, which services must be running, and what must be built first for a given target. Answers "what do I need to set up to run X?"',
-		{
+		{ description: 'Get all environment variables needed, which services must be running, and what must be built first for a given target. Answers "what do I need to set up to run X?"', inputSchema: {
 			target: z.string().describe('Target name to get requirements for'),
-		},
+		} },
 		withSanitisedResult('environment_requirements', async ({ target }) => {
 			try {
 				const results = await environmentRequirements({ target });
@@ -461,12 +440,11 @@ export function createMcpServer(db: FalkorDBClient, qdrant: QdrantClient): McpSe
 	));
 
 	// --- affected_targets ---
-	server.tool(
+	server.registerTool(
 		'affected_targets',
-		'Find which build/test targets need to re-run given a set of changed files. Analogous to "nx affected". Answers "what broke when I changed these files?"',
-		{
+		{ description: 'Find which build/test targets need to re-run given a set of changed files. Analogous to "nx affected". Answers "what broke when I changed these files?"', inputSchema: {
 			changedFiles: z.array(z.string()).describe('List of changed file paths'),
-		},
+		} },
 		withSanitisedResult('affected_targets', async ({ changedFiles }) => {
 			try {
 				const results = await affectedTargets({ changedFiles });

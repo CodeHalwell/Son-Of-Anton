@@ -1,3 +1,4 @@
+import { parameterizedQuery, decodeCompactResult } from '../../_shared/cypher/dist/index.js';
 // Son of Anton — FalkorDB Client
 // Wraps Redis connection to execute Cypher queries via FalkorDB's GRAPH.QUERY command.
 
@@ -59,13 +60,7 @@ export class FalkorDBClient {
 			throw new Error('FalkorDB client not connected');
 		}
 
-		let fullQuery = cypher;
-		if (params && Object.keys(params).length > 0) {
-			const paramStr = Object.entries(params)
-				.map(([key, value]) => `${key}=${JSON.stringify(value)}`)
-				.join(' ');
-			fullQuery = `CYPHER ${paramStr} ${cypher}`;
-		}
+		const fullQuery = parameterizedQuery(cypher, params);
 
 		const result = await this.client.sendCommand([
 			'GRAPH.QUERY',
@@ -92,13 +87,7 @@ export class FalkorDBClient {
 			throw new Error('FalkorDB client not connected');
 		}
 
-		let fullQuery = cypher;
-		if (params && Object.keys(params).length > 0) {
-			const paramStr = Object.entries(params)
-				.map(([key, value]) => `${key}=${JSON.stringify(value)}`)
-				.join(' ');
-			fullQuery = `CYPHER ${paramStr} ${cypher}`;
-		}
+		const fullQuery = parameterizedQuery(cypher, params);
 
 		const result = await this.client.sendCommand([
 			'GRAPH.RO_QUERY',
@@ -207,8 +196,9 @@ export class FalkorDBClient {
 		if (raw.length >= 1 && Array.isArray(raw[0])) {
 			// Could be headers or rows
 			if (raw.length >= 2 && Array.isArray(raw[1])) {
-				result.headers = (raw[0] as unknown[]).map(String);
-				result.rows = raw[1] as unknown[][];
+				const decoded = decodeCompactResult(raw);
+				result.headers = decoded.headers;
+				result.rows = decoded.rows;
 			} else {
 				// Stats only (e.g., CREATE/DELETE operations)
 				result.rows = [];

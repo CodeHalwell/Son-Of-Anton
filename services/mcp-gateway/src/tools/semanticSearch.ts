@@ -100,13 +100,14 @@ async function addStructuralScores(
 			});
 
 			for (const record of degreeResult.rows ?? []) {
-				const cell = record[0];
-				if (typeof cell === 'object' && cell !== null && 'key' in cell) {
-					const key = String((cell as any).key);
+				const column = record[0];
+				const cell = column && 'entry' in column ? column.entry : column;
+				if (typeof cell === 'object' && cell !== null && !Array.isArray(cell) && 'key' in cell) {
+					const key = String(cell.key);
 					const inDegreeValue =
-						typeof (cell as any).inDegree === 'number'
-							? (cell as any).inDegree
-							: Number((cell as any).inDegree ?? 0);
+						typeof cell.inDegree === 'number'
+							? cell.inDegree
+							: Number(cell.inDegree ?? 0);
 					if (!Number.isNaN(inDegreeValue)) {
 						inDegreeByKey.set(key, inDegreeValue);
 					}

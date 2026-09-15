@@ -258,4 +258,41 @@ describe('CheckpointManager', () => {
 		} finally { await fs.rm(outside, { recursive: true, force: true }); }
 	});
 
+	test('upgrades a legacy checkpoint after validation and rejects later cross-workspace restores', async () => {
+		await fs.writeFile(path.join(workspaceRoot, 'legacy.txt'), 'before');
+		const checkpoint = await manager.createCheckpoint('legacy', {
+			agentId: 'a', taskId: 't', action: 'edit', toolCall: 'write', filePaths: ['legacy.txt'],
+		});
+		delete checkpoint.workspaceRoot;
+		await storage.saveCheckpoint('legacy', checkpoint);
+		await fs.writeFile(path.join(workspaceRoot, 'legacy.txt'), 'after');
+		await manager.restoreCheckpoint('legacy', checkpoint.id);
+		assert.deepStrictEqual({
+			content: await fs.readFile(path.join(workspaceRoot, 'legacy.txt'), 'utf8'),
+			root: (await storage.loadCheckpoint('legacy', checkpoint.id)).workspaceRoot,
+		}, { content: 'before', root: await fs.realpath(workspaceRoot) });
+		const other = path.join(baseDir, 'other'); await fs.mkdir(other);
+		await assert.rejects(new CheckpointManager(storage, other).restoreCheckpoint('legacy', checkpoint.id), /workspace identity/);
+	});
+
+	test('invalid legacy paths and corrupt snapshots never migrate or change workspace files', async () => {
+		await fs.writeFile(path.join(workspaceRoot, 'legacy.txt'), 'before');
+		const checkpoint = await manager.createCheckpoint('legacy-invalid', {
+			agentId: 'a', taskId: 't', action: 'edit', toolCall: 'write', filePaths: ['legacy.txt'],
+		});
+		delete checkpoint.workspaceRoot;
+		checkpoint.files.push({ path: '../outside.txt', exists: false, contentHash: '', content: null });
+		await storage.saveCheckpoint('legacy-invalid', checkpoint);
+		await fs.writeFile(path.join(workspaceRoot, 'legacy.txt'), 'after');
+		await assert.rejects(manager.restoreCheckpoint('legacy-invalid', checkpoint.id), /inside the workspace/);
+		checkpoint.files.pop();
+		await storage.saveCheckpoint('legacy-invalid', checkpoint);
+		await fs.writeFile(path.join(storagePath, 'legacy-invalid', 'files', checkpoint.files[0].contentHash + '.snap'), 'corrupt');
+		await assert.rejects(manager.restoreCheckpoint('legacy-invalid', checkpoint.id), /hash mismatch/);
+		assert.deepStrictEqual({
+			content: await fs.readFile(path.join(workspaceRoot, 'legacy.txt'), 'utf8'),
+			root: (await storage.loadCheckpoint('legacy-invalid', checkpoint.id)).workspaceRoot,
+		}, { content: 'after', root: undefined });
+	});
+
 });

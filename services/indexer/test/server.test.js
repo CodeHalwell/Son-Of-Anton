@@ -4,7 +4,10 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const { IndexerServer } = require('../dist/server.js');
 
-test('file reindex routes preserve native absolute paths and resolve relative paths', async () => {
+test('file reindex routes preserve native absolute paths and resolve relative paths', async t => {
+	const previousToken = process.env.SOTA_SERVICE_TOKEN;
+	process.env.SOTA_SERVICE_TOKEN = 'indexer-test-token';
+	t.after(() => { if (previousToken === undefined) { delete process.env.SOTA_SERVICE_TOKEN; } else { process.env.SOTA_SERVICE_TOKEN = previousToken; } });
 	const workspace = path.resolve('fixture workspace'), files = [];
 	const indexer = { indexFile: async file => { files.push(file); return true; } };
 	const server = new IndexerServer(indexer, { project: { path: workspace }, server: { port: 0 } });

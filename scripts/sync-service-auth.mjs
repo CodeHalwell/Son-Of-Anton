@@ -12,18 +12,20 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const source = path.join(root, 'services/_shared/auth');
 execFileSync(process.execPath, [path.join(root, 'node_modules/typescript/bin/tsc'), '-p', path.join(source, 'tsconfig.json')], { stdio: 'inherit' });
 const files = (await readdir(path.join(source, 'dist'))).filter(file => /\.(js|map|ts)$/.test(file));
-for (const service of await readdir(path.join(root, 'services'))) {
-	const destination = path.join(root, 'services', service, '_shared/auth/dist');
-	if (!existsSync(destination) && service !== 'background-tasks') { continue; }
-	if (process.argv.includes('--check')) {
-		for (const file of files) {
-			if (!existsSync(path.join(destination, file)) || !(await readFile(path.join(source, 'dist', file))).equals(await readFile(path.join(destination, file)))) {
-				throw new Error(`Stale shared service module: ${service}/${file}. Run node scripts/sync-service-auth.mjs.`);
+for (const parent of ['services', 'son-of-anton-mcp/servers']) {
+	for (const service of await readdir(path.join(root, parent))) {
+		const destination = path.join(root, parent, service, '_shared/auth/dist');
+		if (!existsSync(destination)) { continue; }
+		if (process.argv.includes('--check')) {
+			for (const file of files) {
+				if (!existsSync(path.join(destination, file)) || !(await readFile(path.join(source, 'dist', file))).equals(await readFile(path.join(destination, file)))) {
+					throw new Error(`Stale shared service module: ${parent}/${service}/${file}. Run node scripts/sync-service-auth.mjs.`);
+				}
 			}
+		} else {
+			await mkdir(destination, { recursive: true });
+			for (const file of files) { await copyFile(path.join(source, 'dist', file), path.join(destination, file)); }
 		}
-	} else {
-		await mkdir(destination, { recursive: true });
-		for (const file of files) { await copyFile(path.join(source, 'dist', file), path.join(destination, file)); }
 	}
 }
 
@@ -37,4 +39,17 @@ for (const file of ['index.js', 'index.js.map', 'index.d.ts']) {
 	if (process.argv.includes('--check')) {
 		if (!existsSync(to) || !(await readFile(from)).equals(await readFile(to))) { throw new Error('Stale shared agent-event contract. Run node scripts/sync-service-auth.mjs.'); }
 	} else { await mkdir(eventsDestination, { recursive: true }); await copyFile(from, to); }
+}
+
+// Graph clients share one serializer for nested Cypher map/list parameters.
+const cypherSource = path.join(root, 'services/_shared/cypher');
+execFileSync(process.execPath, [path.join(root, 'node_modules/typescript/bin/tsc'), '-p', path.join(cypherSource, 'tsconfig.json')], { stdio: 'inherit' });
+for (const service of ['indexer', 'lsif', 'mcp-gateway']) {
+	const destination = path.join(root, 'services', service, '_shared/cypher/dist');
+	for (const file of ['index.js', 'index.d.ts']) {
+		const from = path.join(cypherSource, 'dist', file), to = path.join(destination, file);
+		if (process.argv.includes('--check')) {
+			if (!existsSync(to) || !(await readFile(from)).equals(await readFile(to))) { throw new Error(`Stale Cypher serializer for ${service}. Run node scripts/sync-service-auth.mjs.`); }
+		} else { await mkdir(destination, { recursive: true }); await copyFile(from, to); }
+	}
 }

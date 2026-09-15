@@ -25,7 +25,7 @@ async function fixture(t, platform = 'darwin') {
 	const directory = await realpath(await mkdtemp(path.join(tmpdir(), 'sota-package-test-'))), root = path.join(directory, 'repo');
 	t.after(() => rm(directory, { recursive: true, force: true }));
 	await mkdir(path.join(root, 'scripts'), { recursive: true });
-	for (const name of ['package-ide.mjs', 'sign-ide.mjs', 'ide-release-policy.mjs']) { await cp(new URL(`../${name}`, import.meta.url), path.join(root, 'scripts', name)); }
+	for (const name of ['package-ide.mjs', 'sign-ide.mjs', 'ide-release-policy.mjs', 'staged-directory.mjs']) { await cp(new URL(`../${name}`, import.meta.url), path.join(root, 'scripts', name)); }
 	const preload = path.join(root, 'mock-tools.mjs');
 	await cp(new URL('./fixtures/ide-signing-subprocess.mjs', import.meta.url), preload);
 	const product = { nameLong: 'Fixture IDE', nameShort: 'Fixture', applicationName: 'fixture', linuxIconName: 'fixture', urlProtocol: 'fixture', darwinBundleIdentifier: 'com.example.fixture' };
@@ -69,7 +69,8 @@ test('workflow base64 credentials sign, notarize and staple the final DMG before
 	const build = await fixture(t), result = build.run({ ...signingSecrets, ...notarySecrets, SOTA_RELEASE_CHANNEL: 'stable' });
 	assert.equal(result.status, 0, result.stderr);
 	const manifest = await build.manifest(), commands = await build.commands();
-	const dmg = path.join(build.output, manifest.files.find(file => file.name.endsWith('.dmg')).name);
+	const dmg = commands.find(command => command.tool === 'hdiutil').target;
+	assert.equal(path.basename(dmg), manifest.files.find(file => file.name.endsWith('.dmg')).name);
 	assert.deepEqual(commands.filter(command => command.target === dmg).map(command => command.tool === 'codesign' ? command.args.includes('--verify') ? 'verify' : 'sign' : command.operation ?? command.tool), ['hdiutil', 'sign', 'verify', 'submit', 'staple', 'validate']);
 	assert.deepEqual(commands.filter(command => command.operation === 'submit').map(command => path.extname(command.target)), ['.zip', '.dmg']);
 	assert.equal(commands.find(command => command.tool === 'codesign' && command.args.includes('--identifier')).args.at(-2), 'com.example.fixture.dmg');

@@ -85,3 +85,10 @@ services/*/_shared/auth/dist/*
 !services/acp-client/_shared/acp/
 !services/acp-client/_shared/acp/dist/
 !services/acp-client/_shared/acp/dist/*
+
+# Shared checked Cypher parameter serializer for standalone containers.
+!services/_shared/cypher/dist/
+!services/_shared/cypher/dist/*
+!services/*/_shared/cypher/
+!services/*/_shared/cypher/dist/
+!services/*/_shared/cypher/dist/*

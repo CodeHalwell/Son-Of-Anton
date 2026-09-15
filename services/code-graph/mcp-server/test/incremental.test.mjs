@@ -1,10 +1,39 @@
 /* Copyright (c) Microsoft Corporation. Licensed under the MIT License. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, readFile, readdir, unlink, rm, realpath } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, unlink, rm, realpath } from 'node:fs/promises';
 import { basename, join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineSession } from '../dist/engine.js';
+
+test('local initialization is awaited while structural queries remain available and cache writes are ignored', { timeout: 15000 }, async t => {
+	const root = await mkdtemp(join(tmpdir(), 'sota-local-init-'));
+	let session, release, cache, scans = 0, embedded = 0;
+	t.after(async () => { release?.(); session?.dispose(); await rm(root, { recursive: true, force: true }); });
+	const engine = {
+		init() {},
+		async indexWorkspace() { scans++; return { files: 1, symbols: 1, edges: 0, skippedUnchanged: 0 }; },
+		async configureLocalEmbedder(directory) { cache = directory; await new Promise(resolve => { release = resolve; }); },
+		async embedAll() { embedded++; },
+		buildVectorIndex() { return 1; },
+		symbolLookup() { return [{ name: 'cartTotal' }]; }
+	};
+	session = new EngineSession({ indexRoot: root, dbPath: join(root, 'graph.db'), embedder: { kind: 'local' } });
+	const started = session.start(engine);
+	while (!release) { await new Promise(resolve => setTimeout(resolve, 10)); }
+	assert.deepEqual([session.status.structural, session.status.semantic, embedded, session.engine.symbolLookup()[0].name], [true, 'building', 0, 'cartTotal']);
+	assert.equal(cache, join(await realpath(root), 'graph.db.models'));
+	await mkdir(cache); await writeFile(join(cache, 'model.onnx'), 'model download');
+	await new Promise(resolve => setTimeout(resolve, 800));
+	release(); await started;
+	await new Promise(resolve => setTimeout(resolve, 800));
+	// macOS may coalesce the initial directory creation into a root rescan.
+	const baseline = { scans, embedded };
+	await writeFile(join(cache, 'model.onnx'), 'next model download chunk');
+	await new Promise(resolve => setTimeout(resolve, 800));
+	assert.deepEqual({ scans, embedded, semantic: session.status.semantic }, { ...baseline, semantic: 'ready' });
+});
+
 test('file watcher updates one file while queries stay available; deletions rescan', { timeout: 15000 }, async t => {
 	const root = await mkdtemp(join(tmpdir(), 'sota-incremental-'));
 	let session;

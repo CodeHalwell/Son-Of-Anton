@@ -1,0 +1,99 @@
+{
+  "date": "2026-09-14",
+  "source": "uncommitted workspace based on 1dc6348acb53d23a012e93d503f39b1e0c47e3c7",
+  "runtime": "Node v22.23.2 from verified official archives",
+  "vendorVersions": {
+    "claude": "2.1.138",
+    "codex": "0.153.4"
+  },
+  "regressionTests": {
+    "packaging": 21,
+    "stagedDirectory": 4,
+    "failed": 0
+  },
+  "macRuntime": {
+    "node": "v22.23.2",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "artifacts": [
+    {
+      "target": "darwin-arm64",
+      "path": "son-of-anton-cli/dist-bundle/sota",
+      "bytes": 293394480,
+      "sha256": "657a01e4796b7c5d98f809307063cdfa6c45944402fde14720ca68bb8af72d3c",
+      "signing": "ad-hoc",
+      "validation": "Full package smoke passed on macOS arm64"
+    },
+    {
+      "target": "linux-x64",
+      "path": ".build/cli-release/linux-x64/sota-linux-x64",
+      "bytes": 330173632,
+      "sha256": "8d18adfa41af8c0a8a8a602e26dca222094f15a1bbd8e0aa83d45bf762c1fe05",
+      "signing": "unsigned",
+      "validation": "Complete package smoke passed under QEMU x64 with native helpers, executable tmpfs and explicit 120-second ACP test deadline; native Linux CI pending"
+    },
+    {
+      "target": "windows-x64",
+      "path": ".build/cli-release/windows-x64/sota-windows-x64.exe",
+      "bytes": 302962688,
+      "sha256": "aef1cc87a1e1a698aed174360aa5a5163c5a8bbeaeaf39b10ffede7fdbe62535",
+      "signing": "unsigned",
+      "validation": "Cross-build and archive validation passed; Windows execution pending"
+    }
+  ],
+  "linuxAttempts": [
+    "Original cross-build failed because Claude native binary was missing. Fixed target libc selection and explicit native placement.",
+    "Fixed binary in fully emulated amd64 Debian exceeded the unchanged 120-second cold extraction smoke timeout.",
+    "Native arm64 helper image lacked the x64 dynamic loader; isolated test image now combines official arm64 tools with official x64 runtime libraries.",
+    "With native utilities, cold install, help, both actual agent launchers and CJS/ESM argument checks passed; ACP exceeded the default 20000 ms test deadline under QEMU.",
+    "The tmpfs test fixture initially mounted without execute permission; the test-only mount was corrected to rw,exec. No application permission changes were made."
+  ],
+  "limitations": [
+    "No current Windows executable runtime test on a Windows host.",
+    "Native x64 Linux execution remains separate from local QEMU testing.",
+    "Developer ID/notarization and Windows Authenticode release validation remain outstanding.",
+    "Global /opt/homebrew/bin/sota was not replaced.",
+    "Emulated ACP smoke uses a 120-second test deadline and tmpfs; it does not establish native disk or startup performance."
+  ],
+  "logs": {
+    "regressions": "/tmp/sota-production-vendor-tests.log",
+    "stagedDirectory": "/tmp/sota-production-vendor-staged-tests.log",
+    "macBuildAndSmoke": "/tmp/sota-production-vendor-macos-build.log",
+    "linuxBuild": "/tmp/sota-production-vendor-linux-build.log",
+    "linuxSmoke": "/tmp/sota-production-vendor-linux-final-smoke.log",
+    "windowsBuild": "/tmp/sota-production-vendor-windows-build.log",
+    "linuxBaselineSmoke": "/tmp/sota-production-vendor-linux-mixed-tools-smoke.log",
+    "finalCombinedRegressions": "/tmp/sota-production-vendor-final-regressions.log"
+  },
+  "linuxRuntime": {
+    "node": "v22.23.2",
+    "platform": "linux",
+    "arch": "x64"
+  },
+  "linuxEnvironment": {
+    "base": "node:22-bookworm-slim",
+    "baseDigest": "sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5",
+    "driver": "arm64 Node and native tar/gzip, plus x64 libraries copied from the official amd64 image",
+    "execution": "QEMU x86_64",
+    "network": "disabled",
+    "hostCredentials": "not mounted",
+    "temporaryInstallation": "executable tmpfs for final emulated run",
+    "acpHandshakeTestTimeoutMs": 120000,
+    "nativeDefaultAcpHandshakeTestTimeoutMs": 20000
+  },
+  "linuxSmoke": {
+    "status": "passed",
+    "checks": [
+      "clean installation",
+      "version and help",
+      "Claude and Codex identity/version",
+      "CJS and ESM argument preservation",
+      "ACP initialize and session/new",
+      "relocation and fresh vendor cache"
+    ],
+    "emulated": true,
+    "handshakeTimeoutMs": 120000,
+    "nativeDefaultHandshakeTimeoutMs": 20000
+  }
+}

@@ -53,6 +53,7 @@ async function openAndDestroy(port: number, body: object): Promise<{ partial: st
 				path: '/v1/messages',
 				method: 'POST',
 				headers: {
+					'Authorization': 'Bearer cancellation-test-token',
 					'Content-Type': 'application/json',
 					'Content-Length': Buffer.byteLength(payload),
 					'x-agent-role': 'default',
@@ -95,12 +96,13 @@ async function openAndDestroy(port: number, body: object): Promise<{ partial: st
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('model-router cancellation (§10.2)', () => {
+describe('model-router cancellation (§10.2)', { timeout: 10000 }, () => {
 	let server: http.Server;
 	let port: number;
 	let restoreFetch: (() => void) | undefined;
 
 	before(async () => {
+		process.env.SOTA_SERVICE_TOKEN = 'cancellation-test-token';
 		const app = createServer();
 		server = http.createServer(app);
 		await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -157,7 +159,8 @@ describe('model-router cancellation (§10.2)', () => {
 					path: '/v1/messages',
 					method: 'POST',
 					headers: {
-						'Content-Type': 'application/json',
+						'Authorization': 'Bearer cancellation-test-token',
+					'Content-Type': 'application/json',
 						'Content-Length': Buffer.byteLength(payload),
 						'x-agent-role': 'default',
 					},
@@ -217,7 +220,8 @@ describe('model-router cancellation (§10.2)', () => {
 					path: '/v1/messages',
 					method: 'POST',
 					headers: {
-						'Content-Type': 'application/json',
+						'Authorization': 'Bearer cancellation-test-token',
+					'Content-Type': 'application/json',
 						'Content-Length': Buffer.byteLength(payload),
 						'x-agent-role': 'default',
 					},
@@ -278,6 +282,7 @@ describe('model-router cancellation (§10.2)', () => {
 				path: '/v1/messages',
 				method: 'POST',
 				headers: {
+					'Authorization': 'Bearer cancellation-test-token',
 					'Content-Type': 'application/json',
 					'Content-Length': Buffer.byteLength(payload),
 					'x-agent-role': 'default',

@@ -44,9 +44,10 @@ Every built-in specialist can run through `sota acp`. Configure external ACP age
 
 ## Optional services
 
-The full Compose stack is opt-in and requires configuration from `.env.example`, including `SOTA_SERVICE_TOKEN`:
+The full Compose stack is opt-in. Generate a private `.env` with independent random service and datastore credentials; the command refuses to overwrite an existing configuration. Review optional provider settings before starting:
 
 ```sh
+node scripts/configure-services.mjs
 docker compose --profile services up -d
 docker compose --profile services ps
 docker compose --profile services down
