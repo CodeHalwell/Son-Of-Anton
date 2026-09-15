@@ -34,3 +34,15 @@ test('compact graph replies retain column names, booleans, numbers, arrays, and 
 	assert.deepEqual(decodeCompactResult([['Nodes created: 1']]), { headers: [], rows: [] });
 	assert.throws(() => decodeCompactResult([[[1, 'node']], [[[8, []]]]]), /Unsupported/);
 });
+
+test('canonical and vendored graph serializers execute inside CommonJS package boundaries', async () => {
+	const { readFile } = await import('node:fs/promises');
+	const { compileFunction } = await import('node:vm');
+	for (const service of ['_shared', 'indexer/_shared', 'lsif/_shared', 'mcp-gateway/_shared']) {
+		const url = new URL(`../../services/${service}/cypher/dist/index.js`, import.meta.url);
+		const module = { exports: {} };
+		// Explicit CommonJS parsing catches ESM exports even on Node versions that auto-detect ESM.
+		compileFunction(await readFile(url, 'utf8'), ['exports', 'require', 'module'])(module.exports, require, module);
+		assert.equal(module.exports.parameterizedQuery('RETURN $value', { value: 42 }), 'CYPHER value=42 RETURN $value');
+	}
+});

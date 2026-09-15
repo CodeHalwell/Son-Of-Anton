@@ -88,3 +88,14 @@ test('watcher records edits during the initial scan and ignores a relative SQLit
 	await writeFile(database + '.ts', 'export const legitimateSource = 1;');
 	await until(() => indexed.get('codegraph.db.ts') === 'export const legitimateSource = 1;');
 });
+
+test('failed initialization disposes its engine once and keeps the failure visible', async t => {
+	const root = await mkdtemp(join(tmpdir(), 'sota-failed-init-'));
+	let disposed = 0, indexed = 0;
+	const session = new EngineSession({ indexRoot: root, dbPath: join(root, 'graph.db') }, () => {});
+	t.after(async () => { session.dispose(); await rm(root, { recursive: true, force: true }); });
+	await session.start({ init: async () => { throw new Error('Database cannot open'); }, dispose: () => { disposed++; }, indexWorkspace: async () => { indexed++; } });
+	await session.refresh(); session.dispose();
+	assert.deepEqual([session.status.state, session.status.structural, disposed, indexed], ['failed', false, 1, 0]);
+	assert.match(session.status.reason, /Database cannot open/);
+});

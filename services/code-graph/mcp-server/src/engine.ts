@@ -152,6 +152,7 @@ export class EngineSession {
 			await this.refresh();
 		} catch (error) {
 			this.publish({ state: 'failed', structural: false, semantic: 'disabled', reason: `Code graph could not start: ${this.message(error)}. Run sota doctor to check bundled assets.` });
+			this.dispose();
 		}
 	}
 
@@ -225,7 +226,9 @@ export class EngineSession {
 	dispose(): void {
 		this.disposed = true;
 		this.watcher?.close();
-		this.engine?.dispose?.();
+		const engine = this.engine;
+		this.engine = undefined;
+		engine?.dispose?.();
 		if (this.timer) { clearTimeout(this.timer); }
 	}
 }

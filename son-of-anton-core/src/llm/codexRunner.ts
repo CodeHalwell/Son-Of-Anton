@@ -114,16 +114,22 @@ export async function* runCodex(options: CodexRunOptions): AsyncGenerator<CodexC
 	delete env.OPENAI_API_KEY;
 	const proc = spawn(options.codexPath?.trim() || 'codex', args, { cwd: options.cwd || process.cwd(), env, stdio: ['pipe', 'pipe', 'pipe'] });
 	let spawnError: Error | undefined;
+	let killTimer: NodeJS.Timeout | undefined;
 	// Register immediately: a short-lived or missing executable can close
 	// before the stdout iterator finishes (including signal exits).
 	const closed = new Promise<number | null>(resolve => {
 		proc.once('error', error => { spawnError = error; });
-		proc.once('close', resolve);
+		proc.once('close', code => { if (killTimer) { clearTimeout(killTimer); } resolve(code); });
 	});
 	let stderr = '';
 	proc.stderr.on('data', (data: Buffer) => { stderr = (stderr + data.toString()).slice(-16384); });
 	proc.stdin.on('error', () => { /* Early exit may close stdin before the prompt is written. */ });
-	const stop = () => { if (proc.exitCode === null && proc.signalCode === null) { proc.kill('SIGTERM'); } };
+	const stop = () => {
+		if (proc.exitCode !== null || proc.signalCode !== null || killTimer) { return; }
+		proc.kill('SIGTERM');
+		killTimer = setTimeout(() => { proc.kill('SIGKILL'); }, 1000);
+		killTimer.unref();
+	};
 	const signal = options.signal;
 	signal?.addEventListener('abort', stop, { once: true });
 	let timedOut = false;
@@ -161,6 +167,7 @@ export async function* runCodex(options: CodexRunOptions): AsyncGenerator<CodexC
 		rl.close();
 		stop();
 		proc.stdout.destroy();
+		await closed;
 	}
 }
 

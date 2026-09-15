@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { fixture, connect } from './installed-fixture.mjs';
 
 // Generated vectors isolate native indexing/search capacity from model-provider speed and quality.
@@ -42,7 +42,7 @@ test('2002-symbol native index stays responsive through concurrent search and fi
 	await Promise.all(Array.from({ length: 100 }, async (_, index) => {
 		const hits = await live.call('semantic_search', { query: `calculate amount ${index}`, limit: 5 });
 		assert.equal(hits.length, 5);
-		assert.ok(hits.every(hit => Number.isFinite(hit.score) && hit.file.startsWith('/')) || hits.every(hit => Number.isFinite(hit.score) && /^[A-Za-z]:/.test(hit.file)));
+		assert.ok(hits.every(hit => Number.isFinite(hit.score) && isAbsolute(hit.file)), 'Search hits must have finite scores and absolute paths, including Windows UNC paths');
 	}));
 	const concurrent100Ms = performance.now() - searchStart;
 	for (let file = 0; file < 10; file++) { await writeFile(join(app.workspace, `module${file}.ts`), `export function replacement${file}(amount: number) { return amount * 2; }`); }

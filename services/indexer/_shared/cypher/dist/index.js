@@ -1,4 +1,8 @@
+"use strict";
 /* Copyright (c) Microsoft Corporation. Licensed under the MIT License. */
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.parameterizedQuery = parameterizedQuery;
+exports.decodeCompactResult = decodeCompactResult;
 /** Serialize data as Cypher literals; JSON object keys are not valid Cypher map keys. */
 function literal(value) {
     if (value === null || value === undefined) {
@@ -24,7 +28,7 @@ function identifier(value) {
     }
     return value;
 }
-export function parameterizedQuery(query, parameters) {
+function parameterizedQuery(query, parameters) {
     if (!parameters || Object.keys(parameters).length === 0) {
         return query;
     }
@@ -60,7 +64,7 @@ function decodeValue(cell) {
         default: throw new Error(`Unsupported compact Cypher type ${type}; project properties instead of graph entities`);
     }
 }
-export function decodeCompactResult(raw) {
+function decodeCompactResult(raw) {
     if (!Array.isArray(raw) || raw.length < 2) {
         return { headers: [], rows: [] };
     }

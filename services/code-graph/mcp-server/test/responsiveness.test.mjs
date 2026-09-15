@@ -79,3 +79,17 @@ test('a saturated worker rejects excess queries while status and shutdown remain
 	await live.client.close();
 	await Promise.all(requests);
 });
+
+test('native initialization failure reaps the worker while MCP diagnostics stay available', { timeout: 15000 }, async t => {
+	const app = await fixture(t);
+	const module = join(app.directory, 'failed-init.cjs');
+	const marker = join(app.directory, 'worker.pid');
+	await writeFile(module, `require('node:fs').writeFileSync(${JSON.stringify(marker)}, String(process.pid)); module.exports = { init() { throw new Error('fixture database unavailable'); } };`);
+	const live = await connect(app, [], { CODEGRAPH_NAPI_PATH: module });
+	await live.until(async () => (await live.call('codegraph_status')).state === 'failed');
+	const { readFile } = await import('node:fs/promises');
+	const pid = Number(await readFile(marker, 'utf8'));
+	await live.until(() => { try { process.kill(pid, 0); return false; } catch (error) { if (error.code === 'ESRCH') { return true; } throw error; } });
+	assert.match((await live.call('codegraph_status')).reason, /fixture database unavailable/);
+	assert.deepEqual((await live.client.listTools()).tools.map(tool => tool.name), ['codegraph_status']);
+});

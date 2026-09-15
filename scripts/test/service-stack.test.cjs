@@ -16,7 +16,7 @@ test('authenticated service stack indexes a JavaScript fixture and serves real M
 	const file = process.env.SOTA_TEST_COMPOSE_FILE;
 	const config = JSON.parse(fs.readFileSync(file));
 	const command = args => {
-		const result = spawnSync('docker', ['compose', '-f', file, ...args], { encoding: 'utf8', timeout: 30000 });
+		const result = spawnSync('docker', ['compose', '-f', file, '--profile', 'services', ...args], { encoding: 'utf8', timeout: 30000 });
 		assert.equal(result.status, 0, `Docker ${args[0]} failed`);
 		return result.stdout;
 	};

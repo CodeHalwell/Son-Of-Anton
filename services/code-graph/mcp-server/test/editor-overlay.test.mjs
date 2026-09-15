@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import { test } from 'node:test';
+import { realpathSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, readFile, rm, realpath } from 'node:fs/promises';
 import path from 'node:path';
@@ -14,7 +15,7 @@ test('unsaved snapshots replace stale search hits and outlines without touching 
 	const root = await mkdtemp(path.join(tmpdir(), 'sota-overlay-'));
 	t.after(() => rm(root, { recursive: true, force: true }));
 	const file = path.join(root, 'source.ts'); await writeFile(file, 'export function oldName() {}');
-	const filename = await realpath(file), overlay = new EditorOverlay(root), text = 'export function newName() { return "new database"; }';
+	const filename = realpathSync(file), overlay = new EditorOverlay(root), text = 'export function newName() { return "new database"; }';
 	const document = { path: file, text, version: 2, language: 'typescript', outlineAvailable: true, symbols: [{ name: 'newName', kind: 'Function', start: 0, end: Buffer.byteLength(text) }] };
 	assert.equal(overlay.apply({ workspace: root, revision: 1, documents: [document] }), true);
 	const engine = { fileSummary: async () => ({ path: file, language: 'typescript', symbols: [{ name: 'oldName' }] }), symbolLookup: () => [{ name: 'oldName', file, kind: 'Function', start: 0, end: 26 }] };

@@ -40,3 +40,13 @@ Early runs exposed stale compiled Codex tests, missing fixture credentials, asyn
 The disposable FalkorDB outage test was attempted twice but Docker did not start its container within the 15-second fixture deadline (exit 143). It therefore did not reach its outage assertions on this candidate; the local gateway and native provider-recovery suites passed. CI must supply the missing Docker outage/full-stack evidence. The PostgreSQL container test did complete successfully.
 
 This task did not rebuild and exercise final signed installers on Windows and Linux, repeat the full desktop user walkthrough, download a real embedding model, or run the five-minute graph soak. Those release gates remain outstanding. This document is an integration report, not a production-release approval.
+
+## PR #265 review follow-up
+
+The first CI run passed the core/harness, typecheck, Rust, Linux/macOS IDE and all three CLI package jobs. Windows graph checks failed on test path assumptions: synchronous and asynchronous Windows realpath can use different short/long names, and native paths can have a UNC prefix. The fixtures now compare the same canonical representation as the overlay and use `path.isAbsolute` for search hits.
+
+All three inline review findings are addressed: the shared Cypher package explicitly declares CommonJS and its four generated artifacts are regenerated; Codex cancellation, consumer closure and deadline expiry escalate SIGTERM to SIGKILL after one second and reap the process; graph startup failure disposes and clears its engine while retaining failure diagnostics. Tests exercise CommonJS parsing without Node’s ESM auto-detection, an actual failed worker process, and child processes that ignore SIGTERM.
+
+The Docker integration job stopped at an unhealthy deployment service, but its log collection omitted the `services` profile and captured no service output. Log collection and the stack fixture now select that profile explicitly. The unchanged deployment image was built locally, started with a fixture token, and passed repeated container health checks without GitHub requests. Its CI-only startup failure was not reproduced; the next CI run remains authoritative.
+
+Follow-up local validation: core/graph TypeScript builds, native runtime bundle, shared-artifact consistency, 29 installed graph tests (two opt-in skips), 45 gateway tests, and the targeted Cypher/overlay/lifecycle tests pass. Windows native rerun and full Docker CI results are pending at the time of this update.

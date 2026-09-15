@@ -457,7 +457,7 @@ jobs:
 
       - name: Collect logs on failure
         if: failure()
-        run: docker compose logs
+        run: docker compose --profile services logs
 
       - name: Tear down
         if: always()

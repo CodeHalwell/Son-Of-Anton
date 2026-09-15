@@ -48,3 +48,39 @@ test('Codex rejects truncated successful-exit output', { skip: process.platform 
 	const options = await fixture(t, `process.stdin.resume(); console.log('not a JSON event');`);
 	assert.deepEqual(await collect(runCodex(options)), [{ type: 'error', message: 'Codex CLI exited without completing a response.' }]);
 });
+
+test('Codex cancellation kills a process that ignores SIGTERM', { skip: process.platform === 'win32', timeout: 10000 }, async t => {
+	const options = await fixture(t, `process.on('SIGTERM', () => {}); process.stdin.resume(); console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:String(process.pid)}})); setInterval(()=>{},1000);`);
+	const controller = new AbortController();
+	let pid: number | undefined;
+	t.after(() => { if (pid) { try { process.kill(pid, 'SIGKILL'); } catch { /* Already reaped. */ } } });
+	const chunks = [];
+	for await (const chunk of runCodex({ ...options, signal: controller.signal })) {
+		chunks.push(chunk);
+		if (chunk.type === 'text') { pid = Number(chunk.text); controller.abort(); }
+	}
+	assert.deepEqual(chunks, [{ type: 'text', text: String(pid) }]);
+	assert.throws(() => process.kill(pid!, 0), { code: 'ESRCH' });
+});
+
+test('closing the Codex consumer reaps a process that ignores SIGTERM', { skip: process.platform === 'win32', timeout: 10000 }, async t => {
+	const options = await fixture(t, `process.on('SIGTERM', () => {}); process.stdin.resume(); console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:String(process.pid)}})); setInterval(()=>{},1000);`);
+	let pid: number | undefined;
+	t.after(() => { if (pid) { try { process.kill(pid, 'SIGKILL'); } catch { /* Already reaped. */ } } });
+	for await (const chunk of runCodex(options)) { if (chunk.type === 'text') { pid = Number(chunk.text); break; } }
+	assert.throws(() => process.kill(pid!, 0), { code: 'ESRCH' });
+});
+
+test('Codex deadline kills an uncooperative process and reports a timeout', { skip: process.platform === 'win32', timeout: 10000 }, async t => {
+	const options = await fixture(t, `process.on('SIGTERM', () => {}); process.stdin.resume(); console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:String(process.pid)}})); setInterval(()=>{},1000);`);
+	t.mock.timers.enable({ apis: ['setTimeout'] });
+	let pid: number | undefined;
+	t.after(() => { if (pid) { try { process.kill(pid, 'SIGKILL'); } catch { /* Already reaped. */ } } });
+	const chunks = [];
+	for await (const chunk of runCodex(options)) {
+		chunks.push(chunk);
+		if (chunk.type === 'text') { pid = Number(chunk.text); t.mock.timers.tick(10 * 60 * 1000); t.mock.timers.tick(1000); }
+	}
+	assert.deepEqual(chunks, [{ type: 'text', text: String(pid) }, { type: 'error', message: 'Codex CLI request timed out.' }]);
+	assert.throws(() => process.kill(pid!, 0), { code: 'ESRCH' });
+});
