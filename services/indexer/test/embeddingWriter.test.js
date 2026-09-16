@@ -89,6 +89,18 @@ describe('EmbeddingWriter', () => {
 		writer = new EmbeddingWriter(qdrant, provider, config);
 	});
 
+	test('point IDs are deterministic UUIDs across restarts and separate file/symbol identities', async () => {
+		const source = extraction([fn('alpha', 'function alpha() { return 1; }'), fn('beta', 'function beta() { return 2; }', 10)]);
+		await writer.writeFile('a.ts', 'typescript', source);
+		const ids = [...qdrant.points.keys()];
+		assert.ok(ids.every(id => /^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)));
+		const restarted = new EmbeddingWriter(qdrant, provider, config);
+		await restarted.writeFile('a.ts', 'typescript', source);
+		assert.deepEqual([...qdrant.points.keys()], ids);
+		await restarted.writeFile('b.ts', 'typescript', source);
+		assert.equal(qdrant.points.size, 4);
+	});
+
 	test('first index embeds and stores every chunk', async () => {
 		const count = await writer.writeFile('a.ts', 'typescript', extraction([
 			fn('alpha', 'function alpha() { return 1; }', 1),

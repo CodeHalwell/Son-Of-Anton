@@ -12,11 +12,13 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const source = path.join(root, 'services/_shared/auth');
 execFileSync(process.execPath, [path.join(root, 'node_modules/typescript/bin/tsc'), '-p', path.join(source, 'tsconfig.json')], { stdio: 'inherit' });
 const files = (await readdir(path.join(source, 'dist'))).filter(file => /\.(js|map|ts)$/.test(file));
-for (const parent of ['services', 'son-of-anton-mcp/servers']) {
+for (const parent of ['services', 'son-of-anton-mcp/servers', 'son-of-anton-mcp']) {
 	for (const service of await readdir(path.join(root, parent))) {
 		const destination = path.join(root, parent, service, '_shared/auth/dist');
 		if (!existsSync(destination)) { continue; }
 		if (process.argv.includes('--check')) {
+			// Ignored local build output must not mask missing files in a clean checkout.
+			execFileSync('git', ['ls-files', '--error-unmatch', '--', ...files.map(file => path.relative(root, path.join(destination, file)).split(path.sep).join('/'))], { cwd: root, stdio: ['ignore', 'ignore', 'inherit'] });
 			for (const file of files) {
 				if (!existsSync(path.join(destination, file)) || !(await readFile(path.join(source, 'dist', file))).equals(await readFile(path.join(destination, file)))) {
 					throw new Error(`Stale shared service module: ${parent}/${service}/${file}. Run node scripts/sync-service-auth.mjs.`);

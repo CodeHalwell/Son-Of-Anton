@@ -217,10 +217,15 @@ export class EmbeddingWriter {
 		contentHash: string,
 		lastModified: string
 	): CodeChunk {
-		// Use a deterministic ID based on file + symbol for stable upserts
-		const id = crypto.createHash('sha256')
+		// Qdrant accepts UUIDs, not arbitrary SHA-256 strings. Keep stable
+		// file/symbol identities using the first 128 hash bits as a version-8 UUID.
+		const digest = crypto.createHash('sha256')
 			.update(`${filePath}:${chunkType}:${symbolName}:${startLine}`)
-			.digest('hex');
+			.digest().subarray(0, 16);
+		digest[6] = (digest[6] & 0x0f) | 0x80;
+		digest[8] = (digest[8] & 0x3f) | 0x80;
+		const hex = digest.toString('hex');
+		const id = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 
 		return {
 			id,
