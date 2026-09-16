@@ -73,6 +73,14 @@ services/*/_shared/auth/dist/*
 !services/_shared/auth/dist/workspaceFs.*
 !services/*/_shared/auth/dist/workspaceFs.*
 !services/background-tasks/_shared/auth/dist/index.*
+!son-of-anton-mcp/servers/*/_shared/auth/dist/
+son-of-anton-mcp/servers/*/_shared/auth/dist/*
+!son-of-anton-mcp/servers/*/_shared/auth/dist/index.*
+!son-of-anton-mcp/servers/*/_shared/auth/dist/workspaceFs.*
+!son-of-anton-mcp/*/_shared/auth/dist/
+son-of-anton-mcp/*/_shared/auth/dist/*
+!son-of-anton-mcp/*/_shared/auth/dist/index.*
+!son-of-anton-mcp/*/_shared/auth/dist/workspaceFs.*
 
 /extensions/son-of-anton/runtime/
 

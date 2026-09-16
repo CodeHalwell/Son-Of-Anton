@@ -263,7 +263,7 @@ jobs:
           npm --prefix son-of-anton-mcp/servers/database test
           npm --prefix services/acp-client test
           node --test services/_shared/auth/dist/test/*.js
-          node --test scripts/test/configure-services.test.mjs scripts/test/cypher-parameters.test.mjs
+          node --test scripts/test/configure-services.test.mjs scripts/test/cypher-parameters.test.mjs scripts/test/shared-auth-artifacts.test.mjs
         env:
           SOTA_TASK_EVAL_OUTPUT: ${{ runner.temp }}/workflow-baseline.json
 
