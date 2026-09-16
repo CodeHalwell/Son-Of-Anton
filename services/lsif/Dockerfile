@@ -21,6 +21,7 @@ RUN npm install
 COPY src/ ./src/
 COPY _lib/metrics/dist/ ./_lib/metrics/dist/
 COPY _shared/auth/dist/ ./_shared/auth/dist/
+COPY _shared/cypher/dist/ ./_shared/cypher/dist/
 RUN npx tsc --noCheck
 
 # Create directories for LSIF output and snapshots

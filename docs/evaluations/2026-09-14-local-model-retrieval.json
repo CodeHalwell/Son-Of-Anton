@@ -1,0 +1,97 @@
+{
+  "model": "BGE-small-en-v1.5",
+  "fixture": "local-paraphrase-v1",
+  "coldReadyMs": 5629.6167080000005,
+  "warmReadyMs": 504.59637499999917,
+  "concurrent32Ms": 682.4539159999995,
+  "maxStatusLatencyMs": 819.790833,
+  "recallAt1": 1,
+  "samples": [
+    {
+      "query": "calculate the shopping basket bill",
+      "expected": "cartTotal",
+      "retrieved": [
+        "cartTotal",
+        "scheduleRetry",
+        "exportCsv"
+      ],
+      "latencyMs": 18.384374999999636
+    },
+    {
+      "query": "securely hash a secret for authentication",
+      "expected": "passwordDigest",
+      "retrieved": [
+        "passwordDigest",
+        "createThumbnail",
+        "evictExpiredEntries"
+      ],
+      "latencyMs": 16.183208999999806
+    },
+    {
+      "query": "find the soonest upcoming meeting",
+      "expected": "nextAppointment",
+      "retrieved": [
+        "nextAppointment",
+        "scheduleRetry",
+        "evictExpiredEntries"
+      ],
+      "latencyMs": 18.61570799999936
+    },
+    {
+      "query": "make a small preview picture",
+      "expected": "createThumbnail",
+      "retrieved": [
+        "createThumbnail",
+        "nextAppointment",
+        "cartTotal"
+      ],
+      "latencyMs": 15.471209000000272
+    },
+    {
+      "query": "remove cached values whose lifetime has elapsed",
+      "expected": "evictExpiredEntries",
+      "retrieved": [
+        "evictExpiredEntries",
+        "exportCsv",
+        "nextAppointment"
+      ],
+      "latencyMs": 15.432999999999993
+    },
+    {
+      "query": "save tabular records as comma separated text",
+      "expected": "exportCsv",
+      "retrieved": [
+        "exportCsv",
+        "evictExpiredEntries",
+        "cartTotal"
+      ],
+      "latencyMs": 14.726874999999382
+    }
+  ],
+  "testedRuntime": "packaged macOS arm64",
+  "installerManifest": {
+    "version": 1,
+    "product": "Son of Anton IDE",
+    "ideVersion": "1.112.0",
+    "commit": "1dc6348acb53d23a012e93d503f39b1e0c47e3c7",
+    "target": "darwin-arm64",
+    "createdAt": "2026-09-14T13:50:54.906Z",
+    "signing": "ad-hoc",
+    "files": [
+      {
+        "name": "son-of-anton-1.112.0-darwin-arm64.zip",
+        "bytes": 221483538,
+        "sha256": "788a3002bc63fc814f8de707767e51658c25b5826d02b46bada41898d9957a39"
+      },
+      {
+        "name": "son-of-anton-1.112.0-darwin-arm64.dmg",
+        "bytes": 277311898,
+        "sha256": "46686e49c554ec2a1639b221119ff57fafb00e4ea0f1075d705cb0a31f76bc40"
+      }
+    ]
+  },
+  "limitations": [
+    "Six paraphrased queries over eight source files; not a general relevance benchmark.",
+    "An earlier concurrent startup run observed a 4589.7 ms status response. The instrumented single-test rerun passed the unchanged 1000 ms bound. Startup latency under contention remains under investigation."
+  ]
+}

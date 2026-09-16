@@ -3,58 +3,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import * as os from 'node:os';
-import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
-const sourceRuntime = process.env.SOTA_RUNTIME_SOURCE || fileURLToPath(new URL('../../../../extensions/son-of-anton/runtime/codegraph/', import.meta.url));
-const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
-
-async function fixture(t) {
-	const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'sota-installed-'));
-	// Close clients and providers before deleting files held open by SQLite/watchers on Windows.
-	const cleanups = [() => fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })];
-	t.after(async () => {
-		const errors = [];
-		for (const cleanup of cleanups.reverse()) {
-			try { await cleanup(); } catch (error) { errors.push(error); }
-		}
-		if (errors.length) { throw new AggregateError(errors, 'Installed graph fixture cleanup failed'); }
-	});
-	const runtime = path.join(directory, 'app/runtime');
-	const workspace = path.join(directory, 'workspace');
-	await fs.cp(sourceRuntime, runtime, { recursive: true });
-	await fs.mkdir(workspace);
-	await fs.writeFile(path.join(workspace, 'settings.ts'), 'export function loadProjectSettings() { return "load saved project settings"; }\n');
-	await fs.writeFile(path.join(workspace, 'retry.ts'), 'export function scheduleRetry() { return "retry failed network requests"; }\n');
-	return { directory, runtime, workspace, cleanups };
-}
-
-async function connect(fixture, extra = []) {
-	const transport = new StdioClientTransport({ command: process.execPath, args: [path.join(fixture.runtime, 'index.cjs'), `--db=${path.join(fixture.directory, 'graph.db')}`, `--index-root=${fixture.workspace}`, ...extra], cwd: fixture.workspace, env: { PATH: process.env.PATH || '', ELECTRON_RUN_AS_NODE: '1' }, stderr: 'pipe' });
-	let logs = '';
-	const client = new Client({ name: 'offline-fixture', version: '1' });
-	fixture.cleanups.push(() => client.close());
-	transport.stderr?.on('data', chunk => { logs = (logs + chunk).slice(-16000); });
-	await client.connect(transport);
-	const call = async (name, args = {}) => {
-		const result = await client.callTool({ name, arguments: args });
-		if (result.isError) { throw new Error(result.content[0].text); }
-		return JSON.parse(result.content[0].text);
-	};
-	const until = async predicate => {
-		const deadline = Date.now() + 20000;
-		while (Date.now() < deadline) {
-			try { if (await predicate()) { return; } }
-			catch (error) { if (!/still indexing/.test(error.message)) { throw error; } }
-			await wait(100);
-		}
-		throw new Error(`MCP fixture timed out: ${logs}`);
-	};
-	return { client, call, until };
-}
+import { fixture, connect } from './installed-fixture.mjs';
 
 test('installed native graph indexes, embeds, searches, watches edits and isolates workspaces offline', { timeout: 45000 }, async t => {
 	const app = await fixture(t);
@@ -90,6 +41,7 @@ test('installed native graph indexes, embeds, searches, watches edits and isolat
 	await live.until(async () => (await live.call('codegraph_status')).structural && (await live.call('symbol_lookup', { query: 'readCurrentSettings' }))[0]?.file.endsWith('moved.ts'));
 	await fs.unlink(path.join(app.workspace, 'moved.ts'));
 	await live.until(async () => (await live.call('codegraph_status')).structural && (await live.call('symbol_lookup', { query: 'readCurrentSettings' })).length === 0);
+	await live.until(async () => (await live.call('codegraph_status')).semantic === 'ready');
 	await assert.rejects(live.call('semantic_search', { query: 'retry', limit: -1 }), /positive integer/);
 	await live.client.close();
 	const restarted = await connect(app);
@@ -142,4 +94,32 @@ test('installed native impact analysis retains both indexed routes through a sha
 	assert.deepEqual([detailed.fileBased, detailed.truncated, detailed.unsavedDocuments.documents], [true, false, []]);
 	const flat = await live.call('impact_analysis', { path: target, details: false, depth: 2 });
 	assert.deepEqual(flat.map(filename => path.basename(filename)).sort(), ['impact-a.ts', 'impact-b.ts', 'impact-shared.test.ts']);
+});
+
+test('unavailable local model download keeps structural tools usable and reports semantic failure', { timeout: 30000 }, async t => {
+	const app = await fixture(t);
+	const live = await connect(app, ['--local-embedder'], { HF_ENDPOINT: 'http://127.0.0.1:1' });
+	await live.until(async () => (await live.call('codegraph_status')).semantic === 'error');
+	const status = await live.call('codegraph_status');
+	assert.deepEqual([status.state, status.structural, status.semantic], ['degraded', true, 'error']);
+	assert.match(status.reason, /Embedding failed/);
+	assert.equal((await live.call('symbol_lookup', { query: 'loadProjectSettings' }))[0]?.name, 'loadProjectSettings');
+	assert.equal((await live.client.listTools()).tools.some(tool => tool.name === 'semantic_search'), false);
+	await assert.rejects(live.call('semantic_search', { query: 'saved settings' }), /Semantic search is error/);
+});
+
+test('closing a real native graph cancels a stalled local model download promptly', { timeout: 15000 }, async t => {
+	const app = await fixture(t);
+	let requested = false;
+	const host = createServer((_req, _res) => { requested = true; });
+	await new Promise(resolve => host.listen(0, '127.0.0.1', resolve));
+	app.cleanups.push(() => new Promise(resolve => { host.close(resolve); host.closeAllConnections(); }));
+	const live = await connect(app, ['--local-embedder'], { HF_ENDPOINT: `http://127.0.0.1:${host.address().port}` });
+	await live.until(() => requested);
+	assert.equal((await live.call('codegraph_status')).semantic, 'building');
+	const before = performance.now();
+	await live.client.close();
+	const closeMs = performance.now() - before;
+	t.diagnostic(`Stalled native download closed in ${closeMs.toFixed(0)} ms`);
+	assert.ok(closeMs < 2000, 'Native download shutdown should finish before transport escalation');
 });

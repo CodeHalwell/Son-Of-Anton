@@ -1,0 +1,6 @@
+{
+	"name": "@son-of-anton/cypher",
+	"private": true,
+	"type": "commonjs",
+	"main": "dist/index.js"
+}

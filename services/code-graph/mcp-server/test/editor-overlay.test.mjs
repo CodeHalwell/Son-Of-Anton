@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import { test } from 'node:test';
+import { realpathSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, readFile, rm, realpath } from 'node:fs/promises';
 import path from 'node:path';
@@ -14,63 +15,63 @@ test('unsaved snapshots replace stale search hits and outlines without touching 
 	const root = await mkdtemp(path.join(tmpdir(), 'sota-overlay-'));
 	t.after(() => rm(root, { recursive: true, force: true }));
 	const file = path.join(root, 'source.ts'); await writeFile(file, 'export function oldName() {}');
-	const filename = await realpath(file), overlay = new EditorOverlay(root), text = 'export function newName() { return "new database"; }';
+	const filename = realpathSync(file), overlay = new EditorOverlay(root), text = 'export function newName() { return "new database"; }';
 	const document = { path: file, text, version: 2, language: 'typescript', outlineAvailable: true, symbols: [{ name: 'newName', kind: 'Function', start: 0, end: Buffer.byteLength(text) }] };
 	assert.equal(overlay.apply({ workspace: root, revision: 1, documents: [document] }), true);
-	const engine = { fileSummary: () => ({ path: file, language: 'typescript', symbols: [{ name: 'oldName' }] }), symbolLookup: () => [{ name: 'oldName', file, kind: 'Function', start: 0, end: 26 }] };
-	assert.deepEqual([overlay.fileSummary(engine, file).symbols[0].name, overlay.symbolLookup(engine, 'oldName', 10), overlay.search('database', [{ file, symbol: 'oldName', kind: 'Function', snippet: 'stale', score: 1 }], 10).map(hit => [hit.file, hit.symbol, hit.retrieval, hit.documentVersion]), await readFile(file, 'utf8')], ['newName', [], [[filename, 'newName', 'local-text-match', 2]], 'export function oldName() {}']);
+	const engine = { fileSummary: async () => ({ path: file, language: 'typescript', symbols: [{ name: 'oldName' }] }), symbolLookup: () => [{ name: 'oldName', file, kind: 'Function', start: 0, end: 26 }] };
+	assert.deepEqual([(await overlay.fileSummary(engine, file)).symbols[0].name, await overlay.symbolLookup(engine, 'oldName', 10), overlay.search('database', [{ file, symbol: 'oldName', kind: 'Function', snippet: 'stale', score: 1 }], 10).map(hit => [hit.file, hit.symbol, hit.retrieval, hit.documentVersion]), await readFile(file, 'utf8')], ['newName', [], [[filename, 'newName', 'local-text-match', 2]], 'export function oldName() {}']);
 	assert.equal(overlay.apply({ workspace: root, revision: 0, documents: [] }), false);
 	assert.equal(overlay.apply({ workspace: root, revision: 2, documents: [{ ...document, version: 1 }] }), false);
 	assert.equal(overlay.apply({ workspace: root, revision: 3, documents: [] }), true);
-	assert.equal(overlay.fileSummary(engine, file).symbols[0].name, 'oldName');
+	assert.equal((await overlay.fileSummary(engine, file)).symbols[0].name, 'oldName');
 });
 
-test('overlay rejects cross-workspace, escaping paths and oversized snapshots atomically', () => {
+test('overlay rejects cross-workspace, escaping paths and oversized snapshots atomically', async () => {
 	const overlay = new EditorOverlay('/workspace');
 	const document = { path: '/workspace/file.ts', version: 1, text: 'abc', language: 'typescript', outlineAvailable: false, symbols: [] };
 	for (const snapshot of [{ workspace: '/elsewhere', revision: 1, documents: [document] }, { workspace: '/workspace', revision: 1, documents: [{ ...document, path: '../secrets.ts' }] }, { workspace: '/workspace', revision: 1, documents: [{ ...document, text: 'x'.repeat(256 * 1024 + 1) }] }]) { assert.equal(overlay.apply(snapshot), false); }
 	assert.equal(overlay.size, 0);
 });
 
-test('dependency impact preserves intermediate callers and terminates cycles', () => {
+test('dependency impact preserves intermediate callers and terminates cycles', async () => {
 	const graph = new Map([['target.ts', ['caller.ts']], ['caller.ts', ['test.ts', 'target.ts']], ['test.ts', []]]);
-	const result = dependencyImpact({ impactAnalysis: file => graph.get(file) ?? [] }, 'target.ts', 3);
+	const result = await dependencyImpact({ impactAnalysis: file => graph.get(file) ?? [] }, 'target.ts', 3);
 	assert.deepEqual(result, { fileBased: true, paths: [['caller.ts', 'target.ts'], ['test.ts', 'caller.ts', 'target.ts']], truncated: false });
 });
 
-test('dependency impact preserves both diamond edges while expanding the shared caller once', () => {
+test('dependency impact preserves both diamond edges while expanding the shared caller once', async () => {
 	const graph = new Map([['target.ts', ['a.ts', 'b.ts']], ['a.ts', ['c.ts', 'c.ts']], ['b.ts', ['c.ts']], ['c.ts', ['test.ts']], ['test.ts', []]]);
 	const queried = [];
-	const result = dependencyImpact({ impactAnalysis: (file, depth) => { queried.push([file, depth]); return graph.get(file) ?? []; } }, 'target.ts', 3);
+	const result = await dependencyImpact({ impactAnalysis: (file, depth) => { queried.push([file, depth]); return graph.get(file) ?? []; } }, 'target.ts', 3);
 	assert.deepEqual(result, { fileBased: true, paths: [['a.ts', 'target.ts'], ['b.ts', 'target.ts'], ['c.ts', 'a.ts', 'target.ts'], ['c.ts', 'b.ts', 'target.ts'], ['test.ts', 'c.ts', 'a.ts', 'target.ts']], truncated: false });
 	assert.deepEqual(queried, [['target.ts', 1], ['a.ts', 1], ['b.ts', 1], ['c.ts', 1]]);
 });
 
-test('dependency impact excludes cyclic witnesses and does not query beyond the requested depth', () => {
+test('dependency impact excludes cyclic witnesses and does not query beyond the requested depth', async () => {
 	const graph = new Map([['target.ts', ['a.ts', 'b.ts', 'target.ts']], ['a.ts', ['c.ts', 'target.ts']], ['b.ts', ['c.ts', 'a.ts']], ['c.ts', ['a.ts', 'c.ts', 'd.ts']]]);
 	const queried = [], engine = { impactAnalysis: file => { queried.push(file); return graph.get(file) ?? []; } };
-	assert.deepEqual(dependencyImpact(engine, 'target.ts', 1), { fileBased: true, paths: [['a.ts', 'target.ts'], ['b.ts', 'target.ts']], truncated: false });
+	assert.deepEqual(await dependencyImpact(engine, 'target.ts', 1), { fileBased: true, paths: [['a.ts', 'target.ts'], ['b.ts', 'target.ts']], truncated: false });
 	assert.deepEqual(queried, ['target.ts']);
 	queried.length = 0;
-	const result = dependencyImpact(engine, 'target.ts', 3);
+	const result = await dependencyImpact(engine, 'target.ts', 3);
 	assert.deepEqual(result.paths, [['a.ts', 'target.ts'], ['b.ts', 'target.ts'], ['c.ts', 'a.ts', 'target.ts'], ['c.ts', 'b.ts', 'target.ts'], ['a.ts', 'b.ts', 'target.ts'], ['d.ts', 'c.ts', 'a.ts', 'target.ts']]);
 	assert.equal(result.paths.every(chain => new Set(chain).size === chain.length && chain.length <= 4), true);
 	assert.deepEqual(queried, ['target.ts', 'a.ts', 'b.ts', 'c.ts']);
 });
 
-test('node limits still retain alternate edges among admitted files and flag only omitted nodes', () => {
+test('node limits still retain alternate edges among admitted files and flag only omitted nodes', async () => {
 	const direct = Array.from({ length: 199 }, (_, index) => `caller-${index}.ts`);
 	const engine = { impactAnalysis: file => file === 'target.ts' ? direct : file === direct[0] ? [direct[1], 'omitted.ts'] : [] };
-	const result = dependencyImpact(engine, 'target.ts', 2);
+	const result = await dependencyImpact(engine, 'target.ts', 2);
 	assert.deepEqual([result.paths.length, result.paths.at(-1), result.truncated, new Set(result.paths.flat()).size], [200, [direct[1], direct[0], 'target.ts'], true, 200]);
-	assert.equal(dependencyImpact(engine, 'target.ts', 1).truncated, false, 'Exactly reaching the node limit does not imply missing evidence');
+	assert.equal((await dependencyImpact(engine, 'target.ts', 1)).truncated, false, 'Exactly reaching the node limit does not imply missing evidence');
 });
 
-test('dense graph output and duplicate-edge work are bounded with explicit truncation', () => {
+test('dense graph output and duplicate-edge work are bounded with explicit truncation', async () => {
 	const files = Array.from({ length: 100 }, (_, index) => `file-${index}.ts`), queried = [];
-	const result = dependencyImpact({ impactAnalysis: file => { queried.push(file); return files; } }, 'target.ts', 20);
+	const result = await dependencyImpact({ impactAnalysis: file => { queried.push(file); return files; } }, 'target.ts', 20);
 	assert.deepEqual([result.paths.length, result.truncated, queried.length === new Set(queried).size, queried.length <= 200], [1000, true, true, true]);
-	const duplicates = dependencyImpact({ impactAnalysis: () => Array(10_001).fill('caller.ts') }, 'target.ts', 1);
+	const duplicates = await dependencyImpact({ impactAnalysis: () => Array(10_001).fill('caller.ts') }, 'target.ts', 1);
 	assert.deepEqual(duplicates, { fileBased: true, paths: [['caller.ts', 'target.ts']], truncated: true });
 });
 

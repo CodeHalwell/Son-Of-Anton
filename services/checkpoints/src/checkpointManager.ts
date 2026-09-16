@@ -73,7 +73,7 @@ export class CheckpointManager {
 	async restoreCheckpoint(sessionId: string, checkpointId: string): Promise<void> {
 		const checkpoint = await this.storage.loadCheckpoint(sessionId, checkpointId);
 		const root = await fs.realpath(this.workspaceRoot);
-		if (checkpoint.workspaceRoot !== root) {
+		if (checkpoint.workspaceRoot !== undefined && checkpoint.workspaceRoot !== root) {
 			throw new Error('Checkpoint has no matching workspace identity');
 		}
 		// Validate the complete plan and load every snapshot before any writes.
@@ -84,6 +84,13 @@ export class CheckpointManager {
 		const recovery = await Promise.all(plan.map(async file => ({
 			path: file.path, content: await readWorkspaceFile(root, file.path),
 		})));
+		// Pre-upgrade records have no workspace identity. Validate all paths and
+		// snapshot hashes first, then bind the record to this configured workspace
+		// before changing files. Future restores retain the cross-workspace guard.
+		if (checkpoint.workspaceRoot === undefined) {
+			checkpoint.workspaceRoot = root;
+			await this.storage.saveCheckpoint(sessionId, checkpoint);
+		}
 		const apply = async (files: typeof plan): Promise<void> => {
 			for (const file of files) {
 				if (file.content === undefined) { await removeWorkspaceFile(root, file.path); }

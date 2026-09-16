@@ -16,6 +16,10 @@ const config: ModelRoutesConfig = {
 	routes: [{ name: 'fixture', priority: 0, match: { agentRole: '*' }, provider: 'first', model: 'gpt-4o', fallbacks: [{ provider: 'second', model: 'gpt-4o-mini' }] }],
 };
 async function fixture(t: TestContext, upstream: typeof fetch, timeoutMs = 1000) {
+	const previousToken = process.env.SOTA_SERVICE_TOKEN;
+	const token = 'model-router-test-token';
+	process.env.SOTA_SERVICE_TOKEN = token;
+	t.after(() => { if (previousToken === undefined) { delete process.env.SOTA_SERVICE_TOKEN; } else { process.env.SOTA_SERVICE_TOKEN = previousToken; } });
 	globalThis.fetch = upstream;
 	t.after(() => { globalThis.fetch = clientFetch; });
 	const server = httpServer(createServer({ config, failover: {}, timeoutMs }));
@@ -25,8 +29,8 @@ async function fixture(t: TestContext, upstream: typeof fetch, timeoutMs = 1000)
 	assert.ok(address && typeof address === 'object');
 	const url = `http://127.0.0.1:${address.port}`;
 	return {
-		post: (body: object, endpoint = '/v1/messages') => clientFetch(url + endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
-		metrics: async () => (await clientFetch(url + '/metrics/recent')).json() as Promise<Array<{ success: boolean; inputTokens: number; outputTokens: number; cachedTokens: number }>>,
+		post: (body: object, endpoint = '/v1/messages') => clientFetch(url + endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json', authorization: `Bearer ${token}` }, body: JSON.stringify(body) }),
+		metrics: async () => (await clientFetch(url + '/metrics/recent', { headers: { authorization: `Bearer ${token}` } })).json() as Promise<Array<{ success: boolean; inputTokens: number; outputTokens: number; cachedTokens: number }>>,
 	};
 }
 const request = { messages: [{ role: 'user', content: 'Hello' }], stream: true };

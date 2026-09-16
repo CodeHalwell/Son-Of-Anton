@@ -41,22 +41,30 @@
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
+import { withStagedDirectory } from '../../../scripts/staged-directory.mjs';
+import { NODE_ARCHIVE_SHA256, verifyArchive } from './node-archive.mjs';
+import { vendorInstallArgs, prepareVendorBinaries, vendorBinTarget } from './vendor-target.mjs';
 import crossSpawn from 'cross-spawn';
 import {
 	chmodSync,
 	copyFileSync,
+	cpSync,
+	renameSync,
 	existsSync,
 	mkdirSync,
+	mkdtempSync,
 	readFileSync,
+	openSync,
+	readSync,
+	closeSync,
 	readdirSync,
-	realpathSync,
 	rmSync,
 	statSync,
 	writeFileSync,
 } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { packageSmoke } from '../package-smoke.mjs';
 import { build as esbuild } from 'esbuild';
 
@@ -77,7 +85,7 @@ export const CODEX_VERSION = '0.153.4';
 
 // Node version used for the SEA host. Bump in lockstep with the esbuild
 // `target` field below and with PACKAGING.md.
-export const NODE_VERSION = 'v22.20.0';
+export const NODE_VERSION = 'v22.23.2';
 
 const SEA_FUSE = 'NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2';
 
@@ -85,11 +93,8 @@ function log(step, msg) {
 	process.stdout.write(`\x1b[1m[${step}]\x1b[0m ${msg}\n`);
 }
 
-function ensureCleanOutDir() {
-	if (existsSync(OUT_DIR)) {
-		rmSync(OUT_DIR, { recursive: true, force: true });
-	}
-	mkdirSync(OUT_DIR, { recursive: true });
+function abortPackaging(code = 1) {
+	throw new Error(`SEA packaging step failed (exit code ${code})`);
 }
 
 // --- Step 1 ---------------------------------------------------------------
@@ -112,7 +117,7 @@ async function bundleEntry(bundlePath) {
 	});
 	if (result.errors.length) {
 		console.error('esbuild errors:', result.errors);
-		process.exit(1);
+		abortPackaging(1);
 	}
 	const sizeMb = (statSync(bundlePath).size / 1024 / 1024).toFixed(2);
 	log('1/10', `bundle written, ${sizeMb} MiB`);
@@ -136,23 +141,21 @@ function installVendor(vendorDir, target) {
 		'--no-audit',
 		'--no-fund',
 		'--prefix', vendorDir,
-		'--os', target.os,
-		'--cpu', target.cpu,
-		`@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}`,
-		`@openai/codex@${CODEX_VERSION}`,
+		...vendorInstallArgs(target, CLAUDE_CODE_VERSION, CODEX_VERSION),
 	];
 	const r = crossSpawn.sync('npm', args, { stdio: 'inherit', cwd: vendorDir });
 	if (r.status !== 0) {
 		console.error(`vendor npm install failed: ${r.error?.message ?? r.status}`);
-		process.exit(r.status ?? 1);
+		abortPackaging(r.status ?? 1);
 	}
+	prepareVendorBinaries(vendorDir, target);
 	// Verify the bin shims actually appeared. The optional-dep mechanic
 	// silently no-ops on a platform mismatch, so we'd rather fail loudly here
 	// than ship a vendor tree that boots into an ENOENT at runtime.
 	const binDir = resolve(vendorDir, 'node_modules', '.bin');
 	if (!existsSync(binDir)) {
 		console.error(`vendor install produced no node_modules/.bin: ${binDir}`);
-		process.exit(1);
+		abortPackaging(1);
 	}
 	const binEntries = readdirSync(binDir);
 	const missing = ['claude', 'codex'].filter(
@@ -160,19 +163,19 @@ function installVendor(vendorDir, target) {
 	);
 	if (missing.length) {
 		console.error(`vendor missing bin shims: ${missing.join(', ')}\nGot: ${binEntries.join(', ')}`);
-		process.exit(1);
+		abortPackaging(1);
 	}
 }
 
 // --- Step 3 ---------------------------------------------------------------
-function rewriteBinShims(vendorDir, target) {
+export function rewriteBinShims(vendorDir, target) {
 	log('3/10', `rewrite bin shims (${target.exeFormat})`);
 	const binDir = resolve(vendorDir, 'node_modules', '.bin');
 	for (const name of ['claude', 'codex']) {
 		if (target.exeFormat === 'windows') {
-			rewriteWindowsShim(binDir, name);
+			rewriteWindowsShim(binDir, name, vendorBinTarget(vendorDir, name));
 		} else {
-			rewriteUnixShim(binDir, name);
+			rewriteUnixShim(binDir, name, vendorBinTarget(vendorDir, name));
 		}
 	}
 }
@@ -195,12 +198,11 @@ function rewriteBinShims(vendorDir, target) {
  *     marked executable rather than the underlying native binary directly
  *     (which would still work but bypasses our control point).
  */
-function rewriteUnixShim(binDir, name) {
+function rewriteUnixShim(binDir, name, realPath) {
 	const shimPath = resolve(binDir, name);
 	if (!existsSync(shimPath)) {
 		return;
 	}
-	const realPath = readSymlinkOrFile(shimPath);
 	const relScript = relativeFromBin(binDir, realPath);
 	const flavour = classifyBinTarget(realPath);
 	rmSync(shimPath, { force: true });
@@ -236,7 +238,8 @@ function rewriteUnixShim(binDir, name) {
  */
 function classifyBinTarget(filePath) {
 	try {
-		const head = readFileSync(filePath).slice(0, 4);
+		const descriptor = openSync(filePath, 'r'), head = Buffer.alloc(4);
+		try { readSync(descriptor, head, 0, 4, 0); } finally { closeSync(descriptor); }
 		// ELF
 		if (head[0] === 0x7f && head[1] === 0x45 && head[2] === 0x4c && head[3] === 0x46) {
 			return 'native';
@@ -257,9 +260,6 @@ function classifyBinTarget(filePath) {
 	} catch {
 		// Fall through.
 	}
-	if (filePath.endsWith('.exe')) {
-		return 'native';
-	}
 	return 'script';
 }
 
@@ -269,24 +269,12 @@ function classifyBinTarget(filePath) {
  * Unix the underlying bin target may be either a JS launcher (codex) or a
  * native PE (claude 2.x); the wrapper format differs accordingly.
  */
-function rewriteWindowsShim(binDir, name) {
+function rewriteWindowsShim(binDir, name, resolvedTarget) {
 	const cmdPath = resolve(binDir, `${name}.cmd`);
 	const psPath = resolve(binDir, `${name}.ps1`);
 	const shPath = resolve(binDir, name);
-	// Discover the target script/binary path from the original .cmd. npm
-	// emits a line like:
-	//   "%~dp0\node.exe" "%~dp0\..\@scope\pkg\bin\foo.js" %*
-	// or for native bins shipped via optional deps:
-	//   "%~dp0\..\@scope\pkg-win32-x64\bin\foo.exe" %*
-	let script = `..\\@anthropic-ai\\claude-code\\bin\\claude.exe`;
-	if (existsSync(cmdPath)) {
-		const cmdContents = readFileSync(cmdPath, 'utf8');
-		const match = cmdContents.match(/"%~dp0\\([^"\n]+\.(?:[mc]?js|exe))"/i);
-		if (match) {
-			script = match[1];
-		}
-	}
-	const resolvedTarget = resolve(binDir, script);
+	// Read each package manifest, even when npm created Unix shims on a cross-build host.
+	const script = relative(binDir, resolvedTarget).split(sep).join('\\');
 	const flavour = classifyBinTarget(resolvedTarget);
 	let cmdWrapper;
 	if (flavour === 'native') {
@@ -340,17 +328,6 @@ function rewriteWindowsShim(binDir, name) {
 	}
 }
 
-function readSymlinkOrFile(p) {
-	// npm's .bin entries are usually symlinks; on some filesystems (e.g.
-	// Windows without symlink perms, or shared volumes on macOS) they're
-	// hard-linked copies of the JS file directly. Handle both.
-	try {
-		return realpathSync(p);
-	} catch {
-		return p;
-	}
-}
-
 function relativeFromBin(binDir, realPath) {
 	const rel = relative(binDir, realPath);
 	// Always use POSIX-style separators in the sh wrapper.
@@ -363,10 +340,10 @@ function archiveVendor(vendorDir, archivePath) {
 	// Use system `tar` (available on macOS, Linux, and Windows 10+). The
 	// runtime extraction step in seaEntry.ts uses the same tool, so we keep
 	// the build/runtime symmetric.
-	const r = spawnSync('tar', ['-czf', archivePath, '-C', vendorDir, 'node_modules'], { stdio: 'inherit' });
+	const r = spawnSync('tar', ['-czf', archivePath, '-C', vendorDir, 'node_modules'], { stdio: 'inherit', env: { ...process.env, COPYFILE_DISABLE: '1' } });
 	if (r.status !== 0) {
 		console.error('vendor tar failed');
-		process.exit(r.status ?? 1);
+		abortPackaging(r.status ?? 1);
 	}
 	const sizeMb = (statSync(archivePath).size / 1024 / 1024).toFixed(2);
 	log('4/10', `vendor.tgz ${sizeMb} MiB`);
@@ -498,17 +475,17 @@ function writeSeaConfig(target, paths) {
  *
  *   - **producer**: a SEA-capable Node that runs on the *host*. Used to
  *     generate the SEA blob (`node --experimental-sea-config …`). The
- *     blob format only depends on the producer's Node major matching the
- *     target's Node major; arch differences are fine.
+ *     producer and target use the same pinned release; code caches are
+ *     disabled for cross-platform builds.
  *   - **target**: the actual Node binary that becomes `dist-bundle/<bin>`
  *     after blob injection. Must match the target OS/CPU.
  *
  * For host builds these are usually the same binary; for cross builds they
  * are different and both are cached under `~/.cache/sota-sea/`.
  */
-function ensureNodeBinaries(target) {
+async function ensureNodeBinaries(target) {
 	const producerCacheKey = describeHost();
-	const producerNode = ensureNodeForPlatform({
+	const producerNode = await ensureNodeForPlatform({
 		id: producerCacheKey.id,
 		nodeArchiveName: producerCacheKey.nodeArchiveName,
 		nodeDir: producerCacheKey.nodeDir,
@@ -517,7 +494,7 @@ function ensureNodeBinaries(target) {
 	});
 	const targetNode = target.matchesHost
 		? producerNode
-		: ensureNodeForPlatform({ ...target, isProducer: false });
+		: await ensureNodeForPlatform({ ...target, isProducer: false });
 	return { producerNode, targetNode };
 }
 
@@ -563,47 +540,45 @@ function describeHost() {
 		};
 	}
 	console.error(`unsupported host platform: ${process.platform}/${process.arch}`);
-	process.exit(1);
+	abortPackaging(1);
 }
 
-function ensureNodeForPlatform(spec) {
+async function ensureNodeForPlatform(spec) {
 	const cacheRoot = resolve(homedir(), '.cache', 'sota-sea');
 	const targetDir = resolve(cacheRoot, spec.nodeDir);
-	const cachedNode = resolve(targetDir, spec.nodeExeRelative);
-	if (spec.isProducer) {
-		if (hasFuse(process.execPath)) {
-			log('7a/10', `producer: ${process.execPath} (running interpreter, SEA fuse present)`);
-			return process.execPath;
-		}
-		if (existsSync(cachedNode) && hasFuse(cachedNode)) {
-			log('7a/10', `producer: ${cachedNode} (cached, SEA fuse present)`);
-			return cachedNode;
-		}
-	} else if (existsSync(cachedNode)) {
-		log('7a/10', `target Node cached at ${cachedNode}`);
-		return cachedNode;
-	}
-	log('7a/10', `downloading official Node ${NODE_VERSION} (${spec.id})`);
+	const expected = NODE_ARCHIVE_SHA256[spec.nodeArchiveName];
+	if (!expected) { throw new Error(`No pinned checksum for ${spec.nodeArchiveName}`); }
 	mkdirSync(cacheRoot, { recursive: true });
 	const archivePath = resolve(cacheRoot, spec.nodeArchiveName);
-	if (!existsSync(archivePath)) {
-		const url = `https://nodejs.org/dist/${NODE_VERSION}/${spec.nodeArchiveName}`;
-		const dl = spawnSync('curl', ['-fL', '-o', archivePath, url], { stdio: 'inherit' });
-		if (dl.status !== 0) {
-			console.error(`failed to download ${url}`);
-			process.exit(dl.status ?? 1);
-		}
+	let verified = false;
+	if (existsSync(archivePath)) {
+		try { verifyArchive(archivePath, expected); verified = true; }
+		catch { log('7a/10', 'Cached Node archive failed verification; downloading a fresh copy'); }
 	}
-	extractNodeArchive(archivePath, cacheRoot, spec);
-	if (!existsSync(cachedNode)) {
-		console.error(`extracted Node not found at ${cachedNode}`);
-		process.exit(1);
+	if (!verified) {
+		const temporary = mkdtempSync(resolve(cacheRoot, '.node-download-'));
+		try {
+			const download = resolve(temporary, spec.nodeArchiveName);
+			const url = `https://nodejs.org/dist/${NODE_VERSION}/${spec.nodeArchiveName}`;
+			log('7a/10', `downloading official Node ${NODE_VERSION} (${spec.id})`);
+			const result = spawnSync('curl', ['--fail', '--location', '--proto', '=https', '--connect-timeout', '15', '--max-time', '300', '--retry', '2', '--output', download, url], { stdio: 'inherit' });
+			if (result.status !== 0) { throw new Error(`Node download failed (${result.error?.message ?? result.status})`); }
+			verifyArchive(download, expected);
+			renameSync(download, archivePath);
+		} finally { rmSync(temporary, { recursive: true, force: true }); }
 	}
-	if (spec.isProducer && !hasFuse(cachedNode)) {
-		console.error(`downloaded producer Node missing SEA fuse at ${cachedNode}`);
-		process.exit(1);
-	}
-	return cachedNode;
+	// Re-extract verified bytes rather than trusting an old or modified cached executable.
+	await withStagedDirectory(targetDir, async staged => {
+		const temporary = mkdtempSync(resolve(cacheRoot, '.node-unpack-'));
+		try {
+			extractNodeArchive(archivePath, temporary, spec);
+			const unpacked = resolve(temporary, spec.nodeDir);
+			if (!existsSync(resolve(unpacked, spec.nodeExeRelative))) { throw new Error('Verified Node archive is missing its executable'); }
+			for (const entry of readdirSync(unpacked)) { cpSync(resolve(unpacked, entry), resolve(staged, entry), { recursive: true, verbatimSymlinks: true }); }
+			if (!hasFuse(resolve(staged, spec.nodeExeRelative))) { throw new Error('Pinned Node executable does not support SEA'); }
+		} finally { rmSync(temporary, { recursive: true, force: true }); }
+	});
+	return resolve(targetDir, spec.nodeExeRelative);
 }
 
 function extractNodeArchive(archivePath, destDir, target) {
@@ -614,7 +589,7 @@ function extractNodeArchive(archivePath, destDir, target) {
 			: spawnSync('unzip', ['-q', '-o', archivePath, '-d', destDir], { stdio: 'inherit' });
 		if (r.status !== 0) {
 			console.error(`Windows Node archive extraction failed: ${r.error?.message ?? r.status}`);
-			process.exit(r.status ?? 1);
+			abortPackaging(r.status ?? 1);
 		}
 		return;
 	}
@@ -622,14 +597,14 @@ function extractNodeArchive(archivePath, destDir, target) {
 		const r = spawnSync('tar', ['-xJf', archivePath, '-C', destDir], { stdio: 'inherit' });
 		if (r.status !== 0) {
 			console.error('tar -xJ failed (xz not available?)');
-			process.exit(r.status ?? 1);
+			abortPackaging(r.status ?? 1);
 		}
 		return;
 	}
 	const r = spawnSync('tar', ['-xzf', archivePath, '-C', destDir], { stdio: 'inherit' });
 	if (r.status !== 0) {
 		console.error('tar -xz failed');
-		process.exit(r.status ?? 1);
+		abortPackaging(r.status ?? 1);
 	}
 }
 
@@ -650,11 +625,11 @@ function generateBlob(producerNode, seaConfig, blobPath) {
 	});
 	if (r.status !== 0) {
 		console.error('SEA blob generation failed');
-		process.exit(r.status ?? 1);
+		abortPackaging(r.status ?? 1);
 	}
 	if (!existsSync(blobPath)) {
 		console.error(`blob missing at ${blobPath}`);
-		process.exit(1);
+		abortPackaging(1);
 	}
 }
 
@@ -687,7 +662,7 @@ function inject(target, paths) {
 	const r = crossSpawn.sync('npx', postjectArgs, { stdio: 'inherit', cwd: CLI_ROOT });
 	if (r.status !== 0) {
 		console.error(`postject failed: ${r.error?.message ?? r.status}`);
-		process.exit(r.status ?? 1);
+		abortPackaging(r.status ?? 1);
 	}
 }
 
@@ -710,12 +685,12 @@ function reSign(target, paths) {
 	const strip = spawnSync('codesign', ['--remove-signature', paths.binary], { stdio: 'inherit' });
 	if (strip.status !== 0) {
 		console.error('codesign --remove-signature failed');
-		process.exit(strip.status ?? 1);
+		abortPackaging(strip.status ?? 1);
 	}
 	const sign = spawnSync('codesign', ['--sign', '-', paths.binary], { stdio: 'inherit' });
 	if (sign.status !== 0) {
 		console.error('codesign --sign - failed');
-		process.exit(sign.status ?? 1);
+		abortPackaging(sign.status ?? 1);
 	}
 	// After ad-hoc signing, optionally re-sign with a real Developer ID and
 	// notarise. Both steps are gated on env vars and no-op without them, so
@@ -733,14 +708,13 @@ function reSign(target, paths) {
  *
  *   - **macOS** (Mach-O binaries): if `SOTA_MACOS_SIGNING_IDENTITY` is set,
  *     re-sign with that Developer ID; if the three `SOTA_MACOS_NOTARY_KEY_*`
- *     vars are also set, notarise + staple. Either step is a no-op when its
+ *     vars are also set, notarise and verify. Either step is a no-op when its
  *     env vars are absent.
  *   - **Windows** (PE binaries): if `SOTA_WINDOWS_SIGNING_CERT` and a
  *     password (either `SOTA_WINDOWS_SIGNING_PASSWORD` or the contents of
  *     `SOTA_WINDOWS_SIGNING_CERT_PASSWORD_FILE`) are set, invoke `signtool`
  *     to apply an Authenticode signature with an RFC3161 timestamp.
- *     Signing is silently skipped when `signtool` is not on PATH (i.e. on
- *     non-Windows build hosts) so the cross-build does the right thing.
+ *     Configured signing fails closed when the signing tool is unavailable.
  *
  * @param {{ target: object, binaryPath: string }} args
  */
@@ -766,141 +740,105 @@ export function signBinary({ target, binaryPath }) {
  *   - `SOTA_MACOS_NOTARY_KEY_ID`, `SOTA_MACOS_NOTARY_KEY_ISSUER`,
  *     `SOTA_MACOS_NOTARY_KEY_PATH` — App Store Connect API key triple used
  *     by `xcrun notarytool`. All three must be present to trigger
- *     notarisation; we zip the binary, submit, wait, then staple.
+ *     notarisation; we zip the binary, submit, wait, then verify.
  */
-export function signMacOs(binaryPath) {
-	const identity = process.env.SOTA_MACOS_SIGNING_IDENTITY;
-	if (identity) {
-		log('9b/10', `codesign --options runtime --timestamp --sign "${identity}"`);
-		const r = spawnSync(
-			'codesign',
-			['--force', '--options', 'runtime', '--timestamp', '--sign', identity, binaryPath],
-			{ stdio: 'inherit' },
-		);
-		if (r.status !== 0) {
-			console.error('Developer ID codesign failed');
-			process.exit(r.status ?? 1);
-		}
-	} else {
-		log('9b/10', 'skip Developer ID signing (SOTA_MACOS_SIGNING_IDENTITY unset)');
+export function signMacOs(binaryPath, options = {}) {
+	const env = options.env ?? process.env;
+	const execute = options.spawnSync ?? spawnSync;
+	const identity = env.SOTA_MACOS_SIGNING_IDENTITY;
+	const notaryKeys = ['SOTA_MACOS_NOTARY_KEY_ID', 'SOTA_MACOS_NOTARY_KEY_ISSUER', 'SOTA_MACOS_NOTARY_KEY_PATH'];
+	const configured = notaryKeys.filter(key => env[key]);
+	if (configured.length && (configured.length !== notaryKeys.length || !identity)) {
+		throw new Error('Notarization requires a signing identity and all three notary key settings');
 	}
-	const keyId = process.env.SOTA_MACOS_NOTARY_KEY_ID;
-	const keyIssuer = process.env.SOTA_MACOS_NOTARY_KEY_ISSUER;
-	const keyPath = process.env.SOTA_MACOS_NOTARY_KEY_PATH;
-	if (!keyId || !keyIssuer || !keyPath) {
-		log('9b/10', 'skip notarisation (SOTA_MACOS_NOTARY_KEY_{ID,ISSUER,PATH} unset)');
+	if (env.SOTA_REQUIRE_SIGNING === 'true' && (!identity || !configured.length)) {
+		throw new Error('Developer ID signing and notarization are required for this release');
+	}
+	if (!identity) {
+		log('9b/10', 'skip Developer ID signing (SOTA_MACOS_SIGNING_IDENTITY unset)');
 		return;
 	}
-	// notarytool wants the artefact inside a zip (or a .dmg / .pkg). For a
-	// raw binary we zip it, submit, then staple the original.
-	const dir = dirname(binaryPath);
-	const zipPath = resolve(dir, 'sota-notarise.zip');
-	if (existsSync(zipPath)) {
-		rmSync(zipPath, { force: true });
+	const run = (command, args) => {
+		const result = execute(command, args, { encoding: 'utf8', stdio: 'pipe', timeout: 31 * 60_000 });
+		// Never interpolate command arguments: these can contain credential paths.
+		if (result.error || result.status !== 0) { throw new Error(`${command} failed during CLI signing`); }
+		return result.stdout;
+	};
+	const entitlements = resolve(CLI_ROOT, 'scripts/macos-entitlements.plist');
+	run('codesign', ['--force', '--options', 'runtime', '--timestamp', '--entitlements', entitlements,
+		...(env.SOTA_MACOS_SIGNING_KEYCHAIN ? ['--keychain', env.SOTA_MACOS_SIGNING_KEYCHAIN] : []), '--sign', identity, binaryPath]);
+	run('codesign', ['--verify', '--strict', binaryPath]);
+	if (!configured.length) {
+		log('9b/10', 'Developer ID signed; notarization is not configured');
+		return;
 	}
-	log('9b/10', `zip → ${relative(CLI_ROOT, zipPath)} for notarytool submission`);
-	const zip = spawnSync(
-		'zip', ['-j', '-q', zipPath, binaryPath],
-		{ stdio: 'inherit' },
-	);
-	if (zip.status !== 0) {
-		console.error('zip for notarisation failed');
-		process.exit(zip.status ?? 1);
+	const directory = mkdtempSync(join(tmpdir(), 'sota-cli-notary-'));
+	try {
+		const zipPath = join(directory, 'sota.zip');
+		run('ditto', ['-c', '-k', '--keepParent', binaryPath, zipPath]);
+		const response = JSON.parse(run('xcrun', [
+			'notarytool', 'submit', zipPath, '--key', env.SOTA_MACOS_NOTARY_KEY_PATH,
+			'--key-id', env.SOTA_MACOS_NOTARY_KEY_ID, '--issuer', env.SOTA_MACOS_NOTARY_KEY_ISSUER,
+			'--wait', '--timeout', '30m', '--output-format', 'json',
+		]));
+		if (response.status !== 'Accepted') { throw new Error('Apple did not accept CLI notarization'); }
+		// Raw executables cannot carry stapled tickets. Verify their notarized
+		// code requirement; Gatekeeper retrieves the ticket online on first use.
+		run('codesign', ['--verify', '--strict', '-R=notarized', binaryPath]);
+		log('9b/10', 'Developer ID signature and notarization verified');
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
 	}
-	log('9b/10', 'xcrun notarytool submit --wait');
-	const submit = spawnSync(
-		'xcrun',
-		[
-			'notarytool', 'submit', zipPath,
-			'--key', keyPath,
-			'--key-id', keyId,
-			'--issuer', keyIssuer,
-			'--wait',
-		],
-		{ stdio: 'inherit' },
-	);
-	if (submit.status !== 0) {
-		console.error('xcrun notarytool submit failed');
-		rmSync(zipPath, { force: true });
-		process.exit(submit.status ?? 1);
-	}
-	log('9b/10', 'xcrun stapler staple');
-	const staple = spawnSync('xcrun', ['stapler', 'staple', binaryPath], { stdio: 'inherit' });
-	if (staple.status !== 0) {
-		console.error('xcrun stapler staple failed');
-		rmSync(zipPath, { force: true });
-		process.exit(staple.status ?? 1);
-	}
-	rmSync(zipPath, { force: true });
 }
 
 /**
  * Apply an Authenticode signature to a Windows PE binary. No-ops silently
  * when:
  *   - `SOTA_WINDOWS_SIGNING_CERT` is unset (no cert configured); or
- *   - `signtool` is not on PATH (typical on macOS / Linux build hosts — the
- *     release workflow runs this on a Windows runner instead).
+ *   - production signing is not required. Configured signing never silently skips.
  *
  * Required env vars (when signing):
  *   - `SOTA_WINDOWS_SIGNING_CERT` — path to a .pfx (PKCS#12) file.
  *   - `SOTA_WINDOWS_SIGNING_PASSWORD` — password for the .pfx, OR
  *   - `SOTA_WINDOWS_SIGNING_CERT_PASSWORD_FILE` — path to a file whose
  *     contents are the password. The file form is preferred in CI because
- *     it keeps the password out of the process environment / argv.
+ *     it keeps the password out of the environment; signtool still receives it in argv.
  */
-export function signWindows(binaryPath) {
-	const certPath = process.env.SOTA_WINDOWS_SIGNING_CERT;
+export function signWindows(binaryPath, options = {}) {
+	const env = options.env ?? process.env;
+	const execute = options.spawnSync ?? spawnSync;
+	const certPath = env.SOTA_WINDOWS_SIGNING_CERT;
 	if (!certPath) {
+		if (env.SOTA_REQUIRE_SIGNING === 'true' || env.SOTA_WINDOWS_SIGNING_PASSWORD || env.SOTA_WINDOWS_SIGNING_CERT_PASSWORD_FILE) {
+			throw new Error('Windows signing requires a certificate');
+		}
 		log('9b/10', 'skip Authenticode signing (SOTA_WINDOWS_SIGNING_CERT unset)');
 		return;
 	}
-	if (!hasSigntoolOnPath()) {
-		log('9b/10', 'skip Authenticode signing (signtool not on PATH; sign on a Windows runner instead)');
-		return;
+	let password = env.SOTA_WINDOWS_SIGNING_PASSWORD;
+	if (!password && env.SOTA_WINDOWS_SIGNING_CERT_PASSWORD_FILE) {
+		password = readFileSync(env.SOTA_WINDOWS_SIGNING_CERT_PASSWORD_FILE, 'utf8').replace(/\r?\n$/, '');
 	}
-	let password = process.env.SOTA_WINDOWS_SIGNING_PASSWORD;
-	const pwdFile = process.env.SOTA_WINDOWS_SIGNING_CERT_PASSWORD_FILE;
-	if (!password && pwdFile) {
-		try {
-			password = readFileSync(pwdFile, 'utf8').replace(/\r?\n$/, '');
-		} catch (err) {
-			console.error(`failed to read SOTA_WINDOWS_SIGNING_CERT_PASSWORD_FILE (${pwdFile}): ${String(err)}`);
-			process.exit(1);
+	if (!password) { throw new Error('Windows signing requires a certificate password'); }
+	let signtool = env.SOTA_WINDOWS_SIGNTOOL;
+	if (!signtool && execute('where', ['signtool'], { stdio: 'pipe' }).status === 0) { signtool = 'signtool'; }
+	if (!signtool && env['ProgramFiles(x86)']) {
+		const kits = join(env['ProgramFiles(x86)'], 'Windows Kits/10/bin');
+		if (existsSync(kits)) {
+			for (const version of readdirSync(kits).filter(name => /^10\./.test(name)).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))) {
+				const candidate = join(kits, version, 'x64/signtool.exe');
+				if (existsSync(candidate)) { signtool = candidate; break; }
+			}
 		}
 	}
-	if (!password) {
-		console.error('SOTA_WINDOWS_SIGNING_CERT set but no password (set SOTA_WINDOWS_SIGNING_PASSWORD or SOTA_WINDOWS_SIGNING_CERT_PASSWORD_FILE)');
-		process.exit(1);
-	}
-	log('9b/10', `signtool sign /f ${relative(CLI_ROOT, certPath)} /tr digicert /td sha256 /fd sha256`);
-	const r = spawnSync(
-		'signtool',
-		[
-			'sign',
-			'/f', certPath,
-			'/p', password,
-			'/tr', 'http://timestamp.digicert.com',
-			'/td', 'sha256',
-			'/fd', 'sha256',
-			binaryPath,
-		],
-		{ stdio: 'inherit' },
-	);
-	if (r.status !== 0) {
-		console.error('signtool sign failed');
-		process.exit(r.status ?? 1);
-	}
-}
-
-function hasSigntoolOnPath() {
-	// `signtool.exe` lives in the Windows SDK. On a Windows runner the
-	// `setup-msbuild` / WindowsSDK action puts it on PATH; on dev macOS /
-	// Linux boxes it isn't there at all. We probe with `where` on Windows
-	// and `command -v` otherwise.
-	const probe = process.platform === 'win32'
-		? spawnSync('where', ['signtool'], { stdio: 'pipe' })
-		: spawnSync('command', ['-v', 'signtool'], { stdio: 'pipe', shell: true });
-	return probe.status === 0;
+	if (!signtool) { throw new Error('Windows signing is configured but signtool is unavailable'); }
+	const run = args => {
+		const result = execute(signtool, args, { stdio: 'pipe', timeout: 120000 });
+		if (result.error || result.status !== 0) { throw new Error('Windows code signing or verification failed'); }
+	};
+	run(['sign', '/f', certPath, '/p', password, '/tr', 'http://timestamp.digicert.com', '/td', 'sha256', '/fd', 'sha256', binaryPath]);
+	run(['verify', '/pa', binaryPath]);
+	log('9b/10', 'Authenticode signature verified');
 }
 
 // --- Step 10 --------------------------------------------------------------
@@ -916,44 +854,48 @@ async function smoke(target, paths) {
 	process.stdout.write(out);
 	if (r.status !== 0) {
 		console.error('smoke test failed');
-		process.exit(r.status ?? 1);
+		abortPackaging(r.status ?? 1);
 	}
 	await packageSmoke(paths.binary);
-	log('done', `${relative(CLI_ROOT, paths.binary)} (${sizeMb} MiB)`);
+	log('10/10', 'Candidate smoke checks passed');
 }
 
 // --- Driver --------------------------------------------------------------
-export async function runPipeline(target) {
+export async function runPipeline(target, { outputDir = process.env.SOTA_CLI_PACKAGE_OUTPUT || OUT_DIR } = {}) {
 	if (!existsSync(PROMPTS_DIR)) {
 		console.error(`prompts dir missing: ${PROMPTS_DIR}\nRun 'npm run build' in son-of-anton-core first.`);
-		process.exit(1);
+		abortPackaging(1);
 	}
-	ensureCleanOutDir();
-	const paths = {
-		bundle: resolve(OUT_DIR, 'cli.cjs'),
-		seaConfig: resolve(CLI_ROOT, 'sea-config.json'),
-		blob: resolve(OUT_DIR, target.blobName),
-		binary: resolve(OUT_DIR, target.binaryName),
-		vendorDir: resolve(OUT_DIR, 'vendor'),
-		vendorArchive: resolve(OUT_DIR, 'vendor.tgz'),
-		licenses: resolve(OUT_DIR, 'THIRD_PARTY_LICENSES.txt'),
-		sourceNode: '',
-	};
-	await bundleEntry(paths.bundle);
-	installVendor(paths.vendorDir, target);
-	rewriteBinShims(paths.vendorDir, target);
-	archiveVendor(paths.vendorDir, paths.vendorArchive);
-	collectLicenses(paths.vendorDir, paths.licenses);
-	writeSeaConfig(target, paths);
-	const { producerNode, targetNode } = ensureNodeBinaries(target);
-	paths.sourceNode = targetNode;
-	generateBlob(producerNode, paths.seaConfig, paths.blob);
-	copyNodeBinary(target, paths);
-	inject(target, paths);
-	reSign(target, paths);
-	// Clean the unpacked vendor directory now that it's archived — keeps
-	// dist-bundle/ smaller and avoids developers shipping the loose tree
-	// alongside the binary by accident.
-	rmSync(paths.vendorDir, { recursive: true, force: true });
-	await smoke(target, paths);
+	await withStagedDirectory(outputDir, async staged => {
+		const paths = {
+			bundle: resolve(staged, 'cli.cjs'),
+			seaConfig: resolve(staged, 'sea-config.json'),
+			blob: resolve(staged, target.blobName),
+			binary: resolve(staged, target.binaryName),
+			vendorDir: resolve(staged, 'vendor'),
+			vendorArchive: resolve(staged, 'vendor.tgz'),
+			licenses: resolve(staged, 'THIRD_PARTY_LICENSES.txt'),
+			sourceNode: '',
+		};
+		await bundleEntry(paths.bundle);
+		installVendor(paths.vendorDir, target);
+		rewriteBinShims(paths.vendorDir, target);
+		archiveVendor(paths.vendorDir, paths.vendorArchive);
+		collectLicenses(paths.vendorDir, paths.licenses);
+		writeSeaConfig(target, paths);
+		const { producerNode, targetNode } = await ensureNodeBinaries(target);
+		paths.sourceNode = targetNode;
+		generateBlob(producerNode, paths.seaConfig, paths.blob);
+		// This configuration contains staging paths and is not a reusable release artifact.
+		rmSync(paths.seaConfig);
+		copyNodeBinary(target, paths);
+		inject(target, paths);
+		reSign(target, paths);
+		// Clean the unpacked vendor directory now that it's archived — keeps
+		// dist-bundle/ smaller and avoids developers shipping the loose tree
+		// alongside the binary by accident.
+		rmSync(paths.vendorDir, { recursive: true, force: true });
+		await smoke(target, paths);
+	});
+	log('done', `CLI artifacts: ${outputDir}`);
 }

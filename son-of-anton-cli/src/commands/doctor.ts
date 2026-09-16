@@ -32,8 +32,9 @@ export async function collectDiagnostics(host: CoreHost, runtimeOverride?: strin
 	const runtime = candidates.find(candidate => existsSync(path.join(candidate, 'manifest.json')));
 	try {
 		if (!runtime) { throw new Error('Runtime is not installed.'); }
-		const manifest = JSON.parse(readFileSync(path.join(runtime, 'manifest.json'), 'utf8')) as { platform: string; arch: string; nodeMajor: number };
+		const manifest = JSON.parse(readFileSync(path.join(runtime, 'manifest.json'), 'utf8')) as { platform: string; arch: string; nodeMajor: number; worker?: string };
 		if (manifest.platform !== process.platform || manifest.arch !== process.arch || manifest.nodeMajor !== 22 || !existsSync(path.join(runtime, 'index.cjs')) || !existsSync(path.join(runtime, 'node_modules/@son-of-anton/codegraph-napi/engine.node'))) { throw new Error('Runtime assets are missing or target another platform.'); }
+		if (manifest.worker !== undefined && (manifest.worker !== 'engine-worker.cjs' || !existsSync(path.join(runtime, manifest.worker)))) { throw new Error('Native worker entry is missing.'); }
 		diagnostics.push({ name: 'Code graph', status: 'ok', detail: 'Native runtime installed for this platform. Live index readiness is reported by codegraph_status in the editor.' });
 	} catch {
 		diagnostics.push({ name: 'Code graph', status: 'repair', detail: 'No compatible installed runtime found.', action: 'In a development checkout run npm run bootstrap:sota. For an installed editor, reinstall the matching platform artifact. Set SOTA_CODEGRAPH_RUNTIME for a separate runtime.' });

@@ -74,9 +74,13 @@ fn bind_embedder(eng: &Engine, fingerprint: &str) -> Result<()> {
 }
 
 #[napi]
-pub fn configure_local_embedder() -> Result<()> {
+pub async fn configure_local_embedder(cache_dir: Option<String>) -> Result<()> {
     let eng = engine()?;
-    let emb = LocalEmbedder::new().map_err(map_err)?;
+    // Model downloads and ONNX session construction must not block MCP requests.
+    let emb = tokio::task::spawn_blocking(move || LocalEmbedder::new(cache_dir.map(PathBuf::from)))
+        .await
+        .map_err(map_err)?
+        .map_err(map_err)?;
     bind_embedder(eng, "local:BGE-small-en-v1.5:384")?;
     *eng.embedder.lock() = Some(Arc::new(emb));
     Ok(())

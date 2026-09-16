@@ -23,9 +23,8 @@ export declare function isAuthorized(headers: Pick<IncomingHttpHeaders, 'authori
  * request; when it returns false a 401 response has already been written and the
  * handler must stop.
  *
- * When no token is configured this is a pass-through — the startup check in
- * `requireServiceToken` guarantees a token is present in production, so this
- * only affects tests and library-style imports.
+ * Missing configuration denies protected requests even when a caller omits
+ * the startup check or clears its environment after startup.
  */
 export declare function enforceHttpAuth(req: IncomingMessage, res: ServerResponse, token?: string): boolean;
 /** Minimal structural view of an Express request used by the auth middleware. */
@@ -47,9 +46,8 @@ export type AuthMiddleware = (req: AuthRequestLike, res: AuthResponseLike, next:
  * Create an Express middleware that enforces bearer-token auth on every request,
  * exempting `/health` and `/metrics`.
  *
- * When no token is configured the middleware is a pass-through (see
- * {@link enforceHttpAuth}); the startup check in {@link requireServiceToken}
- * guarantees a token is present in production.
+ * Missing configuration denies protected requests independently of the
+ * startup check in {@link requireServiceToken}.
  */
 export declare function createAuthMiddleware(token?: string): AuthMiddleware;
 /**

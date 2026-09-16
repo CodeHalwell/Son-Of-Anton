@@ -43,6 +43,12 @@ exports.run = async () => {
 	console.log('[installation-test] Activating Son of Anton');
 	await extension.activate(); assert.equal(extension.isActive, true);
 	console.log('[installation-test] Activated Son of Anton');
+	const debuggerExtension = vscode.extensions.getExtension('ms-vscode.js-debug');
+	assert.ok(debuggerExtension, 'Bundled JavaScript debugger is unavailable');
+	assert.ok(debuggerExtension.packageJSON.contributes.debuggers.some(item => item.type === 'pwa-node'), 'Node.js debug adapter is missing');
+	await debuggerExtension.activate();
+	assert.equal(debuggerExtension.isActive, true);
+	const debuggerInfo = { version: debuggerExtension.packageJSON.version, active: debuggerExtension.isActive, extensionPath: debuggerExtension.extensionPath };
 	const commands = await vscode.commands.getCommands(true);
 	const required = ['sota.openChat', 'sota.openTaskBoard', 'sota.openSetupWizard', 'sota.reviewWithCouncil', 'sota.diagnoseAcpAgents'];
 	for (const command of required) { assert.ok(commands.includes(command), `Missing command ${command}`); }
@@ -53,5 +59,5 @@ exports.run = async () => {
 	assert.ok(Object.keys(native).length, 'Native graph exports are missing');
 	const graph = await verifyGraph(extension);
 	console.log('[installation-test] Packaged graph query passed');
-	await fs.writeFile(process.env.SOTA_INSTALL_RESULT, JSON.stringify({ success: true, extensionPath: extension.extensionPath, commands: required, graph, graphExports: Object.keys(native), activationMs: Date.now() - started, memory: process.memoryUsage(), trusted: vscode.workspace.isTrusted }, null, 2));
+	await fs.writeFile(process.env.SOTA_INSTALL_RESULT, JSON.stringify({ success: true, extensionPath: extension.extensionPath, debugger: debuggerInfo, commands: required, graph, graphExports: Object.keys(native), activationMs: Date.now() - started, memory: process.memoryUsage(), trusted: vscode.workspace.isTrusted }, null, 2));
 };

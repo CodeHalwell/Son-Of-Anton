@@ -1,8 +1,8 @@
 /* Copyright (c) Microsoft Corporation. Licensed under the MIT License. */
 import { watch, type FSWatcher } from 'node:fs';
 import { mkdir, realpath, stat } from 'node:fs/promises';
-import { createRequire } from 'node:module';
 import * as path from 'node:path';
+import { createWorkerEngine } from './worker-engine.js';
 
 export interface SearchHit {
   symbol: string;
@@ -48,28 +48,29 @@ export interface IndexStats {
 
 /** The subset of the Rust napi surface this server uses. */
 export interface CodegraphEngine {
-  init(dbPath: string): void;
-  configureLocalEmbedder?(): void;
+  init(dbPath: string): void | Promise<void>;
+  configureLocalEmbedder?(cacheDir: string): Promise<void>;
   configureProviderEmbedder?(
     endpoint: string,
     model: string,
     dims: number,
     apiKey?: string,
-  ): void;
+  ): void | Promise<void>;
   indexWorkspace(root: string): Promise<IndexStats>;
   reindexFile(path: string): Promise<boolean>;
   embedAll(batchSize: number): Promise<number>;
-  buildVectorIndex(): number;
+  buildVectorIndex(): number | Promise<number>;
   semanticSearch(
     query: string,
     limit: number,
     scope?: string[],
   ): Promise<SearchHit[]>;
-  fileSummary(path: string): FileSummary;
-  symbolLookup(query: string, limit: number): SymbolMatch[];
-  dependencyTraversal(startFile: string, maxDepth: number): string[];
-  impactAnalysis(targetFile: string, maxDepth: number): string[];
-  findReferences(symbolName: string): Reference[];
+  fileSummary(path: string): FileSummary | Promise<FileSummary>;
+  symbolLookup(query: string, limit: number): SymbolMatch[] | Promise<SymbolMatch[]>;
+  dependencyTraversal(startFile: string, maxDepth: number): string[] | Promise<string[]>;
+  impactAnalysis(targetFile: string, maxDepth: number): string[] | Promise<string[]>;
+  findReferences(symbolName: string): Reference[] | Promise<Reference[]>;
+  dispose?(): void;
 }
 
 export interface EngineConfig {
@@ -110,10 +111,12 @@ export class EngineSession {
 	private disposed = false;
 	private embedderConfigured = false;
 	private readonly databaseFiles = new Set<string>();
+	private modelCache?: string;
 
 	constructor(private readonly config: EngineConfig, private readonly changed: (status: EngineStatus) => void = () => {}) { }
 
 	private publish(status: EngineStatus): void {
+		if (this.disposed) { return; }
 		this.status = status;
 		this.changed(status);
 	}
@@ -125,23 +128,31 @@ export class EngineSession {
 			const databasePath = path.resolve(this.config.dbPath);
 			await mkdir(path.dirname(databasePath), { recursive: true });
 			this.config.dbPath = path.join(await realpath(path.dirname(databasePath)), path.basename(databasePath));
+			this.modelCache = this.config.dbPath + '.models';
 			for (const suffix of ['', '-wal', '-shm', '-journal']) { this.databaseFiles.add(this.config.dbPath + suffix); }
 			if (this.disposed) { return; }
-			const require = createRequire(typeof __filename === 'string' ? __filename : import.meta.url);
-			this.engine = injected ?? require(process.env.CODEGRAPH_NAPI_PATH || '@son-of-anton/codegraph-napi') as CodegraphEngine;
-			this.engine.init(this.config.dbPath);
+			this.engine = injected ?? createWorkerEngine(error => {
+				const action = this.status.structural ? 'Native code graph stopped' : 'Code graph could not start';
+				this.publish({ state: 'failed', structural: false, semantic: 'error', reason: `${action}: ${this.message(error)}. Restart code graph.` });
+				this.dispose();
+			});
+			await this.engine.init(this.config.dbPath);
+			if (this.disposed) { return; }
 			this.watcher = watch(this.config.indexRoot, { recursive: true }, (_event, filename) => {
 				if (!filename) { this.scheduleRefresh(); return; }
 				const name = filename.toString().replace(/\\/g, '/');
 				if (/(^|\/)(node_modules|target|dist|out)(\/|$)/.test(name)) { return; }
 				if (name.startsWith('.git/') && !/^\.git\/(HEAD|index|refs\/)/.test(name)) { return; }
 				if (this.databaseFiles.has(path.resolve(this.config.indexRoot!, name))) { return; }
+				const absolute = path.resolve(this.config.indexRoot!, name);
+				if (absolute === this.modelCache || absolute.startsWith(this.modelCache! + path.sep)) { return; }
 				this.scheduleRefresh(name.startsWith('.git/') ? undefined : name);
 			});
 			this.watcher.on('error', error => this.publish({ ...this.status, state: 'degraded', reason: `File watcher failed: ${error.message}. Restart code graph.` }));
 			await this.refresh();
 		} catch (error) {
 			this.publish({ state: 'failed', structural: false, semantic: 'disabled', reason: `Code graph could not start: ${this.message(error)}. Run sota doctor to check bundled assets.` });
+			this.dispose();
 		}
 	}
 
@@ -194,17 +205,18 @@ export class EngineSession {
 			try {
 				if (!this.embedderConfigured && embedder.kind === 'local') {
 					if (!engine.configureLocalEmbedder) { throw new Error('Local embedder is not included in this native build'); }
-					engine.configureLocalEmbedder();
+					await engine.configureLocalEmbedder(this.modelCache!);
 				} else if (!this.embedderConfigured && embedder.kind === 'provider') {
 					if (!engine.configureProviderEmbedder) { throw new Error('Provider embedder is not included in this native build'); }
-					engine.configureProviderEmbedder(embedder.endpoint, embedder.model, embedder.dims, embedder.apiKey);
+					await engine.configureProviderEmbedder(embedder.endpoint, embedder.model, embedder.dims, embedder.apiKey);
 				}
 				this.embedderConfigured = true;
 				await engine.embedAll(64);
-				const count = engine.buildVectorIndex();
+				const count = await engine.buildVectorIndex();
 				this.publish({ ...structural, semantic: count ? 'ready' : 'empty' });
 			} catch (error) {
-				this.publish({ ...structural, state: 'degraded', semantic: 'error', reason: `Embedding failed: ${this.message(error)}. Check the embedding endpoint, model and credentials.` });
+				const recovery = embedder.kind === 'local' ? 'Check network access and model-cache write permissions, then restart code graph.' : 'Check the embedding endpoint, model and credentials.';
+				this.publish({ ...structural, state: 'degraded', semantic: 'error', reason: `Embedding failed: ${this.message(error)}. ${recovery}` });
 			}
 		} catch (error) {
 			this.publish({ state: 'failed', structural: false, semantic: 'error', reason: `Indexing failed: ${this.message(error)}` });
@@ -214,6 +226,9 @@ export class EngineSession {
 	dispose(): void {
 		this.disposed = true;
 		this.watcher?.close();
+		const engine = this.engine;
+		this.engine = undefined;
+		engine?.dispose?.();
 		if (this.timer) { clearTimeout(this.timer); }
 	}
 }

@@ -238,6 +238,7 @@ jobs:
           npm --prefix services/model-router ci
           npm --prefix services/mcp-gateway ci
           npm --prefix services/checkpoints ci
+          npm --prefix son-of-anton-mcp/servers/database ci
           npm --prefix services/acp-client ci
 
       - name: Bootstrap native product runtime
@@ -258,8 +259,11 @@ jobs:
           npm --prefix son-of-anton-cli test
           npm --prefix services/model-router test
           npm --prefix services/checkpoints test
+          npm --prefix son-of-anton-mcp/servers/database run build
+          npm --prefix son-of-anton-mcp/servers/database test
           npm --prefix services/acp-client test
           node --test services/_shared/auth/dist/test/*.js
+          node --test scripts/test/configure-services.test.mjs scripts/test/cypher-parameters.test.mjs
         env:
           SOTA_TASK_EVAL_OUTPUT: ${{ runner.temp }}/workflow-baseline.json
 
@@ -369,6 +373,24 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Build database image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./son-of-anton-mcp/servers/database
+          push: false
+          tags: soa-database:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build visual-regression image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./services/visual-regression
+          push: false
+          tags: soa-visual-regression:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   docker-integration:
     name: Docker Compose Integration
     needs: docker-services
@@ -377,11 +399,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Create .env from example
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Create private service configuration
         run: |
-          cp .env.example .env
-          sed -i "s|^PROJECT_PATH=.*|PROJECT_PATH=$GITHUB_WORKSPACE|" .env
-          echo "BACKGROUND_TASK_API_TOKEN=ci-smoke-token" >> .env
+          node scripts/configure-services.mjs
+          mkdir -p "$RUNNER_TEMP/sota-fixture"
+          printf '%s\n' 'export function cartTotal(items) { return items.reduce((total, item) => total + item.price * item.quantity, 0); }' > "$RUNNER_TEMP/sota-fixture/cart.js"
+          sed -i "s|^PROJECT_PATH=.*|PROJECT_PATH=$RUNNER_TEMP/sota-fixture|" .env
+
+      - name: Verify PostgreSQL authentication and reader permissions
+        run: |
+          docker pull postgres:16
+          SOTA_TEST_DOCKER=1 node --test scripts/test/postgres-roles.test.mjs
 
       - name: Start services
         run: docker compose --profile services up -d --wait --wait-timeout 120
@@ -397,6 +430,19 @@ jobs:
           fi
           echo "All services healthy"
 
+      - name: Test authenticated service and MCP workflows
+        run: |
+          npm --prefix services/mcp-gateway ci
+          umask 077
+          docker compose --profile services config --format json > "$RUNNER_TEMP/sota-compose.json"
+          SOTA_TEST_COMPOSE_FILE="$RUNNER_TEMP/sota-compose.json" node --test scripts/test/service-stack.test.cjs
+
+      - name: Verify gateway datastore outage recovery
+        run: |
+          npm --prefix services/mcp-gateway run build
+          npm --prefix services/mcp-gateway test
+          SOTA_TEST_DOCKER=1 node --test scripts/test/gateway-recovery.test.mjs
+
       - name: Test FalkorDB connectivity
         run: |
           docker compose exec -T falkordb redis-cli GRAPH.QUERY son-of-anton "RETURN 1"
@@ -411,7 +457,7 @@ jobs:
 
       - name: Collect logs on failure
         if: failure()
-        run: docker compose logs
+        run: docker compose --profile services logs
 
       - name: Tear down
         if: always()

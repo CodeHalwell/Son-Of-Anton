@@ -104,16 +104,15 @@ function isAuthorized(headers, expectedToken) {
  * request; when it returns false a 401 response has already been written and the
  * handler must stop.
  *
- * When no token is configured this is a pass-through — the startup check in
- * `requireServiceToken` guarantees a token is present in production, so this
- * only affects tests and library-style imports.
+ * Missing configuration denies protected requests even when a caller omits
+ * the startup check or clears its environment after startup.
  */
 function enforceHttpAuth(req, res, token) {
     if (isExemptPath(req.url)) {
         return true;
     }
     const expected = resolveToken(token);
-    if (!expected || isAuthorized(req.headers, expected)) {
+    if (expected && isAuthorized(req.headers, expected)) {
         return true;
     }
     res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -124,9 +123,8 @@ function enforceHttpAuth(req, res, token) {
  * Create an Express middleware that enforces bearer-token auth on every request,
  * exempting `/health` and `/metrics`.
  *
- * When no token is configured the middleware is a pass-through (see
- * {@link enforceHttpAuth}); the startup check in {@link requireServiceToken}
- * guarantees a token is present in production.
+ * Missing configuration denies protected requests independently of the
+ * startup check in {@link requireServiceToken}.
  */
 function createAuthMiddleware(token) {
     return function authMiddleware(req, res, next) {
@@ -136,7 +134,7 @@ function createAuthMiddleware(token) {
             return;
         }
         const expected = resolveToken(token);
-        if (!expected || isAuthorized(req.headers, expected)) {
+        if (expected && isAuthorized(req.headers, expected)) {
             next();
             return;
         }

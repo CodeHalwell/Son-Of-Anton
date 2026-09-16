@@ -3,7 +3,7 @@
 
 import assert from 'node:assert/strict';
 import { afterEach, describe, test } from 'node:test';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import {
 	SERVICE_TOKEN_ENV,
 	createAuthMiddleware,
@@ -71,15 +71,15 @@ describe('isAuthorized', () => {
 });
 
 describe('enforceHttpAuth', () => {
-	test('exempt paths, valid tokens, and unconfigured tokens pass; mismatches get 401', () => {
+	test('exempt paths and valid tokens pass; missing configuration and mismatches get 401', () => {
 		// Exempt path — no token required.
 		assert.strictEqual(enforceHttpAuth(fakeRequest('/health'), fakeResponse().res, TOKEN), true);
 
 		// Valid token.
 		assert.strictEqual(enforceHttpAuth(fakeRequest('/tasks', `Bearer ${TOKEN}`), fakeResponse().res, TOKEN), true);
 
-		// Pass-through when no token is configured.
-		assert.strictEqual(enforceHttpAuth(fakeRequest('/tasks'), fakeResponse().res, ''), true);
+		// Missing server configuration must never disable authentication.
+		assert.strictEqual(enforceHttpAuth(fakeRequest('/tasks'), fakeResponse().res, ''), false);
 
 		// Missing/invalid token → 401 written.
 		const captured = fakeResponse();
@@ -106,10 +106,10 @@ describe('createAuthMiddleware', () => {
 		return { nexted, status };
 	}
 
-	test('passes exempt paths, valid tokens, and unconfigured tokens; blocks mismatches', () => {
+	test('passes exempt paths and valid tokens; blocks missing configuration and mismatches', () => {
 		assert.deepStrictEqual(run('/health', undefined, TOKEN), { nexted: true, status: undefined });
 		assert.deepStrictEqual(run('/tasks', `Bearer ${TOKEN}`, TOKEN), { nexted: true, status: undefined });
-		assert.deepStrictEqual(run('/tasks', undefined, ''), { nexted: true, status: undefined });
+		assert.deepStrictEqual(run('/tasks', undefined, ''), { nexted: false, status: 401 });
 		assert.deepStrictEqual(run('/tasks', 'Bearer nope', TOKEN), { nexted: false, status: 401 });
 	});
 });
@@ -128,4 +128,23 @@ describe('requireServiceToken', () => {
 		process.env[SERVICE_TOKEN_ENV] = TOKEN;
 		assert.strictEqual(requireServiceToken('test-service'), TOKEN);
 	});
+});
+
+
+test('a live HTTP server never serves protected data without configured authentication', async t => {
+	const server = createServer((request, response) => {
+		if (!enforceHttpAuth(request, response, '')) { return; }
+		response.end('protected data');
+	});
+	await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+	t.after(() => new Promise<void>((resolve, reject) => { server.closeAllConnections(); server.close(error => error ? reject(error) : resolve()); }));
+	const address = server.address();
+	assert.ok(address && typeof address !== 'string');
+	for (const authorization of [undefined, 'Bearer attacker-supplied']) {
+		const headers: Record<string, string> = authorization ? { Authorization: authorization } : {};
+		const response: Response = await fetch(`http://127.0.0.1:${address.port}/tasks`, { headers });
+		assert.equal(response.status, 401);
+		assert.ok(!(await response.text()).includes('protected data'));
+	}
+	assert.equal((await fetch(`http://127.0.0.1:${address.port}/health`)).status, 200);
 });

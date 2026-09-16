@@ -69,7 +69,7 @@ export async function readWorkspaceFile(root: string, input: string): Promise<st
 }
 
 /** Replace files atomically, avoiding truncation through symlinks or hard links. */
-export async function writeWorkspaceFile(root: string, input: string, content: string): Promise<void> {
+export async function writeWorkspaceFile(root: string, input: string, content: string | Uint8Array): Promise<void> {
 	const target = await workspacePath(root, input);
 	const parent = path.dirname(target);
 	await fs.mkdir(parent, { recursive: true });

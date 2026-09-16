@@ -5,7 +5,6 @@
 
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
 
@@ -20,17 +19,9 @@ import * as readline from 'node:readline';
  * process's environment so the CLI is forced to use its own subscription
  * tokens rather than falling through to a metered API key.
  *
- * TODO: verify against Codex CLI v1.x — current best-guess shape. The CLI is
- * still under active development and the exact `--output-format` /
- * `--system-prompt` / stdin-message contract may change. The structural
- * wiring here matches `claudeCodeRunner.ts` so keeping the two adapters in
- * lock-step is straightforward when the wire format stabilises.
  */
 
 const STREAM_JSON_TIMEOUT_MS = 10 * 60 * 1000;
-// stream-json events can be large (full assistant turns) — give the buffer
-// plenty of headroom.
-const BUFFER_SIZE = 64 * 1024 * 1024;
 
 export interface CodexMessage {
 	role: 'user' | 'assistant';
@@ -95,132 +86,97 @@ export function resetCodexAvailability(): void {
 
 /**
  * Stream Codex CLI output as a sequence of structured chunks. Yields `text`
- * events for assistant prose (live token-by-token) and `usage` / `error` /
+ * events for completed assistant messages and `usage` / `error` /
  * `done` events for the lifecycle.
  *
- * Throws if Codex CLI isn't installed — callers should check
+ * Reports an error if Codex CLI is not installed — callers may check
  * {@link isCodexAvailable} first and route around to the API-key path.
  */
 export async function* runCodex(options: CodexRunOptions): AsyncGenerator<CodexChunk> {
-	if (!isCodexAvailable()) {
+	if (options.signal?.aborted) { return; }
+	if (!options.codexPath?.trim() && !isCodexAvailable()) {
 		yield { type: 'error', message: 'OpenAI Codex CLI is not installed or not on PATH. Install it from https://github.com/openai/codex or add an OpenAI API key in settings.' };
 		return;
 	}
 
-	const codexPath = options.codexPath?.trim() || 'codex';
-	const cwd = options.cwd || process.cwd();
-
-	// stream-json -p mode: read prompt + messages from stdin, emit JSON events
-	// on stdout. Mirrors the Claude Code CLI shape; the Codex CLI accepts the
-	// same flags as of Jan 2026.
-	// TODO: verify against Codex CLI v1.x — current best-guess shape.
+	// This is a text transport. Keep subscription auth, but exclude inherited
+	// integrations and disable shell execution; workspace mutations use ACP.
 	const args = [
-		'--system-prompt', options.systemPrompt,
-		'--output-format', 'stream-json',
-		'--max-turns', '1',
-		'--model', options.modelId,
-		'-p',
+		'exec', '--json', '--ephemeral', '--ignore-user-config',
+		'--sandbox', 'read-only', '--skip-git-repo-check',
+		'-c', 'features.shell_tool=false', '-c', 'web_search="disabled"',
+		'-c', `developer_instructions=${JSON.stringify(options.systemPrompt)}`,
+		...(options.modelId ? ['--model', options.modelId] : []), '-',
 	];
-
-	// Strip OPENAI_API_KEY so Codex CLI falls back to its own subscription auth
-	// (the whole point of routing through the CLI). Keep everything else.
+	const prompt = 'Continue this conversation. Respond to the last user message. Do not use tools.\n'
+		+ JSON.stringify(options.messages);
 	const env: NodeJS.ProcessEnv = { ...process.env };
 	delete env.OPENAI_API_KEY;
-
-	const proc = spawn(codexPath, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
-
-	// Forward cancellation into the child. Without this the caller aborting
-	// only destroyed our stdout reader, leaving the `codex` subprocess alive
-	// (and billing) until the STREAM_JSON_TIMEOUT_MS fallback. Kill on abort,
-	// and handle an already-aborted signal by killing right after spawn.
+	const proc = spawn(options.codexPath?.trim() || 'codex', args, { cwd: options.cwd || process.cwd(), env, stdio: ['pipe', 'pipe', 'pipe'] });
+	let spawnError: Error | undefined;
+	let killTimer: NodeJS.Timeout | undefined;
+	// Register immediately: a short-lived or missing executable can close
+	// before the stdout iterator finishes (including signal exits).
+	const closed = new Promise<number | null>(resolve => {
+		proc.once('error', error => { spawnError = error; });
+		proc.once('close', code => { if (killTimer) { clearTimeout(killTimer); } resolve(code); });
+	});
+	let stderr = '';
+	proc.stderr.on('data', (data: Buffer) => { stderr = (stderr + data.toString()).slice(-16384); });
+	proc.stdin.on('error', () => { /* Early exit may close stdin before the prompt is written. */ });
+	const stop = () => {
+		if (proc.exitCode !== null || proc.signalCode !== null || killTimer) { return; }
+		proc.kill('SIGTERM');
+		killTimer = setTimeout(() => { proc.kill('SIGKILL'); }, 1000);
+		killTimer.unref();
+	};
 	const signal = options.signal;
-	const onAbort = () => { try { proc.kill('SIGTERM'); } catch { /* already exited */ } };
-	if (signal) {
-		if (signal.aborted) {
-			onAbort();
-		} else {
-			signal.addEventListener('abort', onAbort, { once: true });
-		}
-	}
-
-	// Send the message history as a JSON array on stdin. If the signal was
-	// already aborted above we killed the child, so its stdin is closed and a
-	// write would emit an 'error' (EPIPE); with no listener that crashes the
-	// process. Swallow stdin errors and skip the write when the pipe is gone.
-	proc.stdin.on('error', () => { /* stdin closed (child already exited/killed) */ });
-	if (!proc.killed && proc.stdin.writable) {
-		proc.stdin.write(JSON.stringify(options.messages));
-		proc.stdin.end();
-	}
-
-	let stderrBuf = '';
-	proc.stderr.on('data', (data: Buffer) => { stderrBuf += data.toString(); });
-
-	const timeout = setTimeout(() => {
-		try { proc.kill('SIGTERM'); } catch { /* already exited */ }
-	}, STREAM_JSON_TIMEOUT_MS);
-
+	signal?.addEventListener('abort', stop, { once: true });
+	let timedOut = false;
+	const timeout = setTimeout(() => { timedOut = true; stop(); }, STREAM_JSON_TIMEOUT_MS);
 	const rl = readline.createInterface({ input: proc.stdout });
-
+	let completed = false;
+	let failed = false;
+	proc.stdin.end(prompt);
 	try {
 		for await (const line of rl) {
-			const trimmed = line.trim();
-			if (!trimmed) continue;
-			let parsed: { type?: string; subtype?: string; message?: { content?: unknown }; usage?: Record<string, number>; total_cost_usd?: number };
-			try {
-				parsed = JSON.parse(trimmed);
-			} catch {
-				// Skip malformed lines — the CLI occasionally interleaves a
-				// non-JSON status banner. Real protocol breakage will surface
-				// as `error` from the close handler below.
-				continue;
+			if (signal?.aborted || timedOut) { break; }
+			let event: CodexEvent;
+			try { event = JSON.parse(line); } catch { continue; }
+			if (!event || typeof event !== 'object') { continue; }
+			if (event.type === 'item.completed' && event.item?.type === 'agent_message' && typeof event.item.text === 'string') {
+				yield { type: 'text', text: event.item.text };
+			} else if (event.type === 'turn.completed') {
+				completed = true;
+				if (event.usage) { yield { type: 'usage', inputTokens: event.usage.input_tokens ?? 0, outputTokens: event.usage.output_tokens ?? 0 }; }
+			} else if (!failed && (event.type === 'turn.failed' || event.type === 'error')) {
+				failed = true;
+				yield { type: 'error', message: event.error?.message || event.message || 'Codex CLI request failed.' };
 			}
-			yield* mapChunkToEvents(parsed);
 		}
-		yield { type: 'done' };
+		const exitCode = await closed;
+		if (signal?.aborted) { return; }
+		if (timedOut) { yield { type: 'error', message: 'Codex CLI request timed out.' }; }
+		else if (spawnError) { yield { type: 'error', message: `Unable to start Codex CLI: ${spawnError.message}` }; }
+		else if (!failed && exitCode !== 0) { yield { type: 'error', message: `Codex CLI exited ${exitCode ?? proc.signalCode}: ${stderr.trim() || '(no stderr)'}` }; }
+		else if (!failed && !completed) { yield { type: 'error', message: 'Codex CLI exited without completing a response.' }; }
+		else if (!failed) { yield { type: 'done' }; }
 	} finally {
 		clearTimeout(timeout);
-		signal?.removeEventListener('abort', onAbort);
-		try { proc.stdout.destroy(); } catch { /* */ }
-	}
-
-	// Surface non-zero exit as an error event so callers can distinguish
-	// "no output, clean exit" from "process crashed".
-	const exitCode: number | null = await new Promise(resolve => {
-		if (proc.exitCode !== null) resolve(proc.exitCode);
-		else proc.once('close', code => resolve(code));
-	});
-	if (exitCode !== 0 && exitCode !== null) {
-		yield { type: 'error', message: `Codex CLI exited ${exitCode}: ${stderrBuf.trim() || '(no stderr)'}` };
+		signal?.removeEventListener('abort', stop);
+		rl.close();
+		stop();
+		proc.stdout.destroy();
+		await closed;
 	}
 }
 
-function* mapChunkToEvents(chunk: { type?: string; subtype?: string; message?: { content?: unknown }; usage?: Record<string, number>; total_cost_usd?: number }): IterableIterator<CodexChunk> {
-	if (!chunk.type) return;
-	if (chunk.type === 'system') {
-		yield { type: 'system', subtype: String(chunk.subtype ?? ''), data: chunk };
-		return;
-	}
-	if (chunk.type === 'assistant' && chunk.message && Array.isArray(chunk.message.content)) {
-		for (const block of chunk.message.content) {
-			if (block && typeof block === 'object' && (block as { type?: string }).type === 'text') {
-				const text = (block as { text?: string }).text;
-				if (typeof text === 'string') {
-					yield { type: 'text', text };
-				}
-			}
-		}
-		return;
-	}
-	if (chunk.type === 'result') {
-		const usage = chunk.usage;
-		yield {
-			type: 'usage',
-			inputTokens: Number(usage?.input_tokens ?? usage?.prompt_tokens ?? 0),
-			outputTokens: Number(usage?.output_tokens ?? usage?.completion_tokens ?? 0),
-			cost: typeof chunk.total_cost_usd === 'number' ? chunk.total_cost_usd : undefined,
-		};
-	}
+interface CodexEvent {
+	type?: string;
+	item?: { type?: string; text?: string };
+	usage?: { input_tokens?: number; output_tokens?: number };
+	error?: { message?: string };
+	message?: string;
 }
 
 /**
@@ -238,10 +194,3 @@ export function describeCodexAvailability(): { installed: boolean; hint?: string
 	}
 	return { installed: true };
 }
-
-// Suppress TS unused-import warning for `os` — kept in case a future revision
-// needs to read `~/.codex/.credentials.json` directly (Cline-style fallback).
-void os;
-// Suppress TS unused-const warning for BUFFER_SIZE — reserved for a future
-// revision that wires the Node readline buffer size flag.
-void BUFFER_SIZE;

@@ -7,7 +7,8 @@ import { spawnSync, spawn } from 'node:child_process';
 import crossSpawn from 'cross-spawn';
 import assert from 'node:assert/strict';
 import { renameAfterExit } from './lib/file-operations.mjs';
-export async function packageSmoke(source) {
+export async function packageSmoke(source, { handshakeTimeoutMs = 20_000 } = {}) {
+	assert.ok(Number.isFinite(handshakeTimeoutMs) && handshakeTimeoutMs > 0, 'ACP smoke timeout must be positive and finite');
 	const directory = mkdtempSync(join(tmpdir(), 'sota-package-smoke-'));
 	try {
 		const install = join(directory, 'clean install'); mkdirSync(install);
@@ -24,7 +25,8 @@ export async function packageSmoke(source) {
 				const shim = join(env.SOTA_CACHE_DIR, caches[0], 'node_modules', '.bin', name + (process.platform === 'win32' ? '.cmd' : ''));
 				assert.ok(!readFileSync(shim, 'utf8').includes('__SOTA_BIN__'));
 				const result = crossSpawn.sync(shim, ['--version'], { cwd: install, env, encoding: 'utf8', timeout: 120_000 });
-				assert.equal(result.status, 0, `${name}: ${result.error ?? result.stderr}`); assert.match(result.stdout, /\d+\.\d+/);
+				assert.equal(result.status, 0, `${name}: ${result.error ?? result.stderr}`);
+				assert.match(result.stdout, name === 'claude' ? /\d+\.\d+\.\d+ \(Claude Code\)/ : /codex-cli \d+\.\d+\.\d+/, `${name} shim must launch the intended CLI`);
 			}
 			return caches[0];
 		};
@@ -38,7 +40,7 @@ export async function packageSmoke(source) {
 		// A session handshake exercises bundled prompt loading and ACP without using credentials or a model.
 		await new Promise((resolveProbe, reject) => {
 			const child = spawn(binary, ['acp', '--read-only'], { cwd: install, env, stdio: 'pipe' }); let buffer = '', errors = '', completed = false;
-			const timer = setTimeout(() => { child.kill(); reject(new Error(`Packaged ACP handshake timed out: ${errors}`)); }, 20_000);
+			const timer = setTimeout(() => { child.kill(); reject(new Error(`Packaged ACP handshake timed out after ${handshakeTimeoutMs} ms: ${errors}`)); }, handshakeTimeoutMs);
 			child.stderr.on('data', chunk => { errors = (errors + chunk).slice(-4000); });
 			child.on('error', error => { clearTimeout(timer); reject(error); });
 			child.stdin.on('error', error => { child.kill(); reject(error); });

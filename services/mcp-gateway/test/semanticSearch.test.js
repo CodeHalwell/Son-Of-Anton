@@ -64,3 +64,22 @@ describe('semanticSearch — hybrid ranking weights', () => {
 		assert.strictEqual(results[0].id, 'high-structural');
 	});
 });
+
+// Exercise the real parser as well as the ranking consumer so their result
+// contracts cannot drift behind a hand-written database mock.
+test('aliased compact graph maps contribute to structural ranking', async () => {
+	const { FalkorDBClient } = require('../dist/clients/falkordb.js');
+	const graph = new FalkorDBClient();
+	const decoded = graph.parseResult([
+		[[1, 'entry']],
+		[[[10, ['key', [2, 'central::b.ts'], 'inDegree', [3, 1000]]]]],
+		[],
+	]);
+	const results = await semanticSearch(createMockQdrant([
+		{ id: 'lonely', score: 0.9, filePath: 'a.ts', symbolName: 'lonely' },
+		{ id: 'central', score: 0.5, filePath: 'b.ts', symbolName: 'central' },
+	]), { query: async () => decoded }, { query: 'x' }, embedQuery, { semantic: 0.1, structural: 0.9 });
+	assert.deepEqual(results.map(result => [result.id, result.structuralImportance]), [
+		['central', Math.log2(1001) / 10], ['lonely', 0],
+	]);
+});
