@@ -56,3 +56,7 @@
 **Vulnerability:** Found `child_process.exec` being used to execute `chcp` and `locale charmap` in `src/vs/base/node/terminalEncoding.ts`. Using `exec` for these commands is vulnerable to PATH hijacking (Untrusted Search Path) and shell injection.
 **Learning:** Even for standard system commands like `chcp` and `locale`, using `exec` relies on the shell to resolve the binary via PATH, which can be manipulated. Furthermore, if arguments were ever added dynamically, `exec` would expose them to shell injection.
 **Prevention:** Always migrate `child_process.exec` to `child_process.execFile` to bypass shell execution entirely. When executing Windows built-in commands like `chcp`, explicitly specify the extension (e.g., `chcp.com`) to prevent hijacking by malicious `.exe`, `.cmd`, or `.bat` files placed earlier in the system PATH.
+## 2026-06-03 - Command Injection in Git Darwin Detection
+**Vulnerability:** Found `child_process.exec` being used to execute `which git`, `git --version`, and `xcode-select -p` in `extensions/git/src/git.ts`. Using `exec` for these commands is vulnerable to PATH hijacking (Untrusted Search Path) and shell injection.
+**Learning:** Even for standard system commands like `which` and `xcode-select`, using `exec` relies on the shell to resolve the binary via PATH, which can be manipulated.
+**Prevention:** Always migrate `child_process.exec` to `child_process.execFile` to bypass shell execution entirely.
