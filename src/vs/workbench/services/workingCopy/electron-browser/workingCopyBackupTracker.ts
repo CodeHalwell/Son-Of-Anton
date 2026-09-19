@@ -130,7 +130,8 @@ export class NativeWorkingCopyBackupTracker extends WorkingCopyBackupTracker imp
 			}
 		}
 
-		const remainingModifiedWorkingCopies = modifiedWorkingCopies.filter(workingCopy => !backups.includes(workingCopy));
+		const backupsSet = new Set(backups);
+		const remainingModifiedWorkingCopies = modifiedWorkingCopies.filter(workingCopy => !backupsSet.has(workingCopy));
 
 		// We ran a backup but received an error that we show to the user
 		if (backupError) {
