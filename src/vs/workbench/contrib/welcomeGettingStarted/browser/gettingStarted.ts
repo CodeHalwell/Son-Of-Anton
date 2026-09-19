@@ -1709,7 +1709,7 @@ export class GettingStartedPage extends EditorPane {
 						{
 							'x-dispatch': 'selectTask:' + step.id,
 							'data-step-id': step.id,
-							'aria-expanded': 'false',
+								'aria-expanded': String(this.editorInput?.selectedStep === step.id),
 							'aria-checked': step.done ? 'true' : 'false',
 							'role': 'button',
 						},
