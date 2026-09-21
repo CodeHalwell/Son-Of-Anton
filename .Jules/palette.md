@@ -1,0 +1,3 @@
+## 2024-05-24 - Accessibility for Custom Tri-State Checkboxes
+**Learning:** For custom tri-state checkboxes, explicitly setting `aria-checked="mixed"` when in the mixed state is critical, as screen readers will otherwise announce them incorrectly (or as simply unchecked) if backed by a standard boolean property or if left unset. In `Toggle`, `aria-checked` is only set to `"true"` or `"false"` using `String(this._checked)`, ignoring the `mixed` state. We need to override how `aria-checked` is set for `TriStateCheckbox` to support the `'mixed'` value.
+**Action:** Update the `Toggle` class or `TriStateCheckbox` class to correctly apply the `"mixed"` value to the `aria-checked` attribute.
