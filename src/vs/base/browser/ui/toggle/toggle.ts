@@ -354,13 +354,15 @@ export class Checkbox extends BaseCheckbox {
 }
 
 export class TriStateCheckbox extends BaseCheckbox {
+	private _state: boolean | 'mixed';
+
 	constructor(
 		title: string,
-		private _state: boolean | 'mixed',
+		state: boolean | 'mixed',
 		styles: ICheckboxStyles
 	) {
 		let icon: ThemeIcon | undefined;
-		switch (_state) {
+		switch (state) {
 			case true:
 				icon = Codicon.check;
 				break;
@@ -373,7 +375,7 @@ export class TriStateCheckbox extends BaseCheckbox {
 		}
 		const checkbox = new Toggle({
 			title,
-			isChecked: _state === true,
+			isChecked: state === true,
 			icon,
 			actionClassName: Checkbox.CLASS_NAME,
 			hoverLifecycleOptions: styles.hoverLifecycleOptions,
@@ -385,12 +387,14 @@ export class TriStateCheckbox extends BaseCheckbox {
 			styles
 		);
 
+		this._state = state;
 		this._register(checkbox);
 		this._register(this.checkbox.onChange(keyboard => {
 			this._state = this.checkbox.checked;
 			this.applyStyles();
 			this._onChange.fire(keyboard);
 		}));
+		this.applyStyles();
 	}
 
 	get checked(): boolean | 'mixed' {
@@ -409,12 +413,15 @@ export class TriStateCheckbox extends BaseCheckbox {
 		switch (this._state) {
 			case true:
 				this.checkbox.setIcon(Codicon.check);
+				this.checkbox.domNode.setAttribute('aria-checked', 'true');
 				break;
 			case 'mixed':
 				this.checkbox.setIcon(Codicon.dash);
+				this.checkbox.domNode.setAttribute('aria-checked', 'mixed');
 				break;
 			case false:
 				this.checkbox.setIcon(undefined);
+				this.checkbox.domNode.setAttribute('aria-checked', 'false');
 				break;
 		}
 		super.applyStyles(enabled);
