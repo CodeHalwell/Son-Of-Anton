@@ -1,0 +1,3 @@
+## 2024-05-24 - Accessibility improvements for Issue Reporter toggle buttons
+**Learning:** In `issueReporterPage.ts`, multiple "show" toggle links use the text "show" with `role="button"` and `tabIndex=0`. However, they lacked `aria-label`s. This meant screen readers would read "show button", "show button", "show button" with no context about *what* they are showing (e.g. system info, extension data).
+**Action:** Adding localized `aria-label`s to these toggles (e.g., `aria-label="Toggle system information"`) greatly improves the screen reader experience, giving full context on what the button toggles.

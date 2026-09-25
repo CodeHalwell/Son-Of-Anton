@@ -12,6 +12,14 @@ const sendWorkspaceInfoLabel = escape(localize('sendWorkspaceInfo', "Include my 
 const sendExtensionsLabel = escape(localize('sendExtensions', "Include my enabled extensions"));
 const sendExperimentsLabel = escape(localize('sendExperiments', "Include A/B experiment info"));
 const sendExtensionData = escape(localize('sendExtensionData', "Include additional extension info"));
+
+const showExtensionData = escape(localize('showExtensionData', "Toggle additional extension info"));
+const showSystemInfo = escape(localize('showSystemInfo', "Toggle system information"));
+const showProcessInfo = escape(localize('showProcessInfo', "Toggle process information"));
+const showWorkspaceInfo = escape(localize('showWorkspaceInfo', "Toggle workspace metadata"));
+const showExtensions = escape(localize('showExtensions', "Toggle enabled extensions"));
+const showExperiments = escape(localize('showExperiments', "Toggle experiment info"));
+
 const acknowledgementsLabel = escape(localize('acknowledgements', "I acknowledge that my Son of Anton version is not updated and this issue may be closed."));
 const reviewGuidanceLabel = localize( // intentionally not escaped because of its embedded tags
 	{
@@ -98,7 +106,7 @@ export default (): string => `
 			<label class="extension-caption" id="extension-caption" for="includeExtensionData">
 				${sendExtensionData}
 				<span id="ext-loading" hidden></span>
-				<span class="ext-parens" hidden>(</span><a href="#" class="showInfo" role="button" aria-expanded="false" tabIndex=0 id="extension-id">${escape(localize('show', "show"))}</a><span class="ext-parens" hidden>)</span>
+				<span class="ext-parens" hidden>(</span><a href="#" class="showInfo" role="button" aria-expanded="false" tabIndex=0 id="extension-id" aria-label="${showExtensionData}">${escape(localize('show', "show"))}</a><span class="ext-parens" hidden>)</span>
 				<a id="extension-data-download" role="button" tabIndex=0>${escape(localize('downloadExtensionData', "Download Extension Data"))}</a>
 			</label>
 			<pre class="block-info" id="extension-data" placeholder="${escape(localize('extensionData', "Extension does not have additional data to include."))}" style="white-space: pre-wrap; user-select: text;">
@@ -110,7 +118,7 @@ export default (): string => `
 			<input class="sendData" aria-label="${sendSystemInfoLabel}" type="checkbox" id="includeSystemInfo" checked/>
 			<label class="caption" for="includeSystemInfo">
 				${sendSystemInfoLabel}
-				(<a href="#" class="showInfo" role="button" aria-expanded="false" tabIndex=0>${escape(localize('show', "show"))}</a>)
+				(<a href="#" class="showInfo" role="button" aria-expanded="false" tabIndex=0 aria-label="${showSystemInfo}">${escape(localize('show', "show"))}</a>)
 			</label>
 			<div class="block-info hidden" style="user-select: text;">
 				<!-- To be dynamically filled -->
@@ -120,7 +128,7 @@ export default (): string => `
 			<input class="sendData" aria-label="${sendProcessInfoLabel}" type="checkbox" id="includeProcessInfo" checked/>
 			<label class="caption" for="includeProcessInfo">
 				${sendProcessInfoLabel}
-				(<a href="#" class="showInfo" role="button" aria-expanded="false" tabIndex=0>${escape(localize('show', "show"))}</a>)
+				(<a href="#" class="showInfo" role="button" aria-expanded="false" tabIndex=0 aria-label="${showProcessInfo}">${escape(localize('show', "show"))}</a>)
 			</label>
 			<pre class="block-info hidden" style="user-select: text;">
 				<code>
@@ -132,7 +140,7 @@ export default (): string => `
 			<input class="sendData" aria-label="${sendWorkspaceInfoLabel}" type="checkbox" id="includeWorkspaceInfo" checked/>
 			<label class="caption" for="includeWorkspaceInfo">
 				${sendWorkspaceInfoLabel}
-				(<a href="#" class="showInfo" role="button" aria-expanded="false" tabIndex=0>${escape(localize('show', "show"))}</a>)
+				(<a href="#" class="showInfo" role="button" aria-expanded="false" tabIndex=0 aria-label="${showWorkspaceInfo}">${escape(localize('show', "show"))}</a>)
 			</label>
 			<pre id="systemInfo" class="block-info hidden" style="user-select: text;">
 				<code>
@@ -144,7 +152,7 @@ export default (): string => `
 			<input class="sendData" aria-label="${sendExtensionsLabel}" type="checkbox" id="includeExtensions" checked/>
 			<label class="caption" for="includeExtensions">
 				${sendExtensionsLabel}
-				(<a href="#" class="showInfo" role="button" aria-expanded="false" tabIndex=0>${escape(localize('show', "show"))}</a>)
+				(<a href="#" class="showInfo" role="button" aria-expanded="false" tabIndex=0 aria-label="${showExtensions}">${escape(localize('show', "show"))}</a>)
 			</label>
 			<div id="systemInfo" class="block-info hidden" style="user-select: text;">
 				<!-- To be dynamically filled -->
@@ -154,7 +162,7 @@ export default (): string => `
 			<input class="sendData" aria-label="${sendExperimentsLabel}" type="checkbox" id="includeExperiments" checked/>
 			<label class="caption" for="includeExperiments">
 				${sendExperimentsLabel}
-				(<a href="#" class="showInfo" role="button" aria-expanded="false" tabIndex=0>${escape(localize('show', "show"))}</a>)
+				(<a href="#" class="showInfo" role="button" aria-expanded="false" tabIndex=0 aria-label="${showExperiments}">${escape(localize('show', "show"))}</a>)
 			</label>
 			<pre class="block-info hidden" style="user-select: text;">
 				<!-- To be dynamically filled -->
