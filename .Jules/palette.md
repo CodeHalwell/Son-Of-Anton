@@ -1,0 +1,3 @@
+## 2024-05-24 - Stable context for visually changing toggle buttons
+**Learning:** When using standard textual toggle links that dynamically change text content (e.g., swapping between "show" and "hide"), the visual string swap provides poor context for screen reader users when navigated out of flow or after the state flips. Using a generic `role="button"` without an explicit label compounds this issue.
+**Action:** Assign a stable, descriptive `aria-label` (e.g., "Toggle Extension Data") to such links. The explicit ARIA label overrides the changing visible text content for screen readers, providing consistent context regardless of the current visual toggle state.
