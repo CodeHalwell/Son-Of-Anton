@@ -1,0 +1,3 @@
+## 2024-05-24 - TriStateCheckbox aria-checked="mixed"
+**Learning:** Tri-state checkboxes backed by boolean properties (e.g., `boolean | 'mixed'`) need explicit `aria-checked="mixed"` when in the mixed state, as screen readers will otherwise read them as unchecked (falling back to boolean semantics). When extending classes where `applyStyles` runs before child constructor fields are initialized, manual initialization of `aria-checked` at the end of the constructor is also required.
+**Action:** When implementing tri-state checkboxes, explicitly manage `aria-checked="mixed"` during initialization and in all style update methods.
