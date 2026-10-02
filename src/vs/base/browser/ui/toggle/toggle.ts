@@ -384,6 +384,9 @@ export class TriStateCheckbox extends BaseCheckbox {
 			checkbox.domNode,
 			styles
 		);
+		if (_state === 'mixed') {
+			this.checkbox.domNode.setAttribute('aria-checked', 'mixed');
+		}
 
 		this._register(checkbox);
 		this._register(this.checkbox.onChange(keyboard => {
@@ -409,12 +412,15 @@ export class TriStateCheckbox extends BaseCheckbox {
 		switch (this._state) {
 			case true:
 				this.checkbox.setIcon(Codicon.check);
+				this.checkbox.domNode.setAttribute('aria-checked', 'true');
 				break;
 			case 'mixed':
 				this.checkbox.setIcon(Codicon.dash);
+				this.checkbox.domNode.setAttribute('aria-checked', 'mixed');
 				break;
 			case false:
 				this.checkbox.setIcon(undefined);
+				this.checkbox.domNode.setAttribute('aria-checked', 'false');
 				break;
 		}
 		super.applyStyles(enabled);
