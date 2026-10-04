@@ -344,12 +344,12 @@ class QuickDiffWidget extends PeekViewWidget {
 	private getQuickDiffsContainingChange(): QuickDiff[] {
 		const change = this.model.changes[this._index];
 
-		const quickDiffsWithChange = this.model.changes
+		const quickDiffsWithChange = new Set(this.model.changes
 			.filter(c => change.change2.modified.intersectsOrTouches(c.change2.modified))
-			.map(c => c.providerId);
+			.map(c => c.providerId));
 
 		return this.model.quickDiffs
-			.filter(quickDiff => quickDiffsWithChange.includes(quickDiff.id) &&
+			.filter(quickDiff => quickDiffsWithChange.has(quickDiff.id) &&
 				this.quickDiffService.isQuickDiffProviderVisible(quickDiff.id));
 	}
 

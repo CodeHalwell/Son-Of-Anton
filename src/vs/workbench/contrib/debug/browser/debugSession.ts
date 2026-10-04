@@ -1434,7 +1434,8 @@ export class DebugSession implements IDebugSession {
 	private async enableDependentBreakpoints(hitBreakpointIdsOrThread: Thread | number[]) {
 		let breakpoints: IBreakpoint[];
 		if (Array.isArray(hitBreakpointIdsOrThread)) {
-			breakpoints = this.model.getBreakpoints().filter(bp => hitBreakpointIdsOrThread.includes(bp.getIdFromAdapter(this.id)!));
+			const hitBreakpointIdsSet = new Set(hitBreakpointIdsOrThread);
+			breakpoints = this.model.getBreakpoints().filter(bp => hitBreakpointIdsSet.has(bp.getIdFromAdapter(this.id)!));
 		} else {
 			const frame = hitBreakpointIdsOrThread.getTopStackFrame();
 			if (frame === undefined) {

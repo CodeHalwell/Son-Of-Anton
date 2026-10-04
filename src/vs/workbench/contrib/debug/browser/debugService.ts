@@ -1129,11 +1129,15 @@ export class DebugService implements IDebugService {
 
 	async removeBreakpoints(id?: string | string[]): Promise<void> {
 		const breakpoints = this.model.getBreakpoints();
-		const toRemove = id === undefined
-			? breakpoints
-			: id instanceof Array
-				? breakpoints.filter(bp => id.includes(bp.getId()))
-				: breakpoints.filter(bp => bp.getId() === id);
+		let toRemove: IBreakpoint[];
+		if (id === undefined) {
+			toRemove = breakpoints;
+		} else if (id instanceof Array) {
+			const idSet = new Set(id);
+			toRemove = breakpoints.filter(bp => idSet.has(bp.getId()));
+		} else {
+			toRemove = breakpoints.filter(bp => bp.getId() === id);
+		}
 		// note: using the debugger-resolved uri for aria to reflect UI state
 		toRemove.forEach(bp => aria.status(nls.localize('breakpointRemoved', "Removed breakpoint, line {0}, file {1}", bp.lineNumber, bp.uri.fsPath)));
 		const urisToClear = new Set(toRemove.map(bp => bp.originalUri.toString()));
