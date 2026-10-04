@@ -397,7 +397,8 @@ class OnAutoForwardedAction extends Disposable {
 
 	public hide(removedPorts: number[]) {
 		if (this.doActionTunnels) {
-			this.doActionTunnels = this.doActionTunnels.filter(value => !removedPorts.includes(value.tunnelRemotePort));
+			const removedPortsSet = new Set(removedPorts);
+			this.doActionTunnels = this.doActionTunnels.filter(value => !removedPortsSet.has(value.tunnelRemotePort));
 		}
 		if (this.lastShownPort && removedPorts.indexOf(this.lastShownPort) >= 0) {
 			this.lastNotification?.close();
