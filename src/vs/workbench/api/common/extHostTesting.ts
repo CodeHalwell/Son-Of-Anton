@@ -366,7 +366,8 @@ export class ExtHostTesting extends Disposable implements ExtHostTestingShape {
 			}
 			const changes = new Map<number, boolean>();
 			const added = profileIds.filter(id => !ctrl.activeProfiles.has(id));
-			const removed = [...ctrl.activeProfiles].filter(id => !profileIds.includes(id));
+			const profileIdsSet = new Set(profileIds);
+			const removed = [...ctrl.activeProfiles].filter(id => !profileIdsSet.has(id));
 			for (const id of added) {
 				changes.set(id, true);
 				ctrl.activeProfiles.add(id);

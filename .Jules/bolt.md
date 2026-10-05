@@ -1,0 +1,3 @@
+## 2024-05-18 - Optimize array filtering with Set lookup
+**Learning:** In scenarios where an array is filtered by checking if its elements are present or missing in another array using `.includes()` (like `activeProfiles.filter(id => !profileIds.includes(id))`), the operation has O(N*M) time complexity. This can cause performance bottlenecks when arrays are large.
+**Action:** Convert the target array (e.g., `profileIds`) into a `Set` first (`new Set(profileIds)`), and then use `Set.has()` within the `filter()` method. This reduces the time complexity to O(N+M) and yields measurable performance improvements for large data sets.
