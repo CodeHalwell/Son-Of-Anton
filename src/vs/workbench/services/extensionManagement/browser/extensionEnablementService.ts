@@ -271,25 +271,32 @@ export class ExtensionEnablementService extends Disposable implements IWorkbench
 		return result;
 	}
 
-	private getExtensionsToEnableRecursively(extensions: IExtension[], allExtensions: ReadonlyArray<IExtension>, enablementState: EnablementState, options: { dependencies: boolean; pack: boolean }, checked: IExtension[] = [], checkedSet: Set<IExtension> = new Set<IExtension>(checked)): IExtension[] {
+	private getExtensionsToEnableRecursively(extensions: IExtension[], allExtensions: ReadonlyArray<IExtension>, enablementState: EnablementState, options: { dependencies: boolean; pack: boolean }, checked: IExtension[] = [], checkedSet?: Set<string>): IExtension[] {
 		if (!options.dependencies && !options.pack) {
 			return [];
 		}
 
-		const toCheck = extensions.filter(e => !checkedSet.has(e));
+		if (!checkedSet) {
+			checkedSet = new Set<string>();
+			for (const e of checked) {
+				checkedSet.add(e.identifier.id.toLowerCase());
+			}
+		}
+
+		const toCheck = extensions.filter(e => !checkedSet!.has(e.identifier.id.toLowerCase()));
 		if (!toCheck.length) {
 			return [];
 		}
 
 		for (const extension of toCheck) {
 			checked.push(extension);
-			checkedSet.add(extension);
+			checkedSet.add(extension.identifier.id.toLowerCase());
 		}
 
 		const extensionsToEnable: IExtension[] = [];
 		for (const extension of allExtensions) {
 			// Extension is already checked
-			if (checked.some(e => areSameExtensions(e.identifier, extension.identifier))) {
+			if (checkedSet.has(extension.identifier.id.toLowerCase())) {
 				continue;
 			}
 

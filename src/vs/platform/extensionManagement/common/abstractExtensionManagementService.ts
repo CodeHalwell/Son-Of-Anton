@@ -952,20 +952,27 @@ export abstract class AbstractExtensionManagementService extends CommontExtensio
 
 	}
 
-	private getAllPackExtensionsToUninstall(extension: ILocalExtension, installed: ILocalExtension[], checked: ILocalExtension[] = []): ILocalExtension[] {
-		if (checked.indexOf(extension) !== -1) {
+	private getAllPackExtensionsToUninstall(extension: ILocalExtension, installed: ILocalExtension[], checked: ILocalExtension[] = [], checkedSet?: Set<string>): ILocalExtension[] {
+		if (!checkedSet) {
+			checkedSet = new Set<string>();
+			for (const e of checked) {
+				checkedSet.add(e.identifier.id.toLowerCase());
+			}
+		}
+		if (checkedSet.has(extension.identifier.id.toLowerCase())) {
 			return [];
 		}
 		if (areSameExtensions(extension.identifier, { id: this.productService.defaultChatAgent.extensionId })) {
 			return [];
 		}
 		checked.push(extension);
+		checkedSet.add(extension.identifier.id.toLowerCase());
 		const extensionsPack = extension.manifest.extensionPack ? extension.manifest.extensionPack : [];
 		if (extensionsPack.length) {
 			const packedExtensions = installed.filter(i => !i.isBuiltin && extensionsPack.some(id => areSameExtensions({ id }, i.identifier)));
 			const packOfPackedExtensions: ILocalExtension[] = [];
 			for (const packedExtension of packedExtensions) {
-				packOfPackedExtensions.push(...this.getAllPackExtensionsToUninstall(packedExtension, installed, checked));
+				packOfPackedExtensions.push(...this.getAllPackExtensionsToUninstall(packedExtension, installed, checked, checkedSet));
 			}
 			return [...packedExtensions, ...packOfPackedExtensions];
 		}
