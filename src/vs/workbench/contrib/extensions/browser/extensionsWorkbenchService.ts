@@ -2815,11 +2815,18 @@ export class ExtensionsWorkbenchService extends Disposable implements IExtension
 		}, () => this.extensionManagementService.uninstallExtensions(extensionsToUninstall).then(() => undefined));
 	}
 
-	private getAllPackedExtensions(extension: IExtension, installed: IExtension[], checked: IExtension[] = []): IExtension[] {
-		if (checked.some(e => areSameExtensions(e.identifier, extension.identifier))) {
+	private getAllPackedExtensions(extension: IExtension, installed: IExtension[], checked: IExtension[] = [], checkedSet?: Set<string>): IExtension[] {
+		if (!checkedSet) {
+			checkedSet = new Set<string>();
+			for (const e of checked) {
+				checkedSet.add(e.identifier.id.toLowerCase());
+			}
+		}
+		if (checkedSet.has(extension.identifier.id.toLowerCase())) {
 			return [];
 		}
 		checked.push(extension);
+		checkedSet.add(extension.identifier.id.toLowerCase());
 		const extensionsPack = extension.extensionPack ?? [];
 		if (extensionsPack.length) {
 			const packedExtensions: IExtension[] = [];
@@ -2830,7 +2837,7 @@ export class ExtensionsWorkbenchService extends Disposable implements IExtension
 			}
 			const packOfPackedExtensions: IExtension[] = [];
 			for (const packedExtension of packedExtensions) {
-				packOfPackedExtensions.push(...this.getAllPackedExtensions(packedExtension, installed, checked));
+				packOfPackedExtensions.push(...this.getAllPackedExtensions(packedExtension, installed, checked, checkedSet));
 			}
 			return [...packedExtensions, ...packOfPackedExtensions];
 		}
@@ -3046,15 +3053,21 @@ export class ExtensionsWorkbenchService extends Disposable implements IExtension
 		return this.doSetEnablement(allExtensions, enablementState);
 	}
 
-	private getExtensionsRecursively(extensions: IExtension[], installed: IExtension[], enablementState: EnablementState, options: { dependencies: boolean; pack: boolean }, checked: IExtension[] = [], checkedSet: Set<IExtension> = new Set<IExtension>()): IExtension[] {
-		const toCheck = extensions.filter(e => !checkedSet.has(e));
+	private getExtensionsRecursively(extensions: IExtension[], installed: IExtension[], enablementState: EnablementState, options: { dependencies: boolean; pack: boolean }, checked: IExtension[] = [], checkedSet?: Set<string>): IExtension[] {
+		if (!checkedSet) {
+			checkedSet = new Set<string>();
+			for (const e of checked) {
+				checkedSet.add(e.identifier.id.toLowerCase());
+			}
+		}
+		const toCheck = extensions.filter(e => !checkedSet!.has(e.identifier.id.toLowerCase()));
 		if (toCheck.length) {
 			for (const extension of toCheck) {
 				checked.push(extension);
-				checkedSet.add(extension);
+				checkedSet.add(extension.identifier.id.toLowerCase());
 			}
 			const extensionsToEanbleOrDisable = installed.filter(i => {
-				if (checkedSet.has(i)) {
+				if (checkedSet!.has(i.identifier.id.toLowerCase())) {
 					return false;
 				}
 				const enable = enablementState === EnablementState.EnabledGlobally || enablementState === EnablementState.EnabledWorkspace;
