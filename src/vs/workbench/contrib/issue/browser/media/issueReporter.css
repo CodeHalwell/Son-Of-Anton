@@ -314,9 +314,11 @@ body.issue-reporter-body  {
 	color: var(--vscode-textLink-foreground);
 }
 
-.issue-reporter-body .workbenchCommand:disabled {
+.issue-reporter-body .workbenchCommand:disabled,
+.issue-reporter-body .workbenchCommand[aria-disabled="true"] {
 	color: #868e96;
-	cursor: default
+	cursor: default;
+	pointer-events: none;
 }
 
 .issue-reporter-body .block-extensions .block-info {
