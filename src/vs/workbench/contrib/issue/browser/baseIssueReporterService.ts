@@ -431,7 +431,9 @@ export class BaseIssueReporterService extends Disposable {
 		this.updateExtensionTable(nonThemes ?? [], numberOfThemeExtesions);
 		if (this.disableExtensions || installedExtensions.length === 0) {
 			// eslint-disable-next-line no-restricted-syntax
-			(<HTMLButtonElement>this.getElementById('disableExtensions')).disabled = true;
+			const disableBtn = <HTMLElement>this.getElementById('disableExtensions');
+			disableBtn.setAttribute('aria-disabled', 'true');
+			disableBtn.tabIndex = -1;
 		}
 
 		this.updateExtensionSelector(installedExtensions);
@@ -708,6 +710,9 @@ export class BaseIssueReporterService extends Disposable {
 		// We handle clicks in the dropdown actions now
 
 		this.addEventListener('disableExtensions', 'click', () => {
+			if (this.disableExtensions || this.issueReporterModel.getData().allExtensions.length === 0) {
+				return;
+			}
 			this.issueFormService.reloadWithExtensionsDisabled();
 		});
 
@@ -727,6 +732,9 @@ export class BaseIssueReporterService extends Disposable {
 
 		this.addEventListener('disableExtensions', 'keydown', (e: Event) => {
 			e.stopPropagation();
+			if (this.disableExtensions || this.issueReporterModel.getData().allExtensions.length === 0) {
+				return;
+			}
 			if ((e as KeyboardEvent).key === 'Enter' || (e as KeyboardEvent).key === ' ') {
 				e.preventDefault();
 				this.issueFormService.reloadWithExtensionsDisabled();
