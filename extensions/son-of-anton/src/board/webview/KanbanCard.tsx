@@ -84,7 +84,7 @@ export function KanbanCard({ task, persona, assignment }: KanbanCardProps): JSX.
 			</div></details>
 			<div className="tile-assignee">
 				<span className="avatar" style={{ color: p.accent }} aria-hidden="true">{p.monogram}</span>
-				<span className="tile-name">@{task.assignee}</span>
+				{!assignment && <span className="tile-name">@{task.assignee}</span>}
 				{assignment && <select aria-label={`Assign task ${idShort} to agent`} value={task.assignee} onChange={event => {
 					const newAssignee = event.currentTarget.value;
 					postToHost({ type: 'reassign', conversationId: assignment.conversationId, expectedRevision: assignment.expectedRevision, taskId: task.id, newAssignee });
@@ -100,13 +100,13 @@ export function KanbanCard({ task, persona, assignment }: KanbanCardProps): JSX.
 						<span key={file} className="chip" title={file}>{file.split(/[\\/]/).pop()}</span>
 					))}
 					{hiddenScopeCount > 0 && (
-						<span className="chip">+{hiddenScopeCount} more</span>
+						<span className="chip" title={task.scopeFiles.slice(3).join('\n')}>+{hiddenScopeCount} more</span>
 					)}
 				</div>
 			)}
 			{task.dependencies.length > 0 && (
 				<div className="chips">
-					<span className="chip dep">
+					<span className="chip dep" title={task.dependencies.join('\n')}>
 						{task.dependencies.length} {task.dependencies.length === 1 ? 'dependency' : 'dependencies'}
 					</span>
 				</div>
