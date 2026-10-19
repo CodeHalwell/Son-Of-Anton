@@ -100,7 +100,7 @@ export function KanbanCard({ task, persona, assignment }: KanbanCardProps): JSX.
 						<span key={file} className="chip" title={file}>{file.split(/[\\/]/).pop()}</span>
 					))}
 					{hiddenScopeCount > 0 && (
-						<span className="chip">+{hiddenScopeCount} more</span>
+						<span className="chip" title={task.scopeFiles.slice(3).join('\n')}>+{hiddenScopeCount} more</span>
 					)}
 				</div>
 			)}
