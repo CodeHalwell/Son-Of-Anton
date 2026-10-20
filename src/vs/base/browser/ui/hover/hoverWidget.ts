@@ -62,6 +62,8 @@ export class HoverAction extends Disposable {
 
 	private readonly action: HTMLElement;
 
+	private _enabled: boolean = true;
+
 	private constructor(parent: HTMLElement, actionOptions: { label: string; iconClass?: string; run: (target: HTMLElement) => void; commandId: string }, keybindingLabel: string | null) {
 		super();
 
@@ -83,18 +85,27 @@ export class HoverAction extends Disposable {
 		const label = dom.append(this.action, $('span'));
 		label.textContent = this.actionRenderedLabel;
 
-		this._store.add(new ClickAction(this.actionContainer, actionOptions.run));
-		this._store.add(new KeyDownAction(this.actionContainer, actionOptions.run, [KeyCode.Enter, KeyCode.Space]));
+		const runAction = (target: HTMLElement) => {
+			if (this._enabled) {
+				actionOptions.run(target);
+			}
+		};
+
+		this._store.add(new ClickAction(this.actionContainer, runAction));
+		this._store.add(new KeyDownAction(this.actionContainer, runAction, [KeyCode.Enter, KeyCode.Space]));
 		this.setEnabled(true);
 	}
 
 	public setEnabled(enabled: boolean): void {
+		this._enabled = enabled;
 		if (enabled) {
 			this.actionContainer.classList.remove('disabled');
 			this.actionContainer.removeAttribute('aria-disabled');
+			this.actionContainer.setAttribute('tabindex', '0');
 		} else {
 			this.actionContainer.classList.add('disabled');
 			this.actionContainer.setAttribute('aria-disabled', 'true');
+			this.actionContainer.setAttribute('tabindex', '-1');
 		}
 	}
 }
