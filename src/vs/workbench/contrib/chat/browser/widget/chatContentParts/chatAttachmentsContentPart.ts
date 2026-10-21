@@ -15,6 +15,7 @@ import { IChatRequestVariableEntry, isElementVariableEntry, isImageVariableEntry
 import { ChatResponseReferencePartStatusKind, IChatContentReference } from '../../../common/chatService/chatService.js';
 import { DefaultChatAttachmentWidget, ElementChatAttachmentWidget, FileAttachmentWidget, ImageAttachmentWidget, NotebookCellOutputChatAttachmentWidget, PasteAttachmentWidget, PromptFileAttachmentWidget, PromptTextAttachmentWidget, SCMHistoryItemAttachmentWidget, SCMHistoryItemChangeAttachmentWidget, SCMHistoryItemChangeRangeAttachmentWidget, TerminalCommandAttachmentWidget, ToolSetOrToolItemAttachmentWidget } from '../../attachments/chatAttachmentWidgets.js';
 import { IChatAttachmentWidgetRegistry } from '../../attachments/chatAttachmentWidgetRegistry.js';
+import { localize } from '../../../../../../nls.js';
 
 export interface IChatAttachmentsContentPartOptions {
 	readonly variables: readonly IChatRequestVariableEntry[];
@@ -96,6 +97,7 @@ export class ChatAttachmentsContentPart extends Disposable {
 		const showMoreButton = dom.$('div.chat-attached-context-attachment.chat-attachments-show-more-button');
 		showMoreButton.setAttribute('role', 'button');
 		showMoreButton.setAttribute('tabindex', '0');
+		showMoreButton.ariaLabel = localize('chat.attachments.showMore', "Show {0} more attachments", remainingCount);
 		showMoreButton.style.cursor = 'pointer';
 
 		// Add pill icon (ellipsis)
