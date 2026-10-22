@@ -18,6 +18,7 @@ import { KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
 import { Disposable, DisposableStore, MutableDisposable, dispose, toDisposable } from '../../../../base/common/lifecycle.js';
 import { Schemas, matchesScheme } from '../../../../base/common/network.js';
 import { isNative } from '../../../../base/common/platform.js';
+import { escape } from '../../../../base/common/strings.js';
 import { isUndefined } from '../../../../base/common/types.js';
 import { URI } from '../../../../base/common/uri.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
@@ -846,7 +847,7 @@ export class ExtensionEditor extends EditorPane {
 				</style>
 			</head>
 			<body>
-				<a id="scroll-to-top" role="button" aria-label="scroll to top" href="#"><span class="icon"></span></a>
+				<a id="scroll-to-top" role="button" aria-label="${escape(localize('scrollToTop', "Scroll to top"))}" href="#"><span class="icon"></span></a>
 				${body}
 			</body>
 		</html>`;

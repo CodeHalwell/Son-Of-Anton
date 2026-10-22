@@ -13,6 +13,7 @@ import { DisposableStore, toDisposable } from '../../../../../base/common/lifecy
 import { Schemas, matchesScheme } from '../../../../../base/common/network.js';
 import { autorun } from '../../../../../base/common/observable.js';
 import { dirname, joinPath } from '../../../../../base/common/resources.js';
+import { escape } from '../../../../../base/common/strings.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { generateUuid } from '../../../../../base/common/uuid.js';
 import { TokenizationRegistry } from '../../../../../editor/common/languages.js';
@@ -461,7 +462,7 @@ export class AgentPluginEditor extends EditorPane {
 				</style>
 			</head>
 			<body>
-				<a id="scroll-to-top" role="button" aria-label="scroll to top" href="#"><span class="icon"></span></a>
+				<a id="scroll-to-top" role="button" aria-label="${escape(localize('scrollToTop', "Scroll to top"))}" href="#"><span class="icon"></span></a>
 				${body}
 			</body>
 		</html>`;
