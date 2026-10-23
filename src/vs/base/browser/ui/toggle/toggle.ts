@@ -391,6 +391,8 @@ export class TriStateCheckbox extends BaseCheckbox {
 			this.applyStyles();
 			this._onChange.fire(keyboard);
 		}));
+
+		this.applyStyles();
 	}
 
 	get checked(): boolean | 'mixed' {
@@ -406,16 +408,15 @@ export class TriStateCheckbox extends BaseCheckbox {
 	}
 
 	protected override applyStyles(enabled?: boolean): void {
-		switch (this._state) {
-			case true:
-				this.checkbox.setIcon(Codicon.check);
-				break;
-			case 'mixed':
-				this.checkbox.setIcon(Codicon.dash);
-				break;
-			case false:
-				this.checkbox.setIcon(undefined);
-				break;
+		if (this._state === 'mixed') {
+			this.checkbox.domNode.setAttribute('aria-checked', 'mixed');
+			this.checkbox.setIcon(Codicon.dash);
+		} else if (this._state === true) {
+			this.checkbox.domNode.setAttribute('aria-checked', 'true');
+			this.checkbox.setIcon(Codicon.check);
+		} else if (this._state === false) {
+			this.checkbox.domNode.setAttribute('aria-checked', 'false');
+			this.checkbox.setIcon(undefined);
 		}
 		super.applyStyles(enabled);
 	}
