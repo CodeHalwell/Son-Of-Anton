@@ -415,7 +415,7 @@ export class NotebookKernelService extends Disposable implements INotebookKernel
 		const providers = this._kernelSourceActionProviders.get(viewType) ?? [];
 		const promises = providers.map(provider => provider.provideKernelSourceActions());
 		return Promise.all(promises).then(actions => {
-			return actions.reduce((a, b) => a.concat(b), []);
+			return actions.flat();
 		});
 	}
 }
