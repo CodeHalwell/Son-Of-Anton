@@ -406,6 +406,10 @@ export class TriStateCheckbox extends BaseCheckbox {
 	}
 
 	protected override applyStyles(enabled?: boolean): void {
+		if (this._state === 'mixed') {
+			this.checkbox.domNode.setAttribute('aria-checked', 'mixed');
+		}
+
 		switch (this._state) {
 			case true:
 				this.checkbox.setIcon(Codicon.check);
