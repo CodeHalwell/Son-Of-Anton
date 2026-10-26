@@ -14,6 +14,7 @@ const labels = element<HTMLTemplateElement>('labels').content;
 let current: SharedSessionState | undefined;
 let trusted = false;
 let pending: string | undefined;
+let submittedDraft: string | undefined;
 const saved = vscode.getState();
 prompt.value = saved?.draft ?? '';
 if (saved?.mode && ['Ask', 'Explore', 'Plan', 'Build', 'Review'].includes(saved.mode)) { mode.value = saved.mode; }
@@ -39,13 +40,16 @@ element('composer').addEventListener('submit', event => {
 	event.preventDefault();
 	if (!prompt.value.trim() || !current?.sessionId || pending || !trusted || current.status !== 'attached') { return; }
 	pending = crypto.randomUUID(); controls();
+	submittedDraft = prompt.value;
 	vscode.postMessage({ type: 'submit', requestId: pending, sessionId: current.sessionId, text: prompt.value, mode: mode.value });
 });
 window.addEventListener('message', (event: MessageEvent) => {
+	// The IDE forwards host messages from this webview's own origin.
+	if (event.origin !== window.origin || !event.data || typeof event.data !== 'object') { return; }
 	const message = event.data;
 	if (message.type === 'submitted' && message.requestId === pending) {
-		if (message.accepted) { prompt.value = ''; save(); }
-		pending = undefined; controls(); return;
+		if (message.accepted && prompt.value === submittedDraft) { prompt.value = ''; save(); }
+		pending = undefined; submittedDraft = undefined; controls(); return;
 	}
 	if (message.type !== 'state') { return; }
 	current = message.state as SharedSessionState | undefined;

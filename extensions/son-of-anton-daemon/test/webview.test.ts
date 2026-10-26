@@ -40,12 +40,28 @@ function mount() {
 		status: 'attached', sessionId: '11111111-1111-1111-1111-111111111111',
 		projection: { title: 'Shared session', rows: [], activeRuns: [], approvals: [], questions: [], historyTruncated: false }
 	};
-	const receive = (message: object): void => { dom.window.dispatchEvent(new dom.window.MessageEvent('message', { data: message })); };
+	const receive = (message: object, origin = dom.window.origin): void => { dom.window.dispatchEvent(new dom.window.MessageEvent('message', { data: message, origin })); };
 	const update = (trusted = true): void => receive({ type: 'state', trusted, library: [], state, error: '' });
 	return { dom, sent, state, update, receive, html };
 }
 
 describe('shared session webview', () => {
+	it('rejects foreign-origin state changes and submission receipts', () => {
+		const view = mount();
+		view.receive({ type: 'state', trusted: true, library: [], state: view.state }, 'https://foreign.example');
+		expect(view.dom.window.document.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(true);
+		view.update();
+		const draft = view.dom.window.document.querySelector('textarea')!;
+		draft.value = 'Retain this prompt';
+		view.dom.window.document.querySelector('form')!.dispatchEvent(new view.dom.window.Event('submit', { cancelable: true }));
+		const requestId = view.sent.at(-1)!.requestId;
+		view.receive({ type: 'submitted', requestId, accepted: true }, 'https://foreign.example');
+		expect(draft.value).toBe('Retain this prompt');
+		expect(view.dom.window.document.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(true);
+		view.receive({ type: 'submitted', requestId, accepted: true });
+		expect(draft.value).toBe('');
+	});
+
 	it('preserves a draft after rejection and clears it only after its own accepted submission', () => {
 		const view = mount(); view.update();
 		const draft = view.dom.window.document.querySelector('textarea')!;
@@ -71,6 +87,17 @@ describe('shared session webview', () => {
 		expect(view.dom.window.document.querySelector('#transcript')!.textContent).toContain('<img');
 		expect(view.html).toContain('default-src \'none\'');
 		expect(view.html).toContain('script-src \'nonce-fixture-nonce\'');
+	});
+
+	it('keeps new typing when the previous prompt is accepted', () => {
+		const view = mount(); view.update();
+		const draft = view.dom.window.document.querySelector('textarea')!;
+		draft.value = 'First prompt';
+		view.dom.window.document.querySelector('form')!.dispatchEvent(new view.dom.window.Event('submit', { cancelable: true }));
+		draft.value = 'Next prompt';
+		view.receive({ type: 'submitted', requestId: view.sent.at(-1)!.requestId, accepted: true });
+		expect(draft.value).toBe('Next prompt');
+		expect(view.dom.window.document.querySelector<HTMLButtonElement>('#send')!.disabled).toBe(false);
 	});
 
 	it('disables prompts and approvals while untrusted or disconnected', () => {

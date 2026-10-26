@@ -27,11 +27,13 @@ Status: release candidate under validation, not a published or signed production
 | Built-in extension compilation | Passed |
 | Complete Linux IDE distribution | Built successfully |
 | Linux IDE installers | Debian package and tarball created; fresh extracted Debian package activated both extensions and queried the bundled graph |
-| Shared companion extension | 14 tests passed, including actual daemon/TUI handoff, graph query, knowledge, card supersession and secret-filter refusal |
+| Shared companion extension | 16 tests passed, including actual daemon/TUI handoff, graph query, knowledge, card supersession, secret-filter refusal, message-origin checks and draft ownership |
 | Packaged compatibility graph | 28 copied-runtime structural, freshness, overlay, responsiveness and recovery checks passed |
 | Installer/release scripts | 39 regressions passed, including package permissions, native ELF selection and sealed runtime integrity |
 
 Native GUI checks use a disposable loopback model, a temporary data directory and WebKitGTK WebDriver. The container supplies local development libraries and disables only the fixture renderer sandbox; daemon execution policy remains unchanged. No live-provider correctness, signing or marketplace publication is implied by these tests.
+
+Codypendent's [review CI](https://github.com/CodeHalwell/codypendent/actions/runs/40307540959) passes at `66ae3cbe1dfe4748fd737739284bbf07de1010cb`, including the complete Tauri application and Rust transport checks on Linux and macOS, dependency policy, generated protocol and the Linux native-window handoff.
 
 The companion tests exercised the exact release-profile CLI and confined UI-worker launcher shipped in the IDE package. Component workers also receive a self-contained Node 22.22.0 tree, pinned to official archive checksums with its licenses and a complete file/link seal. Installer verification authenticates that installed tree. macOS signing refreshes only native-binary hashes before signing the enclosing application; JavaScript resources retain their authenticated bytes. The final board and memory-outcome checks passed against the vendored SDK. Local Linux packages were built on Debian 13; their dependency floors are specific to that host and do not establish compatibility with older distributions.
 
