@@ -43,6 +43,11 @@ exports.run = async () => {
 	console.log('[installation-test] Activating Son of Anton');
 	await extension.activate(); assert.equal(extension.isActive, true);
 	console.log('[installation-test] Activated Son of Anton');
+	const shared = vscode.extensions.getExtension('son-of-anton.son-of-anton-daemon');
+	assert.ok(shared, 'Bundled shared runtime client is unavailable');
+	await shared.activate(); assert.equal(shared.isActive, true);
+	assert.equal(vscode.workspace.getConfiguration('sota').get('runtime.backend'), 'auto', 'Fresh installs must use automatic runtime selection');
+
 	const debuggerExtension = vscode.extensions.getExtension('ms-vscode.js-debug');
 	assert.ok(debuggerExtension, 'Bundled JavaScript debugger is unavailable');
 	assert.ok(debuggerExtension.packageJSON.contributes.debuggers.some(item => item.type === 'pwa-node'), 'Node.js debug adapter is missing');
@@ -50,7 +55,7 @@ exports.run = async () => {
 	assert.equal(debuggerExtension.isActive, true);
 	const debuggerInfo = { version: debuggerExtension.packageJSON.version, active: debuggerExtension.isActive, extensionPath: debuggerExtension.extensionPath };
 	const commands = await vscode.commands.getCommands(true);
-	const required = ['sota.openChat', 'sota.openTaskBoard', 'sota.openSetupWizard', 'sota.reviewWithCouncil', 'sota.diagnoseAcpAgents'];
+	const required = ['sota.openChat', 'sota.openTaskBoard', 'sota.openSetupWizard', 'sota.reviewWithCouncil', 'sota.diagnoseAcpAgents', 'sota.openSharedSessions', 'sota.daemon.graph', 'sota.daemon.board', 'sota.daemon.knowledge', 'sota.daemon.council'];
 	for (const command of required) { assert.ok(commands.includes(command), `Missing command ${command}`); }
 	// Read-only first-run surfaces must open without credentials or granting agent execution trust.
 	for (const command of ['sota.openChat', 'sota.openSetupWizard', 'sota.reviewWithCouncil']) { console.log(`[installation-test] Opening ${command}`); await vscode.commands.executeCommand(command); }
@@ -59,5 +64,5 @@ exports.run = async () => {
 	assert.ok(Object.keys(native).length, 'Native graph exports are missing');
 	const graph = await verifyGraph(extension);
 	console.log('[installation-test] Packaged graph query passed');
-	await fs.writeFile(process.env.SOTA_INSTALL_RESULT, JSON.stringify({ success: true, extensionPath: extension.extensionPath, debugger: debuggerInfo, commands: required, graph, graphExports: Object.keys(native), activationMs: Date.now() - started, memory: process.memoryUsage(), trusted: vscode.workspace.isTrusted }, null, 2));
+	await fs.writeFile(process.env.SOTA_INSTALL_RESULT, JSON.stringify({ success: true, extensionPath: extension.extensionPath, debugger: debuggerInfo, sharedRuntime: { extensionPath: shared.extensionPath, backend: process.platform === 'win32' ? 'native' : 'codypendent' }, commands: required, graph, graphExports: Object.keys(native), activationMs: Date.now() - started, memory: process.memoryUsage(), trusted: vscode.workspace.isTrusted }, null, 2));
 };

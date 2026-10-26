@@ -181,12 +181,15 @@ jobs:
           npm --prefix son-of-anton-core ci
           npm --prefix son-of-anton-cli ci
           npm --prefix extensions/son-of-anton ci --include=dev
+          npm --prefix extensions/son-of-anton-daemon ci --include=dev
           npm --prefix services/code-graph/mcp-server ci
       - name: Compile before validation
         run: |
           npm --prefix son-of-anton-core run build
           npm --prefix son-of-anton-cli run build
           npm --prefix services/code-graph/mcp-server run build
+          npm --prefix extensions/son-of-anton-daemon run typecheck
+          npm --prefix extensions/son-of-anton-daemon run build
           node node_modules/typescript/bin/tsc -p extensions/son-of-anton/tsconfig.json --noEmit
           node node_modules/typescript/bin/tsc -p extensions/son-of-anton/tsconfig.test.json --noEmit
           npx tsgo --project extensions/son-of-anton/tsconfig.json --noEmit
@@ -200,14 +203,25 @@ jobs:
           node --test son-of-anton-core/dist/llm/LmStudioEndpointSecurity.test.js son-of-anton-core/dist/llm/OllamaEndpointSecurity.test.js son-of-anton-core/dist/llm/BedrockDiscovery.test.js son-of-anton-core/dist/llm/ProviderDiscoveryAcp.test.js
           node --test son-of-anton-core/dist/agents/OrchestratorReassignment.test.js
           node --test son-of-anton-cli/dist/test/updateInstall.test.js son-of-anton-cli/dist/test/updateDiscovery.test.js
-          node --test scripts/test/ide-release.test.mjs scripts/test/ide-package.test.mjs scripts/test/staged-directory.test.mjs
+          node --test scripts/test/ide-release.test.mjs scripts/test/ide-package.test.mjs scripts/test/staged-directory.test.mjs scripts/test/elf-runtime.test.mjs scripts/test/install-permissions.test.mjs
       - name: IDE host regressions
         working-directory: extensions/son-of-anton
         run: npm test -- --grep '^(Chat transcript write ownership|Conversation revision compare-and-swap|Conversation branch failure recovery|Provider Finder configuration boundary|Conversation history activation|Chat checkpoint index recovery|Durable checkpoint conversation rewind|Permanent conversation deletion|ACP chat model routing|Impact navigation identities|Chat turn ownership|Chat workflow upgrades|IDE releases and integration profiles|Integration profile route persistence|Board reassignment execution integration|Board dependency planning and agent proposals) ' --fail-zero
+      - name: Shared daemon session regressions
+        if: runner.os != 'Windows'
+        run: npm --prefix extensions/son-of-anton-daemon test
       - name: Graph watcher regressions
         run: node --test services/code-graph/mcp-server/test/incremental.test.mjs
       - name: Build native code graph
         run: node scripts/build-codegraph-runtime.mjs
+      - name: Build bundled shared runtime
+        run: node scripts/build-codypendent-runtime.mjs
+      - name: Native shared runtime handoff
+        if: runner.os != 'Windows'
+        env:
+          CODYPENDENT_TEST_BINARY: ${{ github.workspace }}/extensions/son-of-anton-daemon/runtime/codypendent/codypendent
+          CODYPENDENT_TEST_TUI: '1'
+        run: npm --prefix extensions/son-of-anton-daemon test
       - name: Save compiled native graph dependencies
         if: steps.native-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4

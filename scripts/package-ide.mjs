@@ -9,6 +9,8 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { withStagedDirectory } from './staged-directory.mjs';
 import { ideReleasePolicy } from './ide-release-policy.mjs';
+import { needsNativeLibraries } from './elf-runtime.mjs';
+import { installPermissions } from './install-permissions.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const product = JSON.parse(await readFile(path.join(root, 'product.json')));
@@ -22,7 +24,7 @@ const destination = path.join(root, '.build/ide-release', target);
 await withStagedDirectory(destination, async output => {
 	const run = (command, args, options = {}) => {
 		const result = spawnSync(command, args, { cwd: root, encoding: 'utf8', stdio: 'inherit', ...options });
-		if (result.error || result.status !== 0) { throw new Error(`${path.basename(command)} failed (${result.status}): ${result.error?.message ?? ''}`); }
+		if (result.error || result.status !== 0) { throw new Error(`${path.basename(command)} failed (${result.status}): ${result.error?.message ?? result.stderr?.slice(-16_000) ?? ''}`); }
 		return result.stdout?.trim();
 	};
 	const app = process.platform === 'darwin' ? path.join(source, `${product.nameLong}.app`) : source;
@@ -80,6 +82,7 @@ await withStagedDirectory(destination, async output => {
 		assets.push(setup);
 		const zip = `${prefix}.zip`; run('7z', ['a', '-tzip', path.join(output, zip), '.'], { cwd: source }); assets.push(zip);
 	} else {
+		await installPermissions(source);
 		const tar = `${prefix}.tar.gz`; run('tar', ['-czf', path.join(output, tar), '-C', path.dirname(source), path.basename(source)]); assets.push(tar);
 		// Generate dependencies from every shipped ELF executable/native addon on this native runner.
 		const staging = path.join(output, 'deb-content'); await mkdir(staging);
@@ -99,24 +102,28 @@ await withStagedDirectory(destination, async output => {
 		async function collect(directory) {
 			for (const entry of await readdir(directory, { withFileTypes: true })) {
 				const file = path.join(directory, entry.name);
-				if (entry.isDirectory()) { await collect(file); }
+				// Optional npm prebuilds include musl alongside glibc. This installer
+				// targets Electron's glibc ABI; those alternatives are not loaded.
+				if (entry.isDirectory()) { if (!/(?:^|-)musl(?:-|$)/.test(entry.name)) { await collect(file); } }
 				else if (entry.isFile() && (/\.(node|so(?:\.\d+)*)$/.test(entry.name) || (await stat(file)).mode & 0o111)) {
-					const data = await readFile(file); if (!data.subarray(0, 4).equals(Buffer.from([127, 69, 76, 70]))) { continue; }
+					const data = await readFile(file); if (!needsNativeLibraries(data)) { continue; }
 					elf.push(file); libraries.add(directory);
 				}
 			}
 		}
 		await collect(application);
+		await mkdir(path.join(staging, 'DEBIAN'));
 		await mkdir(path.join(staging, 'debian')); await writeFile(path.join(staging, 'debian/control'), `Source: ${product.applicationName}\nSection: editors\nPriority: optional\nMaintainer: Son of Anton Contributors <noreply@github.com>\n\nPackage: ${product.applicationName}\nArchitecture: amd64\nDescription: Son of Anton IDE\n`);
 		const generated = run('dpkg-shlibdeps', ['-O', '--ignore-missing-info', ...[...libraries].map(directory => `-l${directory}`), ...elf.map(file => `-e${file}`)], { cwd: staging, stdio: 'pipe' });
 		const dependencies = generated.split('\n').find(line => line.startsWith('shlibs:Depends='))?.slice('shlibs:Depends='.length);
 		if (!dependencies) { throw new Error('No runtime dependencies were generated'); }
-		await rm(path.join(staging, 'debian'), { recursive: true }); await mkdir(path.join(staging, 'DEBIAN'));
+		await rm(path.join(staging, 'debian'), { recursive: true });
 		await writeFile(path.join(staging, 'DEBIAN/control'), `Package: ${product.applicationName}\nVersion: ${pkg.version}\nArchitecture: amd64\nMaintainer: Son of Anton Contributors <noreply@github.com>\nSection: editors\nPriority: optional\nDepends: ${dependencies}, ca-certificates, libgtk-3-0, libnss3, xdg-utils\nHomepage: https://github.com/CodeHalwell/Son-Of-Anton\nDescription: Son of Anton IDE\n AI-assisted development environment with bundled code graph.\n`);
 		await writeFile(path.join(staging, 'DEBIAN/postinst'), '#!/bin/sh\nset -e\nupdate-desktop-database /usr/share/applications || true\n'); await chmod(path.join(staging, 'DEBIAN/postinst'), 0o755);
+		await installPermissions(staging);
 		await chmod(path.join(application, 'chrome-sandbox'), 0o4755);
 		const deb = `${prefix}.deb`;
-		try { run('dpkg-deb', ['--root-owner-group', '-Zxz', '--build', staging, path.join(output, deb)]); assets.push(deb); }
+		try { run('dpkg-deb', ['--root-owner-group', '-Zxz', '--build', staging, path.join(output, deb)], { env: { ...process.env, DPKG_DEB_THREADS_MAX: '2' } }); assets.push(deb); }
 		finally { await rm(staging, { recursive: true, force: true }); }
 	}
 	const files = await Promise.all(assets.map(async name => { const bytes = await readFile(path.join(output, name)); return { name, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') }; }));

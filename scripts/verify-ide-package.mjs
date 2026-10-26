@@ -72,6 +72,15 @@ try {
 	const cli = path.join(resources, 'out/cli.js');
 	assert.match(run(binary, [cli, '--version', '--user-data-dir', path.join(directory, 'profile')], { env: { ...env, ELECTRON_RUN_AS_NODE: '1' } }), new RegExp(manifest.ideVersion.replaceAll('.', '\\.')));
 	const extension = path.join(resources, 'extensions/son-of-anton');
+	if (process.platform !== 'win32') {
+		const directory = path.join(resources, 'extensions/son-of-anton-daemon/runtime/codypendent');
+		const shared = JSON.parse(await readFile(path.join(directory, 'manifest.json')));
+		assert.deepEqual([shared.platform, shared.arch, shared.profile], [process.platform, process.arch, 'release']);
+		assert.ok(shared.files.some(file => file.name === 'codypendent-ui-worker-launcher'), 'Missing confined worker launcher');
+		assert.match(run(path.join(directory, 'codypendent'), ['--version']), new RegExp(`^codypendent ${shared.version.replaceAll('.', '\\.')}\\b`));
+	}
+	assert.ok((await readFile(path.join(resources, 'extensions/son-of-anton-daemon/dist/extension.cjs'))).length, 'Missing shared daemon client');
+	assert.ok((await readFile(path.join(resources, 'extensions/son-of-anton-daemon/dist/webview.js'))).length, 'Missing shared session view');
 	for (const file of ['dist/extension.js', 'dist/board.js', 'media/chat-webview.js', 'dist/prompts/anton-orchestrator.prompt.md', 'runtime/codegraph/index.cjs', 'runtime/codegraph/engine-worker.cjs', 'runtime/codegraph/node_modules/@son-of-anton/codegraph-napi/engine.node']) { assert.ok((await readFile(path.join(extension, file))).length, `Missing bundled ${file}`); }
 	const runtime = JSON.parse(await readFile(path.join(extension, 'runtime/codegraph/manifest.json')));
 	assert.deepEqual([runtime.platform, runtime.arch], [process.platform, process.arch]);
@@ -82,7 +91,7 @@ try {
 	const reportPath = path.join(directory, 'result.json');
 	// This credential-free fixture must not open or alter the developer's OS keychain.
 	const args = ['--user-data-dir', path.join(directory, 'profile'), '--extensions-dir', path.join(directory, 'extensions'), '--use-inmemory-secretstorage', '--disable-telemetry', '--disable-updates', '--skip-release-notes', '--extensionDevelopmentPath', helper, '--extensionTestsPath', path.join(helper, 'tests.cjs'), workspace];
-	if (process.platform === 'linux' && process.getuid?.() === 0) { args.push('--no-sandbox'); }
+	if (process.platform === 'linux' && (process.getuid?.() === 0 || process.env.SOTA_TEST_DISABLE_SANDBOX === '1')) { args.push('--no-sandbox'); }
 	if (process.env.SOTA_INSTALL_INSPECT) { args.push('--inspect-brk-extensions=9334'); }
 	await new Promise((resolve, reject) => {
 		let logs = '', finished = false, timedOut = false;

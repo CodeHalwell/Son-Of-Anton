@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 import * as vscode from 'vscode';
 import { ConversationStore, type ConversationRecord } from './ConversationStore';
+import { hasSharedSession } from '../daemon/DaemonChat';
 
 type ConversationTarget = string | { readonly summary: { readonly id: string } } | undefined;
 
@@ -26,7 +27,7 @@ export class ConversationActions {
 		const record = this.resolve(target);
 		if (!record) { return; }
 		const title = await vscode.window.showInputBox({
-			prompt: vscode.l10n.t('Rename Conversation'),
+			prompt: hasSharedSession(record.summary.id) ? vscode.l10n.t('Rename IDE Bookmark') : vscode.l10n.t('Rename Conversation'),
 			value: record.summary.title,
 			validateInput: value => value.trim() ? undefined : vscode.l10n.t('Title cannot be empty.'),
 		});
@@ -41,7 +42,7 @@ export class ConversationActions {
 		try {
 			const action = vscode.l10n.t('Move to Trash');
 			const choice = await vscode.window.showWarningMessage(
-				vscode.l10n.t('Move conversation "{0}" to Trash? You can restore it from Manage Conversation History.', record.summary.title),
+				hasSharedSession(id) ? vscode.l10n.t('Move IDE bookmark "{0}" to Trash? The shared session and its transcript remain in Codypendent.', record.summary.title) : vscode.l10n.t('Move conversation "{0}" to Trash? You can restore it from Manage Conversation History.', record.summary.title),
 				{ modal: true }, action,
 			);
 			if (choice === action) { this.store.delete(id); }
@@ -53,7 +54,9 @@ export class ConversationActions {
 	restore(target: ConversationTarget): void { const id = typeof target === 'string' ? target : target?.summary.id; if (id) { this.store.restore(id); } }
 
 	async branch(target?: ConversationTarget, throughMessageIndex?: number): Promise<ConversationRecord | undefined> {
-		const record = this.resolve(target); if (!record?.messages.length) { return undefined; }
+		const record = this.resolve(target);
+		if (record && hasSharedSession(record.summary.id)) { void vscode.window.showInformationMessage(vscode.l10n.t('Open this shared session in Codypendent and use Backtrack to fork at a recorded checkpoint.')); return undefined; }
+		if (!record?.messages.length) { return undefined; }
 		let index = throughMessageIndex;
 		if (index === undefined) {
 			const choices = record.messages.flatMap((message, messageIndex) => {
@@ -105,6 +108,7 @@ export class ConversationActions {
 			left = picked ? this.store.load(picked.summary.id, true) : undefined;
 		}
 		if (!left) { return; }
+		if (hasSharedSession(left.summary.id) || hasSharedSession(right.summary.id)) { void vscode.window.showInformationMessage(vscode.l10n.t('Shared transcripts remain in Codypendent. Open the sessions there to inspect their complete history.')); return; }
 		const { exportConversationAsMarkdown } = await import('./ConversationExporter');
 		const leftDocument = await vscode.workspace.openTextDocument({ content: exportConversationAsMarkdown(left, { includeTimestamps: false, includeMetadata: false }), language: 'markdown' });
 		const rightDocument = await vscode.workspace.openTextDocument({ content: exportConversationAsMarkdown(right, { includeTimestamps: false, includeMetadata: false }), language: 'markdown' });
@@ -122,13 +126,13 @@ export class ConversationActions {
 		const query = await vscode.window.showInputBox({ prompt: vscode.l10n.t('Search conversation titles and messages (leave empty for all)') });
 		if (query === undefined) { return; }
 		const matches = await this.store.searchAsync({ scope: view.scope, query, limit: Number.MAX_SAFE_INTEGER });
-		const picked = await vscode.window.showQuickPick(matches.items.map(summary => ({ label: `${summary.pinned ? '$(pin) ' : ''}${summary.title}`, description: summary.workspaceName, detail: vscode.l10n.t('{0} messages', summary.messageCount), summary })), { title: vscode.l10n.t('Conversation History'), matchOnDescription: true });
+		const picked = await vscode.window.showQuickPick(matches.items.map(summary => ({ label: `${summary.pinned ? '$(pin) ' : ''}${summary.title}`, description: summary.workspaceName, detail: hasSharedSession(summary.id) ? vscode.l10n.t('Shared session · IDE bookmark') : vscode.l10n.t('{0} messages', summary.messageCount), summary })), { title: vscode.l10n.t('Conversation History'), matchOnDescription: true });
 		if (!picked) { return; }
 		if (view.scope === 'trash') {
 			const action = await vscode.window.showQuickPick([vscode.l10n.t('Restore'), vscode.l10n.t('Delete Permanently')]);
 			if (action === vscode.l10n.t('Restore')) { this.store.restore(picked.summary.id); }
 			if (action === vscode.l10n.t('Delete Permanently')) {
-				const confirmed = await vscode.window.showWarningMessage(vscode.l10n.t('Permanently delete "{0}" and its retained conversation data? This cannot be undone.', picked.summary.title), { modal: true }, vscode.l10n.t('Delete Permanently'));
+				const confirmed = await vscode.window.showWarningMessage(hasSharedSession(picked.summary.id) ? vscode.l10n.t('Remove IDE bookmark "{0}" and its local metadata? The shared transcript remains in Codypendent. Manage its retention in Codypendent.', picked.summary.title) : vscode.l10n.t('Permanently delete "{0}" and its retained conversation data? This cannot be undone.', picked.summary.title), { modal: true }, vscode.l10n.t('Delete Permanently'));
 				if (confirmed) { this.store.permanentDelete(picked.summary.id); }
 			}
 		} else {

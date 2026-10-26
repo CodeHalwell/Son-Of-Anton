@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
+import { usesDaemonRuntime } from '../daemon/DaemonChat';
 import { onDiscoveredModelsChanged } from 'son-of-anton-core/llm/DiscoveredModels';
 import type { LlmClient, ModelId } from 'son-of-anton-core/llm/LlmClient';
 import { MODEL_METADATA, type ModelCapability } from 'son-of-anton-core/llm/modelMetadata';
@@ -93,6 +94,7 @@ export class ProviderFinder implements vscode.Disposable {
 	}
 
 	private async automaticRefresh(force = false): Promise<void> {
+		if (usesDaemonRuntime()) { return; }
 		if (this.disposed || !vscode.workspace.getConfiguration('sota').get<boolean>('discovery.enabled', true)) { return; }
 		try { await this.refresh({ force }); } catch { /* Explicit refresh surfaces status; background scans remain unobtrusive. */ }
 	}

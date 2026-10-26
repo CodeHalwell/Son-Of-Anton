@@ -44,6 +44,7 @@ export const dirs = [
 	'extensions/search-result',
 	'extensions/simple-browser',
 	'extensions/son-of-anton',
+	'extensions/son-of-anton-daemon',
 	'extensions/tunnel-forwarding',
 	'extensions/terminal-suggest',
 	'extensions/typescript-language-features',

@@ -9,7 +9,7 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 if (Number(process.versions.node.split('.')[0]) !== 22) { throw new Error('Use the Node 22 toolchain declared in .nvmrc before bootstrapping.'); }
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const run = (command, args, cwd = root) => execFileSync(command, args, { cwd, stdio: 'inherit' });
-const packages = ['son-of-anton-core', 'son-of-anton-cli', 'services/code-graph/mcp-server', 'extensions/son-of-anton'];
+const packages = ['son-of-anton-core', 'son-of-anton-cli', 'services/code-graph/mcp-server', 'extensions/son-of-anton', 'extensions/son-of-anton-daemon'];
 for (const packageName of packages) {
 	const directory = path.join(root, packageName);
 	if (!process.argv.includes('--skip-install')) { run(npm, ['ci', '--no-audit', '--no-fund'], directory); }
@@ -18,5 +18,6 @@ for (const packageName of packages) {
 run(process.execPath, ['scripts/sync-service-auth.mjs']);
 run(process.execPath, ['scripts/sync-acp-runtime.mjs']);
 run(process.execPath, ['scripts/build-codegraph-runtime.mjs', ...(process.argv.includes('--debug') ? ['--debug'] : [])]);
+run(process.execPath, ['scripts/build-codypendent-runtime.mjs', ...(process.argv.includes('--debug') ? ['--debug'] : [])]);
 run(process.execPath, ['--import', 'tsx', 'esbuild.mts'], path.join(root, 'extensions/son-of-anton'));
 console.log('Son of Anton runtime, CLI, extension and native graph are built. Run npm run test:sota:offline next.');

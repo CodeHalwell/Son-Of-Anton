@@ -28,9 +28,13 @@ node son-of-anton-cli/dist/cli.js chat --no-tui "Explain this project"
 
 `doctor` makes no model requests. It reports local tools, credential presence, model tool support and installed graph assets, with repair actions. Account access and live graph readiness are separate checks.
 
+## Shared sessions with Codypendent
+
+On Linux and macOS, the primary chat, agent participants and inline assistance use the bundled Codypendent runtime by default. **Open Shared Conversation** resumes a session from the native clients; **Open Shared Sessions** exposes activity, approvals and questions. Closing the editor leaves runs alive. The task board and graph use shared daemon state. Existing local histories remain available through the explicit native compatibility runtime, which is also the Windows default. See the [runtime and migration guide](docs/shared-runtime.md), [release evidence](docs/production-readiness.md) and [client guide](extensions/son-of-anton-daemon/README.md).
+
 ## Code graph
 
-The embedded graph requires no containers. It indexes supported source files, watches edits and removes deleted or moved symbols. A database belongs to one canonical workspace. Open the Code Graph status item to inspect initialization or errors.
+Shared mode uses Codypendent's structural graph and preserves evidence confidence. In native compatibility mode, the embedded graph requires no containers. It indexes supported source files, watches edits and removes deleted or moved symbols. A database belongs to one canonical workspace. Open the Code Graph status item to inspect initialization or errors.
 
 The default embedder is `none`: structural search works; semantic search is unavailable until an embedder is configured. Provider embeddings send selected source code to that provider and may incur charges. See the [graph guide](services/code-graph/README.md) for capabilities and packaged assets.
 

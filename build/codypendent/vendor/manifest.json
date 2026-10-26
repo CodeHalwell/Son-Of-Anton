@@ -1,0 +1,10 @@
+{
+	"version": "0.14.0",
+	"archive": "codypendent-source.tar.gz",
+	"sourceSha256": "8b30380037a6054d4a9d0a5e0f40798da3d4d9b8984c54fb247afb42b7c44464",
+	"archiveSha256": "71fc28d2ec21e9ca39e4179a233389fc070bbf25ccb72f4204a1b052e84385a5",
+	"repository": "https://github.com/CodeHalwell/codypendent",
+	"baseCommit": "a6a3c41391bcb9989b625f823a5104f36f6ea9b9",
+	"includesLocalChanges": false,
+	"files": 678
+}

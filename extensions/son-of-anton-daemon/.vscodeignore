@@ -1,0 +1,9 @@
+src/**
+test/**
+node_modules/**
+out/**
+vendor/*.tgz
+package-lock.json
+tsconfig*.json
+esbuild.mts
+dist/*.map

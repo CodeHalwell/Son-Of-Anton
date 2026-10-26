@@ -5,6 +5,7 @@
 
 import * as vscode from 'vscode';
 import { AgentStack } from 'son-of-anton-core/agents/AgentStackFactory';
+import { runDaemonParticipant, usesDaemonRuntime } from '../daemon/DaemonChat';
 
 /**
  * Registers VS Code chat participants for every agent in the supplied stack.
@@ -22,7 +23,7 @@ export function registerAgentParticipants(
 		const participant = vscode.chat.createChatParticipant(
 			`sota.${config.handle}`,
 			(request, chatContext, stream, token) =>
-				agent.handleChatRequest(request, chatContext, stream, token),
+				usesDaemonRuntime() ? runDaemonParticipant(request, chatContext, stream, token, config.description) : agent.handleChatRequest(request, chatContext, stream, token),
 		);
 
 		participant.iconPath = vscode.Uri.joinPath(context.extensionUri, 'media', 'icon.svg');
@@ -35,6 +36,7 @@ export function registerAgentParticipants(
 	// is conceptually a chat-adjacent action, not a core agent capability.
 	disposables.push(
 		vscode.commands.registerCommand('sota.recordMemory', async () => {
+			if (usesDaemonRuntime()) { await vscode.commands.executeCommand('sota.daemon.recordMemory'); return; }
 			const category = await vscode.window.showQuickPick(
 				['decision', 'convention', 'warning', 'context'],
 				{ placeHolder: 'Memory category' },

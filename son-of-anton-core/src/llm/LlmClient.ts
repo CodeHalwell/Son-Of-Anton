@@ -44,6 +44,7 @@ export interface CostSink {
 //     request time via `sota.bedrockModelMap` with sensible defaults.
 export type ModelId =
 	| DiscoveredModelId
+	| `daemon:${string}`
 	// Anthropic — short aliases (legacy; map to the latest Claude tier).
 	| 'opus'
 	| 'sonnet'
