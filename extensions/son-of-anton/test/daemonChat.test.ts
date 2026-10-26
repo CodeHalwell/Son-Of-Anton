@@ -136,7 +136,7 @@ suite('Shared inline assistance ownership', () => {
 	setup(() => {
 		const folders = mock.workspace.workspaceFolders;
 		const editor = mock.window.activeTextEditor;
-		Object.assign(mock.workspace, { workspaceFolders: [{ uri: { scheme: 'file', fsPath: '/workspace' } }] });
+		Object.assign(mock.workspace, { workspaceFolders: [{ uri: { scheme: 'file', fsPath: process.cwd() } }] });
 		Object.assign(mock.window, { activeTextEditor: undefined });
 		client = undefined as unknown as FakeSession; internal = undefined; closed = 0;
 		restore = () => { Object.assign(mock.workspace, { workspaceFolders: folders }); Object.assign(mock.window, { activeTextEditor: editor }); };
