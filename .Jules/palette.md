@@ -1,0 +1,3 @@
+## 2024-05-14 - Localizing ARIA Labels in Template Literals
+**Learning:** Hardcoding English strings for ARIA labels in template literals breaks internationalization (i18n). We found several instances of `<a id="scroll-to-top" role="button" aria-label="scroll to top" ...>` in webview-like editors.
+**Action:** Always wrap English string labels with the localization utility `localize` and then `escape()` the output when injecting it into a template literal. For example: `aria-label="${escape(localize('scrollToTop', 'Scroll to top'))}"`. This ensures non-English screen reader users receive proper native language context.
