@@ -85,8 +85,8 @@ jobs:
         with:
           command: check
           manifest-path: crates/Cargo.toml
-          arguments: --all-features --locked
-          command-arguments: --config crates/deny.toml advisories
+          arguments: --all-features --locked --config crates/deny.toml
+          command-arguments: advisories
 
   runtime-audit:
     name: Shipped dependency audit
