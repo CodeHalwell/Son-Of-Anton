@@ -49,7 +49,7 @@ This change contains Tier 1 additions, Tier 2 integration hooks and Tier 3 chang
 
 Text hygiene excludes the compressed vendor inputs and generated runtime directory. Separate source-archive integrity checks validate the vendored bytes, while the companion's TypeScript, CSS and test sources retain the repository's normal formatting, header and lint checks.
 
-The sealed Node tree must retain its symlinks and JSON bytes through extension assembly. Its resource files are excluded from JSON minification, and esbuild resource collection preserves its links. Signing refreshes the Node executable digest and native CLI/launcher digests before the outer application signature. Other runtime-resource changes fail integrity validation.
+The sealed Node tree must retain its symlinks and JSON bytes through extension assembly. Its resource files are excluded from JSON minification, and esbuild resource collection preserves its links. Application assembly retains upstream source maps and metadata folders in that tree. Signing refreshes the Node executable digest and native CLI/launcher digests before the outer application signature. Other runtime-resource changes fail integrity validation.
 
 ## Known limits
 

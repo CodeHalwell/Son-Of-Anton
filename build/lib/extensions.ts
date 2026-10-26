@@ -308,8 +308,10 @@ function fromLocalEsbuild(extensionPath: string, esbuildConfigFileName: string):
 				const stat = sealedRuntime ? fs.lstatSync(filePath) : fs.statSync(filePath);
 				return new File({
 					path: filePath, stat, base: extensionPath,
-					contents: stat.isSymbolicLink() ? null : fs.createReadStream(filePath),
-					symlink: stat.isSymbolicLink() ? fs.readlinkSync(filePath) : undefined
+					// A complete Node tree has thousands of files. Read its small
+					// resources sequentially to avoid exhausting macOS file handles.
+					contents: stat.isSymbolicLink() ? null : sealedRuntime ? fs.readFileSync(filePath) : fs.createReadStream(filePath),
+					...(stat.isSymbolicLink() ? { symlink: fs.readlinkSync(filePath) } : {})
 				});
 			});
 
