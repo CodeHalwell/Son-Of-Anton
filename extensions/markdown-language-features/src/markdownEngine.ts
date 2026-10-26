@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import type MarkdownIt from 'markdown-it';
+import type { Env, MarkdownIt, MarkdownItOptions, Token } from 'markdown-it';
 import * as vscode from 'vscode';
 import { ILogger } from './logging';
 import { MarkdownContributionProvider } from './markdownExtensions';
@@ -16,7 +16,7 @@ import { isOfScheme, Schemes } from './util/schemes';
 /**
  * Adds begin line index to the output via the 'data-line' data attribute.
  */
-const pluginSourceMap: MarkdownIt.PluginSimple = (md): void => {
+const pluginSourceMap = (md: MarkdownIt): void => {
 	// Set the attribute on every possible token.
 	md.core.ruler.push('source_map_data_attribute', (state): void => {
 		for (const token of state.tokens) {
@@ -41,7 +41,7 @@ const pluginSourceMap: MarkdownIt.PluginSimple = (md): void => {
 /**
  * The markdown-it options that we expose in the settings.
  */
-type MarkdownItConfig = Readonly<Required<Pick<MarkdownIt.Options, 'breaks' | 'linkify' | 'typographer'>>>;
+type MarkdownItConfig = Readonly<Required<Pick<MarkdownItOptions, 'breaks' | 'linkify' | 'typographer'>>>;
 
 class TokenCache {
 	private _cachedDocument?: {
@@ -49,9 +49,9 @@ class TokenCache {
 		readonly version: number;
 		readonly config: MarkdownItConfig;
 	};
-	private _tokens?: MarkdownIt.Token[];
+	private _tokens?: Token[];
 
-	public tryGetCached(document: ITextDocument, config: MarkdownItConfig): MarkdownIt.Token[] | undefined {
+	public tryGetCached(document: ITextDocument, config: MarkdownItConfig): Token[] | undefined {
 		if (this._cachedDocument
 			&& this._cachedDocument.uri.toString() === document.uri.toString()
 			&& document.version >= 0 && this._cachedDocument.version === document.version
@@ -63,7 +63,7 @@ class TokenCache {
 		return undefined;
 	}
 
-	public update(document: ITextDocument, config: MarkdownItConfig, tokens: MarkdownIt.Token[]) {
+	public update(document: ITextDocument, config: MarkdownItConfig, tokens: Token[]) {
 		this._cachedDocument = {
 			uri: document.uri,
 			version: document.version,
@@ -83,7 +83,7 @@ export interface RenderOutput {
 	containingImages: Set<string>;
 }
 
-interface RenderEnv {
+interface RenderEnv extends Env {
 	readonly containingImages: Set<string>;
 	readonly currentDocument: vscode.Uri | undefined;
 	readonly resourceProvider: WebviewResourceProvider | undefined;
@@ -93,7 +93,7 @@ interface RenderEnv {
 export interface IMdParser {
 	readonly slugifier: ISlugifier;
 
-	tokenize(document: ITextDocument): Promise<MarkdownIt.Token[]>;
+	tokenize(document: ITextDocument): Promise<Token[]>;
 }
 
 export class MarkdownItEngine implements IMdParser {
@@ -178,7 +178,7 @@ export class MarkdownItEngine implements IMdParser {
 		document: ITextDocument,
 		config: MarkdownItConfig,
 		engine: MarkdownIt
-	): MarkdownIt.Token[] {
+	): Token[] {
 		const cached = this._tokenCache.tryGetCached(document, config);
 		if (cached) {
 			return cached;
@@ -226,7 +226,7 @@ export class MarkdownItEngine implements IMdParser {
 		};
 	}
 
-	public async tokenize(document: ITextDocument): Promise<MarkdownIt.Token[]> {
+	public async tokenize(document: ITextDocument): Promise<Token[]> {
 		const config = this._getConfig(document.uri);
 		const engine = await this._getEngine(config);
 		return this._tokenizeDocument(document, config, engine);
@@ -247,14 +247,16 @@ export class MarkdownItEngine implements IMdParser {
 
 	private _addImageRenderer(md: MarkdownIt): void {
 		const original = md.renderer.rules.image;
-		md.renderer.rules.image = (tokens: MarkdownIt.Token[], idx: number, options, env: RenderEnv, self) => {
+		md.renderer.rules.image = (tokens: Token[], idx: number, options, env, self) => {
+			// render() supplies this extension-owned context to the parser.
+			const renderEnv = env as RenderEnv;
 			const token = tokens[idx];
 			const src = token.attrGet('src');
-			if (src) {
-				env.containingImages?.add(src);
+			if (typeof src === 'string' && src) {
+				renderEnv.containingImages?.add(src);
 
 				if (!token.attrGet('data-src')) {
-					token.attrSet('src', this._toResourceUri(src, env.currentDocument, env.resourceProvider));
+					token.attrSet('src', this._toResourceUri(src, renderEnv.currentDocument, renderEnv.resourceProvider));
 					token.attrSet('data-src', src);
 				}
 			}
@@ -269,7 +271,7 @@ export class MarkdownItEngine implements IMdParser {
 
 	private _addFencedRenderer(md: MarkdownIt): void {
 		const original = md.renderer.rules['fenced'];
-		md.renderer.rules['fenced'] = (tokens: MarkdownIt.Token[], idx: number, options, env, self) => {
+		md.renderer.rules['fenced'] = (tokens: Token[], idx: number, options, env, self) => {
 			const token = tokens[idx];
 			if (token.map?.length) {
 				token.attrJoin('class', 'hljs');
@@ -311,7 +313,7 @@ export class MarkdownItEngine implements IMdParser {
 
 	private _addNamedHeaders(md: MarkdownIt): void {
 		const original = md.renderer.rules.heading_open;
-		md.renderer.rules.heading_open = (tokens: MarkdownIt.Token[], idx: number, options, env: unknown, self) => {
+		md.renderer.rules.heading_open = (tokens: Token[], idx: number, options, env, self) => {
 			const title = this._tokenToPlainText(tokens[idx + 1]);
 			const slug = (env as RenderEnv).slugifier ? (env as RenderEnv).slugifier.add(title) : this.slugifier.fromHeading(title);
 			tokens[idx].attrSet('id', slug.value);
@@ -324,7 +326,7 @@ export class MarkdownItEngine implements IMdParser {
 		};
 	}
 
-	private _tokenToPlainText(token: MarkdownIt.Token): string {
+	private _tokenToPlainText(token: Token): string {
 		if (token.children) {
 			return token.children.map(x => this._tokenToPlainText(x)).join('');
 		}
@@ -342,7 +344,7 @@ export class MarkdownItEngine implements IMdParser {
 	private _addLinkRenderer(md: MarkdownIt): void {
 		const original = md.renderer.rules.link_open;
 
-		md.renderer.rules.link_open = (tokens: MarkdownIt.Token[], idx: number, options, env, self) => {
+		md.renderer.rules.link_open = (tokens: Token[], idx: number, options, env, self) => {
 			const token = tokens[idx];
 			const href = token.attrGet('href');
 			// A string, including empty string, may be `href`.
@@ -402,7 +404,7 @@ export class MarkdownItEngine implements IMdParser {
 	}
 }
 
-async function getMarkdownOptions(md: () => MarkdownIt): Promise<MarkdownIt.Options> {
+async function getMarkdownOptions(md: () => MarkdownIt): Promise<MarkdownItOptions> {
 	const hljs = (await import('highlight.js')).default;
 	return {
 		html: true,

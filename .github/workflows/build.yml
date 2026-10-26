@@ -74,6 +74,18 @@ jobs:
           path: out-build/
           retention-days: 1
 
+  runtime-audit:
+    name: Shipped dependency audit
+    needs: compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Audit every shipped package tree and Electron
+        run: node scripts/check-shipped-dependencies.mjs
+
   # ---------------------------------------------------------------------------
   # Son of Anton-specific package CI. The compile job above covers the VS Code
   # monolithic build; this matrix covers the three first-party SoA packages

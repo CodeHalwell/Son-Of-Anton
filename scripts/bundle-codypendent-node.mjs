@@ -12,13 +12,13 @@ import { fileURLToPath } from 'node:url';
 import { installPermissions } from './install-permissions.mjs';
 import { withStagedDirectory } from './staged-directory.mjs';
 
-const version = '22.22.0';
+const version = '22.23.4';
 const sealName = '.codypendent-runtime-seal.json';
-// Official https://nodejs.org/dist/v22.22.0/SHASUMS256.txt.
+// Official https://nodejs.org/dist/v22.23.4/SHASUMS256.txt (2026-10-20 security release).
 const checksums = {
-	'linux-x64': 'c33c39ed9c80deddde77c960d00119918b9e352426fd604ba41638d6526a4744',
-	'darwin-x64': '5ea50c9d6dea3dfa3abb66b2656f7a4e1c8cef23432b558d45fb538c7b5dedce',
-	'darwin-arm64': '5ed4db0fcf1eaf84d91ad12462631d73bf4576c1377e192d222e48026a902640',
+	'linux-x64': 'b8492284c76a54baf58d61668dd0e41ee0fc98adabf9503d30f05d08f55b4406',
+	'darwin-x64': 'efcc2b0db6f94bf53eddb038fe2b370277a042bd29e4f19b8f8e23598795b819',
+	'darwin-arm64': 'c9e1dbc748b33ed2d14f42445191ecaf14c56259c7a9a26d0042c49ec2b66428',
 };
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 

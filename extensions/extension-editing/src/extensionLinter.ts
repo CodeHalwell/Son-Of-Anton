@@ -303,7 +303,8 @@ export class ExtensionLinter {
 							end: tokenEnd
 						};
 					}
-					const image = token.type === 'image' && this.locateToken(text, begin, end, token, token.attrGet('src'));
+					const src = token.attrGet('src');
+					const image = token.type === 'image' && typeof src === 'string' && this.locateToken(text, begin, end, token, src);
 					const other = image || this.locateToken(text, begin, end, token, token.content);
 					return other || {
 						token,
@@ -313,7 +314,7 @@ export class ExtensionLinter {
 				});
 				return tokensAndPositions.concat(
 					...tokensAndPositions.filter(tnp => tnp.token.children && tnp.token.children.length)
-						.map(tnp => toTokensAndPositions.call(this, tnp.token.children, tnp.begin, tnp.end))
+						.map(tnp => toTokensAndPositions.call(this, tnp.token.children ?? [], tnp.begin, tnp.end))
 				);
 			}).call(this, tokens);
 
@@ -321,7 +322,8 @@ export class ExtensionLinter {
 
 			tokensAndPositions.filter(tnp => tnp.token.type === 'image' && tnp.token.attrGet('src'))
 				.map(inp => {
-					const src = inp.token.attrGet('src')!;
+					const src = inp.token.attrGet('src');
+					if (typeof src !== 'string') { return; }
 					const begin = text.indexOf(src, inp.begin);
 					if (begin !== -1 && begin < inp.end) {
 						this.addDiagnostics(diagnostics, document, begin, begin + src.length, src, Context.MARKDOWN, info);

@@ -47,7 +47,7 @@ Linux sandbox discovery probes actual confinement. An installed `bwrap` executab
 
 ## Builds and verification
 
-Use Node 22.22.0 and the repository's Rust toolchains. After changing the shared implementation:
+Use Node 22.23.4 and the repository's Rust toolchains. After changing the shared implementation:
 
 ```sh
 node scripts/sync-codypendent-protocol.mjs --source /path/to/codypendent
@@ -55,7 +55,7 @@ node scripts/sync-codypendent-runtime.mjs --source /path/to/codypendent
 node scripts/verify-codypendent-vendor.mjs
 ```
 
-Review both vendor manifests, including `includesLocalChanges`, rather than treating the recorded base commit as an exact clean-source claim. Build the runtime with `node scripts/build-codypendent-runtime.mjs`; release artifacts include the confined UI-worker launcher, native file hashes and a sealed Node 22.22.0 tree for component workers. Node archives are checked against pinned official checksums and retain their licenses. `CODYPENDENT_NODE_ARCHIVE` can supply the identical archive offline. Debug overrides are restricted to local verification and are rejected by installer verification.
+Review both vendor manifests, including `includesLocalChanges`, rather than treating the recorded base commit as an exact clean-source claim. Build the runtime with `node scripts/build-codypendent-runtime.mjs`; release artifacts include the confined UI-worker launcher, native file hashes and a sealed Node 22.23.4 tree for component workers. Node archives are checked against pinned official checksums and retain their licenses. `CODYPENDENT_NODE_ARCHIVE` can supply the identical archive offline. Debug overrides are restricted to local verification and are rejected by installer verification.
 
 The native compatibility graph normally uses ort-sys's pinned ONNX distribution. Offline Linux builders may explicitly supply ONNX Runtime 1.22.0 through `ORT_LIB_LOCATION` and `ORT_PREFER_DYNAMIC_LINK=1`, plus `ORT_LICENSE_FILE` and `ORT_NOTICES_FILE`. The builder verifies the SDK version and bundles the libraries, notices and hashes with an origin-relative loader path. It does not require a machine-wide ONNX installation.
 
