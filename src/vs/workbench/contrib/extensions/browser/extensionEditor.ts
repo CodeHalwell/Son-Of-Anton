@@ -14,6 +14,7 @@ import { Cache, CacheResult } from '../../../../base/common/cache.js';
 import { CancellationToken, CancellationTokenSource } from '../../../../base/common/cancellation.js';
 import { isCancellationError } from '../../../../base/common/errors.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
+import { escape } from '../../../../base/common/strings.js';
 import { KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
 import { Disposable, DisposableStore, MutableDisposable, dispose, toDisposable } from '../../../../base/common/lifecycle.js';
 import { Schemas, matchesScheme } from '../../../../base/common/network.js';
@@ -846,7 +847,7 @@ export class ExtensionEditor extends EditorPane {
 				</style>
 			</head>
 			<body>
-				<a id="scroll-to-top" role="button" aria-label="scroll to top" href="#"><span class="icon"></span></a>
+				<a id="scroll-to-top" role="button" aria-label="${escape(localize('scrollToTop', "Scroll to top"))}" href="#"><span class="icon"></span></a>
 				${body}
 			</body>
 		</html>`;
