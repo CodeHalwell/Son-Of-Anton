@@ -1,0 +1,10 @@
+# Keep security advisories blocking across every native graph target.
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "Reviewed 2026-10-26: paste is unmaintained, with no reported vulnerability or compatible replacement; transitive through tokenizers and tokenizers' matrix dependencies. Revisit when fastembed's compatible tokenizer drops it." },
+    { id = "RUSTSEC-2025-0119", reason = "Reviewed 2026-10-26: number_prefix is unmaintained, with no reported vulnerability or compatible upgrade; transitive through hf-hub's indicatif progress display. Revisit with a validated hf-hub upgrade." },
+]

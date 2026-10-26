@@ -181,9 +181,9 @@ jobs:
         run: node -e "if (process.platform + '-' + process.arch !== process.env.EXPECTED_TARGET) throw Error('Runner architecture mismatch')"
       - name: Install locked dependencies
         run: |
-          # Electron 43 headers need the modern compiler already present on this image.
+          # V8's mixed standard/GNU class attributes require Clang on Ubuntu 22.04.
           if [[ "$RUNNER_OS" == 'Linux' ]]; then
-            export CC=gcc-12 CXX=g++-12
+            export CC=clang-15 CXX=clang++-15
           fi
           npm ci
           npm --prefix son-of-anton-core ci
@@ -191,6 +191,8 @@ jobs:
           npm --prefix extensions/son-of-anton ci --include=dev
           npm --prefix extensions/son-of-anton-daemon ci --include=dev
           npm --prefix services/code-graph/mcp-server ci
+          # This excluded upstream extension is exercised by the UUID regression.
+          npm --prefix extensions/microsoft-authentication ci --ignore-scripts
       - name: Compile before validation
         run: |
           npm --prefix son-of-anton-core run build

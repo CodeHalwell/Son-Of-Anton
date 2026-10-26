@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installPermissions } from './install-permissions.mjs';
@@ -45,7 +45,7 @@ function entries(root) {
 
 /** Use the daemon's sealed file/link format, including all runtime licenses. */
 export async function sealCodypendentNode(root) {
-	await writeFile(path.join(root, sealName), JSON.stringify(entries(root)));
+	await writeFile(path.join(root, sealName), JSON.stringify(entries(root)), { mode: 0o644 });
 }
 
 /** Check the installed tree as well as the original downloaded archive. */
@@ -103,6 +103,11 @@ export async function bundleCodypendentNode(destination, options = {}) {
 	await withStagedDirectory(destination, async staged => {
 		const tar = await import('tar');
 		await tar.x({ file: archive, cwd: staged, strip: 1, strict: true });
+		if (options.noticeFile) {
+			const notices = path.join(staged, 'share/doc/codypendent');
+			await mkdir(notices, { recursive: true });
+			await copyFile(options.noticeFile, path.join(notices, 'TANTIVY_SSTABLE_LICENSE'));
+		}
 		await installPermissions(staged);
 		assert.equal(execFileSync(path.join(staged, 'bin/node'), ['--version'], { encoding: 'utf8' }).trim(), `v${version}`);
 		assert.ok((await readFile(path.join(staged, 'LICENSE'))).length, 'Node runtime license');

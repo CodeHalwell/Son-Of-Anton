@@ -38,6 +38,15 @@ async function verifyGraph(extension) {
 }
 exports.run = async () => {
 	console.log('[installation-test] Starting bundled extension checks');
+	// Exercise both API loaders: Node 24 must link ESM extensions without waiting
+	// on a loader thread that needs a response from the blocked extension host.
+	const esmProbe = path.join(__dirname, 'esm-vscode-probe.mjs');
+	try {
+		await fs.writeFile(esmProbe, 'export { workspace, commands } from "vscode";\n');
+		const api = await import(require('node:url').pathToFileURL(esmProbe).href);
+		assert.equal(api.workspace, vscode.workspace);
+		assert.equal(api.commands, vscode.commands);
+	} finally { await fs.rm(esmProbe, { force: true }); }
 	const started = Date.now(), extension = vscode.extensions.getExtension('son-of-anton.son-of-anton');
 	assert.ok(extension, `Built-in Son of Anton extension is unavailable (trusted=${vscode.workspace.isTrusted}; loaded=${vscode.extensions.all.map(item => item.id).join(', ')})`);
 	console.log('[installation-test] Activating Son of Anton');
