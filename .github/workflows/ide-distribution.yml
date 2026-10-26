@@ -162,7 +162,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             crates/target
-          key: ide-cargo-${{ matrix.os }}-${{ matrix.target }}-${{ hashFiles('crates/Cargo.lock', 'crates/rust-toolchain.toml') }}
+            .build/codypendent-target
+          key: ide-cargo-${{ matrix.os }}-${{ matrix.target }}-${{ hashFiles('crates/Cargo.lock', 'crates/rust-toolchain.toml', 'build/codypendent/vendor/manifest.json') }}
           restore-keys: ide-cargo-${{ matrix.os }}-${{ matrix.target }}-
       - name: Linux build and desktop dependencies
         if: runner.os == 'Linux'
@@ -230,6 +231,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             crates/target
+            .build/codypendent-target
           key: ${{ steps.native-cache.outputs.cache-primary-key }}
       - name: Build complete IDE distribution
         env:

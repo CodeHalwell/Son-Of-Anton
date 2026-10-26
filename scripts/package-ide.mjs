@@ -112,12 +112,14 @@ await withStagedDirectory(destination, async output => {
 			}
 		}
 		await collect(application);
-		await mkdir(path.join(staging, 'DEBIAN'));
 		await mkdir(path.join(staging, 'debian')); await writeFile(path.join(staging, 'debian/control'), `Source: ${product.applicationName}\nSection: editors\nPriority: optional\nMaintainer: Son of Anton Contributors <noreply@github.com>\n\nPackage: ${product.applicationName}\nArchitecture: amd64\nDescription: Son of Anton IDE\n`);
 		const generated = run('dpkg-shlibdeps', ['-O', '--ignore-missing-info', ...[...libraries].map(directory => `-l${directory}`), ...elf.map(file => `-e${file}`)], { cwd: staging, stdio: 'pipe' });
 		const dependencies = generated.split('\n').find(line => line.startsWith('shlibs:Depends='))?.slice('shlibs:Depends='.length);
 		if (!dependencies) { throw new Error('No runtime dependencies were generated'); }
 		await rm(path.join(staging, 'debian'), { recursive: true });
+		// Keep the temporary dpkg source metadata separate in time from the
+		// package metadata: DEBIAN and debian alias on case-insensitive volumes.
+		await mkdir(path.join(staging, 'DEBIAN'));
 		await writeFile(path.join(staging, 'DEBIAN/control'), `Package: ${product.applicationName}\nVersion: ${pkg.version}\nArchitecture: amd64\nMaintainer: Son of Anton Contributors <noreply@github.com>\nSection: editors\nPriority: optional\nDepends: ${dependencies}, ca-certificates, libgtk-3-0, libnss3, xdg-utils\nHomepage: https://github.com/CodeHalwell/Son-Of-Anton\nDescription: Son of Anton IDE\n AI-assisted development environment with bundled code graph.\n`);
 		await writeFile(path.join(staging, 'DEBIAN/postinst'), '#!/bin/sh\nset -e\nupdate-desktop-database /usr/share/applications || true\n'); await chmod(path.join(staging, 'DEBIAN/postinst'), 0o755);
 		await installPermissions(staging);
