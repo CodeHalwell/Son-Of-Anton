@@ -65,7 +65,7 @@ permissions:
 
 concurrency:
   group: ide-distribution-${{ github.ref }}
-  # Finish the active native matrix so its verified dependency cache is
+  # Finish the active native matrix so its compiled dependency cache is
   # available to the newest pending revision. GitHub coalesces pending runs.
   cancel-in-progress: false
 
@@ -206,7 +206,7 @@ jobs:
           node --test son-of-anton-core/dist/llm/LmStudioEndpointSecurity.test.js son-of-anton-core/dist/llm/OllamaEndpointSecurity.test.js son-of-anton-core/dist/llm/BedrockDiscovery.test.js son-of-anton-core/dist/llm/ProviderDiscoveryAcp.test.js
           node --test son-of-anton-core/dist/agents/OrchestratorReassignment.test.js
           node --test son-of-anton-cli/dist/test/updateInstall.test.js son-of-anton-cli/dist/test/updateDiscovery.test.js
-          node --test scripts/test/ide-release.test.mjs scripts/test/ide-package.test.mjs scripts/test/staged-directory.test.mjs scripts/test/elf-runtime.test.mjs scripts/test/install-permissions.test.mjs
+          node --test scripts/test/ide-release.test.mjs scripts/test/ide-package.test.mjs scripts/test/staged-directory.test.mjs scripts/test/elf-runtime.test.mjs scripts/test/install-permissions.test.mjs scripts/test/bundle-codypendent-node.test.mjs
       - name: IDE host regressions
         working-directory: extensions/son-of-anton
         run: npm test -- --grep '^(Chat transcript write ownership|Conversation revision compare-and-swap|Conversation branch failure recovery|Provider Finder configuration boundary|Conversation history activation|Chat checkpoint index recovery|Durable checkpoint conversation rewind|Permanent conversation deletion|ACP chat model routing|Impact navigation identities|Chat turn ownership|Chat workflow upgrades|IDE releases and integration profiles|Integration profile route persistence|Board reassignment execution integration|Board dependency planning and agent proposals) ' --fail-zero
@@ -216,8 +216,10 @@ jobs:
       - name: Graph watcher regressions
         run: node --test services/code-graph/mcp-server/test/incremental.test.mjs
       - name: Build native code graph
+        id: graph-build
         run: node scripts/build-codegraph-runtime.mjs
       - name: Build bundled shared runtime
+        id: shared-build
         run: node scripts/build-codypendent-runtime.mjs
       - name: Native shared runtime handoff
         if: runner.os != 'Windows'
@@ -226,7 +228,7 @@ jobs:
           CODYPENDENT_TEST_TUI: '1'
         run: npm --prefix extensions/son-of-anton-daemon test
       - name: Save compiled native graph dependencies
-        if: steps.native-cache.outputs.cache-hit != 'true'
+        if: always() && steps.native-cache.outputs.cache-hit != 'true' && steps.graph-build.outcome == 'success' && steps.shared-build.outcome == 'success'
         uses: actions/cache/save@v4
         with:
           path: |

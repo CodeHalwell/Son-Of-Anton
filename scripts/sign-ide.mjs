@@ -9,6 +9,7 @@ import { randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { refreshCodypendentRuntimeManifestSync } from './bundle-codypendent-node.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url)), target = path.resolve(process.argv[2]);
 const json = process.argv[3] === '--json';
@@ -21,12 +22,18 @@ const run = (command, args) => {
 };
 if (process.platform === 'darwin') {
 	const diskImage = path.extname(target).toLowerCase() === '.dmg';
+	const refreshRuntime = () => refreshCodypendentRuntimeManifestSync(path.join(target, 'Contents/Resources/app/extensions/son-of-anton-daemon/runtime/codypendent'));
 	const keys = ['MACOS_SIGNING_CERT_P12', 'MACOS_SIGNING_CERT_PASSWORD', 'MACOS_SIGNING_IDENTITY'];
 	const configured = keys.filter(key => process.env[key]);
 	if (configured.length && configured.length !== keys.length) { throw new Error('Configure all three macOS signing secrets or remove the incomplete configuration'); }
 	if (!configured.length) {
 		if (process.env.SOTA_REQUIRE_SIGNING === 'true') { throw new Error('Developer ID signing is required for this release'); }
 		run('codesign', ['--force', '--deep', '--sign', '-', target]);
+		if (!diskImage && refreshRuntime()) {
+			// Nested binaries are already signed. Seal those bytes, then update
+			// the enclosing app's resources without signing its children again.
+			run('codesign', ['--force', '--sign', '-', target]);
+		}
 		run('codesign', ['--verify', '--deep', '--strict', target]);
 		signing = 'ad-hoc';
 		if (!json) { console.log('macOS artifact is ad-hoc signed. Gatekeeper distribution signing is not configured.'); }
@@ -44,7 +51,11 @@ if (process.platform === 'darwin') {
 				run('codesign', ['--force', '--sign', process.env.MACOS_SIGNING_IDENTITY, '--keychain', keychain, '--timestamp', '--identifier', `${product.darwinBundleIdentifier}.dmg`, target]);
 			} else {
 				const { sign } = createRequire(new URL('../build/package.json', import.meta.url))('@electron/osx-sign');
-				await sign({ app: target, identity: process.env.MACOS_SIGNING_IDENTITY, keychain, platform: 'darwin', preAutoEntitlements: false, preEmbedProvisioningProfile: false, optionsForFile: file => ({ hardenedRuntime: true, entitlements: path.join(root, 'build/azure-pipelines/darwin', file.includes('Helper (GPU)') ? 'helper-gpu-entitlements.plist' : file.includes('Helper (Renderer)') ? 'helper-renderer-entitlements.plist' : file.includes('Helper (Plugin)') ? 'helper-plugin-entitlements.plist' : 'app-entitlements.plist') }) });
+				await sign({ app: target, identity: process.env.MACOS_SIGNING_IDENTITY, keychain, platform: 'darwin', preAutoEntitlements: false, preEmbedProvisioningProfile: false, optionsForFile: file => {
+					// osx-sign visits the root app after all its nested binaries.
+					if (path.resolve(file) === target) { refreshRuntime(); }
+					return { hardenedRuntime: true, entitlements: path.join(root, 'build/azure-pipelines/darwin', file.includes('Helper (GPU)') ? 'helper-gpu-entitlements.plist' : file.includes('Helper (Renderer)') ? 'helper-renderer-entitlements.plist' : file.includes('Helper (Plugin)') ? 'helper-plugin-entitlements.plist' : 'app-entitlements.plist') };
+				} });
 			}
 			run('codesign', ['--verify', '--deep', '--strict', target]);
 			signing = 'developer-id';

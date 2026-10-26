@@ -10,6 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as tar from 'tar';
 import { withStagedDirectory } from './staged-directory.mjs';
+import { bundleCodypendentNode } from './bundle-codypendent-node.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const vendor = path.join(root, 'build/codypendent/vendor');
@@ -53,8 +54,9 @@ await withStagedDirectory(destination, async staged => {
 		files.push({ name, sha256: sha256(await readFile(from)) });
 	}
 	await copyFile(path.join(vendor, 'LICENSE'), path.join(staged, 'LICENSE'));
+	const nodeRuntime = await bundleCodypendentNode(path.join(staged, 'node-runtime'));
 	await writeFile(path.join(staged, 'manifest.json'), JSON.stringify({ version: manifest.version, platform: process.platform, arch: process.arch,
-		profile: debug ? 'debug' : 'release', sourceSha256: manifest.sourceSha256, archiveSha256: manifest.archiveSha256, files,
+		profile: debug ? 'debug' : 'release', sourceSha256: manifest.sourceSha256, archiveSha256: manifest.archiveSha256, files, nodeRuntime,
 	}, null, '\t') + '\n');
 });
 console.log(`Codypendent runtime: ${destination}`);

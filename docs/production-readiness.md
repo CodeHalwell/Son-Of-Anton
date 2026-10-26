@@ -29,11 +29,11 @@ Status: release candidate under validation, not a published or signed production
 | Linux IDE installers | Debian package and tarball created; fresh extracted Debian package activated both extensions and queried the bundled graph |
 | Shared companion extension | 14 tests passed, including actual daemon/TUI handoff, graph query, knowledge, card supersession and secret-filter refusal |
 | Packaged compatibility graph | 28 copied-runtime structural, freshness, overlay, responsiveness and recovery checks passed |
-| Installer/release scripts | 35 regressions passed, including package permissions and native ELF selection |
+| Installer/release scripts | 39 regressions passed, including package permissions, native ELF selection and sealed runtime integrity |
 
 Native GUI checks use a disposable loopback model, a temporary data directory and WebKitGTK WebDriver. The container supplies local development libraries and disables only the fixture renderer sandbox; daemon execution policy remains unchanged. No live-provider correctness, signing or marketplace publication is implied by these tests.
 
-The companion tests exercised the exact release-profile CLI and confined UI-worker launcher shipped in the IDE package. The final board and memory-outcome checks passed against the vendored SDK. Local Linux packages were built on Debian 13; their dependency floors are specific to that host and do not establish compatibility with older distributions.
+The companion tests exercised the exact release-profile CLI and confined UI-worker launcher shipped in the IDE package. Component workers also receive a self-contained Node 22.22.0 tree, pinned to official archive checksums with its licenses and a complete file/link seal. Installer verification authenticates that installed tree. macOS signing refreshes only native-binary hashes before signing the enclosing application; JavaScript resources retain their authenticated bytes. The final board and memory-outcome checks passed against the vendored SDK. Local Linux packages were built on Debian 13; their dependency floors are specific to that host and do not establish compatibility with older distributions.
 
 Review CI identified existing dependency advisories. The pinned runtime now includes patched TLS, certificate, Tokio and ZIP dependencies; 541 focused Rust regressions passed after that update. Codypendent documents dated unmaintained-library exceptions under its existing dependency policy. Updated JavaScript SDK and frontend dependency trees audit clean. Final rebuilt installers and native CI are checked against the updated source pin before release.
 
@@ -48,6 +48,8 @@ Review CI identified existing dependency advisories. The pinned runtime now incl
 This change contains Tier 1 additions, Tier 2 integration hooks and Tier 3 changes to existing extension UI and build/installer scripts. The existing chat and inline surfaces need an adapter to use one daemon-owned session instead of starting competing runtimes. The existing assembly hooks must include the companion extension, verified SDK and native runtime in ordinary installers. Package permission normalization ensures installers built under a private umask remain readable and executable by their users; ELF selection avoids shipping incompatible optional native modules. Keeping these changes in the existing assembly path makes installer verification exercise the same product users receive. Senior engineer review is required before merge under the repository's modification-tier policy.
 
 Text hygiene excludes the compressed vendor inputs and generated runtime directory. Separate source-archive integrity checks validate the vendored bytes, while the companion's TypeScript, CSS and test sources retain the repository's normal formatting, header and lint checks.
+
+The sealed Node tree must retain its symlinks and JSON bytes through extension assembly. Its resource files are excluded from JSON minification, and esbuild resource collection preserves its links. Signing refreshes the Node executable digest and native CLI/launcher digests before the outer application signature. Other runtime-resource changes fail integrity validation.
 
 ## Known limits
 

@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { verifyCodypendentNode } from './bundle-codypendent-node.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url)), target = `${process.platform}-${process.arch}`;
 const output = path.join(root, '.build/ide-release', target);
@@ -77,6 +78,9 @@ try {
 		const shared = JSON.parse(await readFile(path.join(directory, 'manifest.json')));
 		assert.deepEqual([shared.platform, shared.arch, shared.profile], [process.platform, process.arch, 'release']);
 		assert.ok(shared.files.some(file => file.name === 'codypendent-ui-worker-launcher'), 'Missing confined worker launcher');
+		assert.ok(shared.nodeRuntime, 'Missing sealed component-worker Node runtime');
+		await verifyCodypendentNode(path.join(directory, 'node-runtime'), shared.nodeRuntime);
+		assert.equal(run(path.join(directory, 'node-runtime/bin/node'), ['--version']).trim(), `v${shared.nodeRuntime.version}`);
 		assert.match(run(path.join(directory, 'codypendent'), ['--version']), new RegExp(`^codypendent ${shared.version.replaceAll('.', '\\.')}\\b`));
 	}
 	assert.ok((await readFile(path.join(resources, 'extensions/son-of-anton-daemon/dist/extension.cjs'))).length, 'Missing shared daemon client');

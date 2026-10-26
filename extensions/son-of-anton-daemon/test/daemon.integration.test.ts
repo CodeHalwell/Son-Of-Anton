@@ -5,7 +5,7 @@
 import * as http from 'node:http';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -16,7 +16,7 @@ const binary = process.env.CODYPENDENT_TEST_BINARY;
 
 /** Actual Rust daemon + real Unix sockets; the model is a deterministic local HTTP fixture. */
 it.skipIf(!binary)('retains a real daemon run across client disconnect and replays it to a fresh client', async () => {
-	const directory = await mkdtemp(path.join(os.tmpdir(), 'anton-daemon-'));
+	const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), 'anton-daemon-')));
 	const data = path.join(directory, 'data'); const repository = path.join(directory, 'repo');
 	await Promise.all([mkdir(data), mkdir(repository)]);
 	await writeFile(path.join(repository, 'example.ts'), 'export function shared() { return true; }\n');
