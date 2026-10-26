@@ -351,7 +351,11 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 			return !set.has(platform);
 		}).map(ext => `!.build/extensions/${(ext as { name: string }).name}/**`);
 
-		const extensions = gulp.src(['.build/extensions/**', ...platformSpecificBuiltInExtensionsExclusions], { base: '.build', dot: true });
+		const sealedNodeGlob = '.build/extensions/son-of-anton-daemon/runtime/codypendent/node-runtime/**';
+		const extensions = gulp.src(['.build/extensions/**', `!${sealedNodeGlob}`, ...platformSpecificBuiltInExtensionsExclusions], { base: '.build', dot: true });
+		// The daemon authenticates this exact tree. Preserve links and every
+		// resource byte, including upstream source maps and metadata folders.
+		const sealedNodeRuntime = gulp.src(sealedNodeGlob, { base: '.build', dot: true, resolveSymlinks: false, allowEmpty: true });
 
 		const sourceFilterPattern = stripSourceMapsInPackagingTasks
 			? ['**', '!**/*.{js,css}.map']
@@ -541,10 +545,12 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 			} : {})
 		};
 
-		let result: NodeJS.ReadWriteStream = all
-			.pipe(util.skipDirectories())
-			.pipe(util.fixWin32DirectoryPermissions())
-			.pipe(filter(['**', '!**/.github/**'], { dot: true })) // https://github.com/microsoft/vscode/issues/116523
+		let result: NodeJS.ReadWriteStream = es.merge(
+			all.pipe(util.skipDirectories())
+				.pipe(util.fixWin32DirectoryPermissions())
+				.pipe(filter(['**', '!**/.github/**'], { dot: true })), // https://github.com/microsoft/vscode/issues/116523
+			sealedNodeRuntime.pipe(util.skipDirectories())
+		)
 			.pipe(electron(electronConfig))
 			.pipe(filter([
 				'**',

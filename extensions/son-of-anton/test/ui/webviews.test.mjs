@@ -65,7 +65,7 @@ async function openSurface(t, surface, width = 1440, initialState, suppliedHtml,
 		html = source.slice(source.indexOf('return /* html */`<!DOCTYPE html>')).split('`')[1];
 		const labelsSource = await readFile(path.join(extension, 'src/chat/chatUiStrings.ts'), 'utf8');
 		const labels = Object.fromEntries([...labelsSource.matchAll(/(\w+): vscode\.l10n\.t\('([^']*)'\)/g)].map(match => [match[1], match[2]]));
-		const values = { conversationId: 'initial-conversation', uiStringsJson: JSON.stringify(labels), 'this.webview.cspSource': 'https://sota.test', nonce: 'ui-fixture', cssUri: 'https://sota.test/chat.css', workflowsJsUri: 'https://sota.test/chat-workflows.js', webviewJsUri: 'https://sota.test/chat-webview.js', defaultModel: 'sonnet', initialTab: 'chat', specialistRolesJson: JSON.stringify(specialists), personasJson: JSON.stringify(PERSONAS), rosterJson: JSON.stringify(getRoster()), slashCommandsJson: '[]', modelMetadataJson: JSON.stringify(MODEL_METADATA) };
+		const values = { runtime: 'native', conversationId: 'initial-conversation', uiStringsJson: JSON.stringify(labels), 'this.webview.cspSource': 'https://sota.test', nonce: 'ui-fixture', cssUri: 'https://sota.test/chat.css', workflowsJsUri: 'https://sota.test/chat-workflows.js', webviewJsUri: 'https://sota.test/chat-webview.js', defaultModel: 'sonnet', initialTab: 'chat', specialistRolesJson: JSON.stringify(specialists), personasJson: JSON.stringify(PERSONAS), rosterJson: JSON.stringify(getRoster()), slashCommandsJson: '[]', modelMetadataJson: JSON.stringify(MODEL_METADATA) };
 		html = html.replace(/\$\{([^}]+)\}/g, (_, name) => { assert.ok(name in values, name); return values[name]; });
 	} else { html = '<!doctype html><html lang="en"><head><meta charset="utf-8"></head><body><div id="root"></div><script src="https://sota.test/board.js"></script></body></html>'; }
 	await context.route('**/*', async route => {
@@ -1914,4 +1914,91 @@ test('history filtering preserves the active title and explains empty search res
 	assert.equal(await page.locator('#conversationTitle').textContent(), 'Current project');
 	assert.equal(await page.locator('#historyNoResults').isVisible(), true);
 	assert.equal(await page.locator('#historyPaneEmpty').isVisible(), false);
+});
+
+
+test('shared chat retains drafts until durable acceptance and preserves newer typing', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const conversationId = 'initial-conversation';
+	await post(page, { type: 'daemonRuntime', connected: true });
+	await page.locator('#messageInput').fill('Build the shared harness');
+	await page.locator('#messageInput').press('Enter');
+	const sent = await page.evaluate(() => sentMessages.findLast(item => item.type === 'sendMessage'));
+	assert.equal(sent.model, 'daemon:default');
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Build the shared harness');
+	const scope = { conversationId, requestId: sent.requestId, turnId: 'shared-turn' };
+	await post(page, { type: 'turnAccepted', ...scope });
+	await page.locator('#messageInput').fill('A newer draft');
+	await post(page, { type: 'daemonAccepted', ...scope });
+	assert.equal(await page.locator('#messageInput').inputValue(), 'A newer draft');
+	await post(page, { type: 'requestSettled', ...scope });
+	await page.locator('#messageInput').press('Enter');
+	const next = await page.evaluate(() => sentMessages.findLast(item => item.type === 'sendMessage'));
+	await post(page, { type: 'turnAccepted', conversationId, requestId: next.requestId, turnId: 'next-turn' });
+	await post(page, { type: 'daemonAccepted', conversationId, requestId: next.requestId, turnId: 'next-turn' });
+	assert.equal(await page.locator('#messageInput').inputValue(), '');
+});
+
+test('shared chat retries a lost receipt with the same identity and restores its draft after reload', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	await post(page, { type: 'daemonRuntime', connected: true });
+	await page.locator('#messageInput').fill('Keep this prompt');
+	await page.locator('#messageInput').press('Enter');
+	const first = await page.evaluate(() => sentMessages.findLast(item => item.type === 'sendMessage'));
+	const scope = { conversationId: 'initial-conversation', requestId: first.requestId, turnId: 'lost-receipt' };
+	await post(page, { type: 'turnAccepted', ...scope });
+	await post(page, { type: 'daemonSubmissionFailed', ...scope });
+	await post(page, { type: 'requestSettled', ...scope });
+	await page.locator('#messageInput').press('Enter');
+	assert.equal(await page.evaluate(() => sentMessages.findLast(item => item.type === 'sendMessage').requestId), first.requestId);
+	const saved = await page.evaluate(() => savedWebviewState);
+	const reopened = await openSurface(t, 'chat', 400, saved);
+	await post(reopened, { type: 'daemonRuntime', connected: true });
+	assert.equal(await reopened.locator('#messageInput').inputValue(), 'Keep this prompt');
+	await reopened.locator('#messageInput').press('Enter');
+	assert.equal(await reopened.evaluate(() => sentMessages.findLast(item => item.type === 'sendMessage').requestId), first.requestId);
+});
+
+test('shared transcript reconciles remote runs and makes approvals explicit under CSP', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	await post(page, { type: 'daemonRuntime', connected: true });
+	await page.locator('#messageInput').fill('Unsent draft');
+	await page.locator('#messageInput').focus();
+	const state = { status: 'attached', sessionId: 'shared', projection: { title: 'Shared', rows: [
+		{ id: '1', kind: 'user', text: 'Explain it' }, { id: 'reply', kind: 'assistant', text: 'First reply' }
+	], activeRuns: ['run'], runs: [], questions: [{ id: 'question', questions: [{ question: 'Which branch?' }] }],
+		approvals: [{ id: 'approval', risk: 'High', action: '<img src=x onerror=alert(1)>' }], historyTruncated: false } };
+	await post(page, { type: 'daemonSnapshot', conversationId: 'initial-conversation', state, canWrite: true });
+	await frames(page);
+	await page.evaluate(() => { window.keptDaemonRow = document.querySelector('[data-daemon-row="1"]'); });
+	state.projection.rows[1].text += ' and more';
+	await post(page, { type: 'daemonSnapshot', conversationId: 'initial-conversation', state, canWrite: true });
+	assert.equal(await page.evaluate(() => keptDaemonRow === document.querySelector('[data-daemon-row="1"]')), true);
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Unsent draft');
+	assert.equal(await page.locator('.daemon-controls img').count(), 0);
+	await page.getByRole('button', { name: 'Approve Once', exact: true }).click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'daemonApprovalResponse', id: 'approval', action: 'approve', conversationId: 'initial-conversation' });
+	await page.getByRole('button', { name: 'Answer…', exact: true }).click();
+	assert.equal(await page.evaluate(() => sentMessages.at(-1).type), 'daemonAnswerQuestion');
+	await post(page, { type: 'daemonSnapshot', conversationId: 'initial-conversation', state: { ...state, status: 'reconnecting' }, canWrite: true });
+	assert.equal(await page.getByRole('button', { name: 'Approve Once', exact: true }).isDisabled(), true);
+	assert.match(await page.locator('#transcriptTaskMeter').textContent(), /—/);
+	await assertNoPageOverflow(page);
+});
+
+
+test('legacy histories remain readable and cannot silently start an empty shared conversation', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const conversationId = 'legacy-conversation';
+	await post(page, { type: 'loadConversation', conversationId, messages: [{ role: 'user', content: 'Original local prompt' }, { role: 'assistant', content: 'Original local answer' }] });
+	await post(page, { type: 'daemonRuntime', connected: true });
+	await post(page, { type: 'daemonLegacy', conversationId, legacy: true });
+	await page.locator('#messageInput').fill('Continue with this draft');
+	await post(page, { type: 'daemonSnapshot', conversationId, canWrite: true, state: { status: 'ready', projection: { title: 'Shared', rows: [], activeRuns: [], questions: [], approvals: [], historyTruncated: false } } });
+	assert.match(await page.locator('#messageList').textContent(), /Original local answer/);
+	await page.locator('#messageInput').press('Enter');
+	assert.equal(await page.evaluate(() => sentMessages.filter(item => item.type === 'sendMessage').length), 0);
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Continue with this draft');
+	await page.getByRole('button', { name: 'Choose Compatibility Runtime', exact: true }).click();
+	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'daemonLegacySettings', conversationId });
 });

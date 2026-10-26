@@ -74,6 +74,32 @@ jobs:
           path: out-build/
           retention-days: 1
 
+  native-rust-audit:
+    name: Native graph dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25
+        env:
+          RUSTUP_TOOLCHAIN: '1.85.0'
+        with:
+          command: check
+          manifest-path: crates/Cargo.toml
+          arguments: --all-features --locked --config crates/deny.toml
+          command-arguments: advisories
+
+  runtime-audit:
+    name: Shipped dependency audit
+    needs: compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Audit every shipped package tree and Electron
+        run: node scripts/check-shipped-dependencies.mjs
+
   # ---------------------------------------------------------------------------
   # Son of Anton-specific package CI. The compile job above covers the VS Code
   # monolithic build; this matrix covers the three first-party SoA packages

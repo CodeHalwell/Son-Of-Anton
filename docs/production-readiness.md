@@ -1,0 +1,74 @@
+# Shared runtime release readiness
+
+Status: release candidate under validation, not a published or signed production release. Evidence below is observed locally on Linux x64 on 2026-10-26. Cross-platform installers require their own successful native CI runs.
+
+## Verified implementation
+
+- Primary Anton chat, VS Code participants and inline assistance use the shared daemon by default on Unix. Native mode is an explicit compatibility choice, frozen until reload.
+- Session switching/disconnect does not cancel durable work. Acceptance, cancellation, replay, sequence gaps, request deadlines, history failures and draft ownership have regression coverage.
+- Repository task cards, graph reads/builds and knowledge browsing use authenticated daemon services. Knowledge scopes derive from owned sessions; foreign and missing sessions have indistinguishable refusals.
+- Linux sandbox detection checks whether confinement actually works. Tests cover namespace-disabled hosts without allowing an unrestricted fallback.
+- Legacy local conversations remain visible and cannot be silently overwritten by shared-session snapshots.
+- SDK and runtime build inputs have vendored archives, integrity checks, MIT notices and source provenance. Runtime extraction and artifact replacement are staged atomically.
+
+## Observed evidence
+
+| Boundary | Result |
+| --- | --- |
+| Rust workspace, all features | 4,055 passed; 9 ignored; no failures |
+| Strict Rust workspace Clippy | Passed with warnings denied |
+| Generated protocol/SDK | Deterministic generation checked; 492 tests passed |
+| Existing Codypendent editor client | 307 tests passed; typecheck passed |
+| Desktop frontend | 242 tests passed; TypeScript and Vite build passed |
+| Desktop Rust transport | 57 tests passed |
+| Complete Tauri app | Release executable and Debian package built with embedded frontend |
+| Actual desktop window | Both release executable and freshly extracted Debian package passed SDK-issued run display, disconnect, daemon completion, replay and shared curated memory checks |
+| Anton primary extension | 693 unit tests and 82 browser tests passed |
+| Built-in extension compilation | Passed |
+| Complete Linux IDE distribution | Built successfully |
+| Linux IDE installers | Debian package and tarball created; fresh extracted Debian package activated both extensions and queried the bundled graph |
+| Shared companion extension | 16 tests passed, including actual daemon/TUI handoff, graph query, knowledge, card supersession, secret-filter refusal, message-origin checks and draft ownership |
+| Packaged compatibility graph | 28 copied-runtime structural, freshness, overlay, responsiveness and recovery checks passed |
+| Installer/release scripts | 47 regressions passed, including package permissions, native ELF selection, sealed runtime integrity, sandbox validation and built-in parser compatibility |
+
+Native GUI checks use a disposable loopback model, a temporary data directory and WebKitGTK WebDriver. The container supplies local development libraries and disables only the fixture renderer sandbox; daemon execution policy remains unchanged. No live-provider correctness, signing or marketplace publication is implied by these tests.
+
+Codypendent's [review CI](https://github.com/CodeHalwell/codypendent/actions/runs/40347622469) passes at `c304483b249d954e037d093bf0df97c71a68c1a9`, including the complete Tauri application and Rust transport checks on Linux and macOS, dependency policy, generated protocol and the Linux native-window handoff.
+
+The companion tests exercised the exact release-profile CLI and confined UI-worker launcher shipped in the IDE package. Component workers also receive a self-contained Node 22.23.4 tree, using the 2026-10-20 security release and pinned official archive checksums with its licenses and a complete file/link seal. Installer verification authenticates that installed tree. macOS signing refreshes only native-binary hashes before signing the enclosing application; JavaScript resources retain their authenticated bytes. The final board and memory-outcome checks passed against the vendored SDK. Local Linux packages were built on Debian 13; their dependency floors are specific to that host and do not establish compatibility with older distributions.
+
+Review CI identified existing dependency advisories. The pinned runtime now includes patched TLS, certificate, Tokio and ZIP dependencies; 541 focused Rust regressions passed after that update. Codypendent documents dated unmaintained-library exceptions under its existing dependency policy. Updated JavaScript SDK and frontend dependency trees audit clean. Final rebuilt installers and native CI are checked against the updated source pin before release.
+
+## Review and remaining release gates
+
+- Run and retain the review branches' native CI evidence for both repositories.
+- Obtain native macOS installer, notarization and update/reinstall evidence before advertising a stable macOS release. Windows currently uses native compatibility mode; shared Unix sockets are not advertised there.
+- Retain CI evidence and review build/provenance changes before merging or publishing a stable release.
+
+### Modification-tier justification
+
+This change contains Tier 1 additions, Tier 2 integration hooks and Tier 3 changes to existing extension UI and build/installer scripts. The existing chat and inline surfaces need an adapter to use one daemon-owned session instead of starting competing runtimes. The existing assembly hooks must include the companion extension, verified SDK and native runtime in ordinary installers. Package permission normalization ensures installers built under a private umask remain readable and executable by their users; ELF selection avoids shipping incompatible optional native modules. Keeping these changes in the existing assembly path makes installer verification exercise the same product users receive. Senior engineer review is required before merge under the repository's modification-tier policy.
+
+Text hygiene excludes the compressed vendor inputs and generated runtime directory. Separate source-archive integrity checks validate the vendored bytes, while the companion's TypeScript, CSS and test sources retain the repository's normal formatting, header and lint checks.
+
+The sealed Node tree must retain its symlinks and JSON bytes through extension assembly. Its resource files are excluded from JSON minification, and esbuild resource collection preserves its links. Application assembly retains upstream source maps and metadata folders in that tree. Signing refreshes the Node executable digest and native CLI/launcher digests before the outer application signature. Other runtime-resource changes fail integrity validation.
+
+## Known limits
+
+The shared graph is structural and evidence-qualified; it is not a claim of complete semantic impact or automatic test selection. Optional local embedding models have not been downloaded or evaluated in this session. Unknown usage remains unknown. A completed run or a manually moved board card does not establish validation success.
+
+Some legacy local SQLite adapters remain in Codypendent for learning mutations and document/projection paths. Large knowledge queries still need store-level pagination profiling. The editor displays a bounded retained timeline while the daemon keeps the durable history. These boundaries and rollback behaviour are detailed in [shared-runtime.md](shared-runtime.md).
+
+## Security refresh (2026-10-26)
+
+The final dependency review found inherited runtime advisories. The release candidate now pins official Electron 43.8.3 and Node 22.23.4 security builds with their upstream checksums. Production dependencies are patched across the IDE, remote server, web, Anton packages and bundled extensions. The shipped-dependency CI gate checks every built-in extension lockfile and its language server, excluding the four test-only extensions; it also audits Electron despite its development-dependency declaration. Build/test-only advisories are outside this gate and are not a claim of a clean development dependency audit.
+
+Scoped overrides move sandbox validation to patched Zod 4, authentication UUID generation to a patched compatible API, and math renderers to patched KaTeX. Targeted regressions exercise policy validation, image files and data URLs, Git MIME detection, Markdown/math rendering, HTML sanitization and authentication correlation IDs. Emmet, Git and Markdown adapters follow the patched parser APIs; the Electron authentication declaration uses the now-public field. These additional Tier 3 changes address known security advisories and require the same senior review before merge. Native installer evidence must be refreshed at the security commit.
+
+The shared runtime source pin includes the Zstd security backport validated in Codypendent CI (4,056 Rust tests passed, 9 ignored). Tantivy's index format remains unchanged; a fixture encoded with the previous Zstd dependency verifies all 4,096 stored entries. The source snapshot includes the patched manifest, unchanged upstream SSTable implementation, provenance and license, and the license is included before sealing the distributed worker runtime.
+
+The independent native graph lockfile also receives compatible security updates for anyhow, crossbeam-epoch, h2, ring, Rustls, Tokio and root certificates. Its new advisory gate blocks vulnerabilities; two dated exceptions cover unmaintained transitive progress-display and tokenizer dependencies with no compatible replacement. See `crates/deny.toml` for the exact rationale.
+
+Electron 43's Node 24 extension linker exposes a deadlock in the inherited asynchronous `vscode` API resolver: synchronous linking blocks the main thread while the loader waits for a main-thread message. The resolver now uses Node's synchronous `registerHooks`, preserving per-extension API factories and cache keys, and deregisters with the host. Installed-product verification checks cached ESM API resolution and command execution across ESM and CommonJS before activating the shipped extensions. The obsolete pre-Chromium-134 V8 workaround is removed. These Tier 3 loader/startup changes require senior engineer review before merge. Native installer CI must pass on the final commit before a release decision.
+
+Local Electron 43 checks pass extension activation, cached ESM imports, cross-loader command execution and a packaged native graph query. The rebuilt graph passes 25 copied-runtime regressions (2 optional local-model/soak cases skipped), and the rebuilt Codypendent CLI/launcher passes all 16 daemon/TUI handoff checks. The native graph advisory policy passes with its two documented unmaintained-library exceptions. Installed-product verification also exercises workspace file search to detect missing bundled ripgrep binaries.

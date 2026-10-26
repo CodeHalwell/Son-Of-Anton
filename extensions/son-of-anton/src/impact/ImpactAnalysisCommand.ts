@@ -13,6 +13,7 @@ import * as vscode from 'vscode';
 import { McpClient } from 'son-of-anton-core/mcp/McpClient';
 import { ImpactAnalysisPanel, ImpactAnalysisData, ImpactNode, ImpactEdge } from './ImpactAnalysisPanel';
 import { languageImpact, fileImpactPaths } from './LanguageImpact';
+import { usesDaemonRuntime } from '../daemon/DaemonChat';
 
 export function registerImpactAnalysisCommand(
 	context: vscode.ExtensionContext,
@@ -29,6 +30,11 @@ export function registerImpactAnalysisCommand(
 
 			const document = editor.document;
 			const position = editor.selection.active;
+			if (usesDaemonRuntime()) {
+				const range = document.getWordRangeAtPosition(position);
+				await vscode.commands.executeCommand('sota.daemon.graph', document.uri.fsPath, range ? document.getText(range) : undefined);
+				return;
+			}
 
 			// Get the symbol at cursor using VS Code's built-in symbol provider
 			const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(

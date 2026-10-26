@@ -1,0 +1,26 @@
+name: Shared daemon client
+on:
+  push:
+    paths: ['extensions/son-of-anton-daemon/**', 'extensions/son-of-anton/src/daemon/**', 'build/codypendent/**', 'scripts/*codypendent*', '.github/workflows/shared-daemon.yml']
+  pull_request:
+    paths: ['extensions/son-of-anton-daemon/**', 'extensions/son-of-anton/src/daemon/**', 'build/codypendent/**', 'scripts/*codypendent*', '.github/workflows/shared-daemon.yml']
+permissions:
+  contents: read
+jobs:
+  client:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extensions/son-of-anton-daemon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: extensions/son-of-anton-daemon/package-lock.json
+      - run: npm ci
+      - run: node ../../scripts/verify-codypendent-vendor.mjs
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build

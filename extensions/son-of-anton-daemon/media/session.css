@@ -1,0 +1,27 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+body { color: var(--vscode-foreground); background: var(--vscode-sideBar-background); font-family: var(--vscode-font-family); padding: 12px; }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0; }
+button { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: 0; padding: 6px 10px; cursor: pointer; }
+button:hover { background: var(--vscode-button-hoverBackground); }
+button:disabled { opacity: .5; cursor: default; }
+button:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
+textarea, select { box-sizing: border-box; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); padding: 6px; }
+textarea { width: 100%; resize: vertical; }
+select { max-width: 100%; flex: 1; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--vscode-editor-font-family); }
+article { border: 1px solid var(--vscode-panel-border); padding: 10px; margin-bottom: 10px; }
+article button { margin-right: 6px; }
+#transcript { max-height: 55vh; overflow-y: auto; }
+.user { background: var(--vscode-textBlockQuote-background); border-left: 3px solid var(--vscode-textBlockQuote-border); padding: 8px; }
+.status, #session-id, #history { color: var(--vscode-descriptionForeground); font-size: .9em; }
+.patch { border: 1px solid var(--vscode-panel-border); padding: 8px; }
+#error { color: var(--vscode-errorForeground); }
+#session-id { overflow-wrap: anywhere; user-select: all; }
+
+#cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 16px; }
+.shared-board-column { min-width: 0; border: 1px solid var(--vscode-panel-border); padding: 10px; }
+.shared-board-column article { border-top: 1px solid var(--vscode-panel-border); padding: 8px 0; overflow-wrap: anywhere; }
+.shared-board-column h4 { margin: 8px 0; }

@@ -38,11 +38,34 @@ async function verifyGraph(extension) {
 }
 exports.run = async () => {
 	console.log('[installation-test] Starting bundled extension checks');
+	// Exercise both API loaders: Node 24 must link ESM extensions without waiting
+	// on a loader thread that needs a response from the blocked extension host.
+	const esmProbe = path.join(__dirname, 'esm-vscode-probe.mjs');
+	const secondEsmProbe = path.join(__dirname, 'esm-vscode-second-probe.mjs');
+	let command;
+	try {
+		await fs.writeFile(esmProbe, 'export { workspace, commands } from "vscode";\n');
+		await fs.writeFile(secondEsmProbe, 'export { workspace, commands } from "vscode";\n');
+		const api = await import(require('node:url').pathToFileURL(esmProbe).href);
+		const second = await import(require('node:url').pathToFileURL(secondEsmProbe).href);
+		assert.equal(api.workspace, second.workspace, 'ESM imports must share their extension API instance');
+		assert.deepEqual(api.workspace.workspaceFolders?.map(folder => folder.uri.toString()), vscode.workspace.workspaceFolders?.map(folder => folder.uri.toString()));
+		command = api.commands.registerCommand('sota.fixture.esmApiProbe', () => 42);
+		assert.equal(await vscode.commands.executeCommand('sota.fixture.esmApiProbe'), 42);
+	} finally {
+		command?.dispose();
+		await Promise.all([esmProbe, secondEsmProbe].map(file => fs.rm(file, { force: true })));
+	}
 	const started = Date.now(), extension = vscode.extensions.getExtension('son-of-anton.son-of-anton');
 	assert.ok(extension, `Built-in Son of Anton extension is unavailable (trusted=${vscode.workspace.isTrusted}; loaded=${vscode.extensions.all.map(item => item.id).join(', ')})`);
 	console.log('[installation-test] Activating Son of Anton');
 	await extension.activate(); assert.equal(extension.isActive, true);
 	console.log('[installation-test] Activated Son of Anton');
+	const shared = vscode.extensions.getExtension('son-of-anton.son-of-anton-daemon');
+	assert.ok(shared, 'Bundled shared runtime client is unavailable');
+	await shared.activate(); assert.equal(shared.isActive, true);
+	assert.equal(vscode.workspace.getConfiguration('sota').get('runtime.backend'), 'auto', 'Fresh installs must use automatic runtime selection');
+
 	const debuggerExtension = vscode.extensions.getExtension('ms-vscode.js-debug');
 	assert.ok(debuggerExtension, 'Bundled JavaScript debugger is unavailable');
 	assert.ok(debuggerExtension.packageJSON.contributes.debuggers.some(item => item.type === 'pwa-node'), 'Node.js debug adapter is missing');
@@ -50,7 +73,7 @@ exports.run = async () => {
 	assert.equal(debuggerExtension.isActive, true);
 	const debuggerInfo = { version: debuggerExtension.packageJSON.version, active: debuggerExtension.isActive, extensionPath: debuggerExtension.extensionPath };
 	const commands = await vscode.commands.getCommands(true);
-	const required = ['sota.openChat', 'sota.openTaskBoard', 'sota.openSetupWizard', 'sota.reviewWithCouncil', 'sota.diagnoseAcpAgents'];
+	const required = ['sota.openChat', 'sota.openTaskBoard', 'sota.openSetupWizard', 'sota.reviewWithCouncil', 'sota.diagnoseAcpAgents', 'sota.openSharedSessions', 'sota.daemon.graph', 'sota.daemon.board', 'sota.daemon.knowledge', 'sota.daemon.council'];
 	for (const command of required) { assert.ok(commands.includes(command), `Missing command ${command}`); }
 	// Read-only first-run surfaces must open without credentials or granting agent execution trust.
 	for (const command of ['sota.openChat', 'sota.openSetupWizard', 'sota.reviewWithCouncil']) { console.log(`[installation-test] Opening ${command}`); await vscode.commands.executeCommand(command); }
@@ -59,5 +82,7 @@ exports.run = async () => {
 	assert.ok(Object.keys(native).length, 'Native graph exports are missing');
 	const graph = await verifyGraph(extension);
 	console.log('[installation-test] Packaged graph query passed');
-	await fs.writeFile(process.env.SOTA_INSTALL_RESULT, JSON.stringify({ success: true, extensionPath: extension.extensionPath, debugger: debuggerInfo, commands: required, graph, graphExports: Object.keys(native), activationMs: Date.now() - started, memory: process.memoryUsage(), trusted: vscode.workspace.isTrusted }, null, 2));
+	const files = await vscode.workspace.findFiles('**/graph-fixture.ts', null, 10);
+	assert.equal(files.length, 1, 'Installed workspace file search must find the graph fixture');
+	await fs.writeFile(process.env.SOTA_INSTALL_RESULT, JSON.stringify({ success: true, extensionPath: extension.extensionPath, debugger: debuggerInfo, sharedRuntime: { extensionPath: shared.extensionPath, backend: process.platform === 'win32' ? 'native' : 'codypendent' }, commands: required, graph, fileSearch: { matches: files.length }, graphExports: Object.keys(native), activationMs: Date.now() - started, memory: process.memoryUsage(), trusted: vscode.workspace.isTrusted }, null, 2));
 };

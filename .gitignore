@@ -100,3 +100,5 @@ son-of-anton-mcp/*/_shared/auth/dist/*
 !services/*/_shared/cypher/
 !services/*/_shared/cypher/dist/
 !services/*/_shared/cypher/dist/*
+
+/extensions/son-of-anton-daemon/runtime/

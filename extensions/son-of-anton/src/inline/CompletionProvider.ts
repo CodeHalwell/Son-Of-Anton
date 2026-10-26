@@ -4,6 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 import * as vscode from 'vscode';
 import { LlmClient, ModelId } from 'son-of-anton-core/llm/LlmClient';
+import { usesDaemonRuntime } from '../daemon/DaemonChat';
+import { requestDaemonText } from '../daemon/DaemonText';
 
 /** Language IDs where completions are disabled by default. */
 const EXCLUDED_LANGUAGES = new Set(['json', 'jsonc', 'plaintext', 'log']);
@@ -98,7 +100,7 @@ export class CompletionProvider implements vscode.InlineCompletionItemProvider, 
 				prefix + '<CURSOR>' + suffix,
 			].join('\n');
 
-			const completion = await this.llmClient.request({
+			const completion = await (usesDaemonRuntime() ? requestDaemonText : this.llmClient.request.bind(this.llmClient))({
 				model: config.get<ModelId>('completions.model') || config.get<ModelId>('defaultModel', 'sonnet'),
 				messages: [{ role: 'user', content: prompt }],
 				systemPrompt: 'You are an inline code completion engine. Return ONLY the code that should be inserted at the cursor position. No explanations, no markdown, no surrounding code. Just the completion text.',

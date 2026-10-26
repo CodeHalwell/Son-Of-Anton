@@ -132,14 +132,14 @@ function installHeaders() {
 		child_process.execFileSync(node_gyp, ['install', '--dist-url', remote.disturl, remote.target], { shell: true });
 	}
 
-	// On Linux, apply a patch to the downloaded headers
-	// Remove dependency on std::source_location to avoid bumping the required GCC version to 11+
+	// Electron 39's Linux workaround targets its original V8 header layout.
+	// Newer Electron headers use the upstream source_location implementation.
 	// Refs https://chromium-review.googlesource.com/c/v8/v8/+/6879784
-	if (process.platform === 'linux') {
+	if (process.platform === 'linux' && local?.target.startsWith('39.')) {
 		const homedir = os.homedir();
 		const cachePath = process.env.XDG_CACHE_HOME || path.join(homedir, '.cache');
 		const nodeGypCache = path.join(cachePath, 'node-gyp');
-		const localHeaderPath = path.join(nodeGypCache, local!.target, 'include', 'node');
+		const localHeaderPath = path.join(nodeGypCache, local.target, 'include', 'node');
 		if (fs.existsSync(localHeaderPath)) {
 			console.log('Applying v8-source-location.patch to', localHeaderPath);
 			try {

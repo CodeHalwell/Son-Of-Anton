@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import * as vscode from 'vscode';
+import { configureDaemonChat, usesDaemonRuntime, pickSharedConversation, hasSharedSession } from './daemon/DaemonChat';
 import * as path from 'node:path';
 import { activateProviderFinder } from './providers/ProviderFinder';
 import { registerIdeUpdates } from './updates/IdeUpdates';
@@ -87,6 +88,7 @@ import { registerOpenCliInTerminalCommand } from './cli/openCliInTerminal';
 let activeConversationStore: ConversationStore | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+	context.subscriptions.push(configureDaemonChat(context));
 	// Run a peripheral subsystem's setup in isolation so one throwing
 	// constructor doesn't abort the rest of activation. Anything already
 	// registered (chat surface, agents, tool wiring) stays live; the failure is
@@ -140,6 +142,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	// Deferred by a tick so the rest of activation (chat sidebar, status bar)
 	// is in place before the wizard panel grabs focus.
 	setTimeout(() => {
+		if (usesDaemonRuntime()) { return; }
 		void maybeShowFirstRunSignInPrompt({
 			broker: auth.broker,
 			llmClient,
@@ -199,7 +202,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		onServerLog: (name, chunk) => { if (name === 'code-graph') { codeGraphBackendRef.current?.acceptLog(chunk); } },
 		readServersSetting: async () => {
 			// Restricted Mode exposes setup/history, but starts neither user nor bundled MCP processes.
-			if (!vscode.workspace.isTrusted) { return []; }
+			if (!vscode.workspace.isTrusted || usesDaemonRuntime()) { return []; }
 			const userServers = vscode.workspace.getConfiguration().get<unknown>('sota.mcp.servers');
 			const rawUserList: unknown[] = [...(Array.isArray(userServers) ? userServers : []), ...await importedMcpServers()];
 			// Gate untrusted user-configured servers out before they reach the
@@ -385,7 +388,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	// implementation — the runner only reads `workspace.folders[0].fsPath`,
 	// `workspace.isTrusted`, and `notifier.warn` for slow-script logging.
 	const hookRunner: HookRunner | undefined = (() => {
-		if (!workspacePath || !vscode.workspace.isTrusted) {
+		if (!workspacePath || !vscode.workspace.isTrusted || usesDaemonRuntime()) {
 			return undefined;
 		}
 		if (!fs.existsSync(hooksFilePath(workspacePath))) {
@@ -657,9 +660,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	context.subscriptions.push(registerAcpRegistryCommands());
 	const taskBoardModel = new TaskBoardModel();
 	context.subscriptions.push(taskBoardModel);
-	const council = workspacePath && agentStack.acpRuntime ? new CouncilController(context, workspacePath, llmClient, agentStack.acpRuntime, agentBridge, taskBoardModel, conversationStore) : undefined;
+	const council = !usesDaemonRuntime() && workspacePath && agentStack.acpRuntime ? new CouncilController(context, workspacePath, llmClient, agentStack.acpRuntime, agentBridge, taskBoardModel, conversationStore) : undefined;
 	if (council) { context.subscriptions.push(council); }
-	else { for (const command of ['sota.reviewWithCouncil', 'sota.councilHistory']) { context.subscriptions.push(vscode.commands.registerCommand(command, () => vscode.window.showInformationMessage(vscode.l10n.t('Open a Git workspace to use AI Council.')))); } }
+	else { for (const command of ['sota.reviewWithCouncil', 'sota.councilHistory']) { context.subscriptions.push(vscode.commands.registerCommand(command, () => usesDaemonRuntime() ? vscode.commands.executeCommand('sota.daemon.council', command === 'sota.councilHistory') : vscode.window.showInformationMessage(vscode.l10n.t('Open a Git workspace to use AI Council.')))); } }
 	context.subscriptions.push(
 		agentBridge.onDidEmitEvent(envelope => {
 			const conversationId = envelope.conversationId;
@@ -859,6 +862,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	// sidebar) so it can occupy a full editor column for the kanban grid.
 	context.subscriptions.push(
 		vscode.commands.registerCommand('sota.openTaskBoard', (conversationId?: string) => {
+			if (usesDaemonRuntime()) { void vscode.commands.executeCommand('sota.daemon.board'); return; }
 			const activeId = typeof conversationId === 'string' && conversationStore.load(conversationId) ? conversationId : conversationStore.getInitialConversation()?.summary.id;
 
 			if (activeId) { refreshBoardPlan(taskBoardModel, agentBridge, activeId); }
@@ -964,6 +968,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		branchId => checkpointManager.detachBranch(branchId),
 	);
 	context.subscriptions.push(
+		vscode.commands.registerCommand('sota.openSharedConversation', async () => {
+			const id = await pickSharedConversation(conversationStore);
+			if (id) { await vscode.commands.executeCommand('sota.openConversation', id); }
+		}),
 		vscode.commands.registerCommand('sota.openConversation', async (id: string) => {
 			if (typeof id !== 'string' || !id) {
 				return;
@@ -1031,6 +1039,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				await vscode.window.showInformationMessage('No conversations to export.');
 				return;
 			}
+			if (hasSharedSession(record.summary.id)) { void vscode.window.showInformationMessage(vscode.l10n.t('Export this shared session from Codypendent’s Session Library to include its complete durable history and redaction policy.')); return; }
 			const { exportConversationAsMarkdown, exportFilename } = await import('./chat/ConversationExporter');
 			// Capture a cost/token snapshot from the live reporter so the
 			// export carries a meaningful "Cost & Tokens" block. The
@@ -1163,6 +1172,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	// whether the user has previously skipped or completed the auto-popup).
 	context.subscriptions.push(
 		vscode.commands.registerCommand('sota.openSetupWizard', () => {
+			if (usesDaemonRuntime()) {
+				if (!vscode.workspace.isTrusted) { void vscode.window.showInformationMessage(vscode.l10n.t('Trust this workspace to start Codypendent and configure models in its terminal. Existing shared sessions remain read-only.')); return; }
+				void vscode.commands.executeCommand('sota.daemon.terminal'); return;
+			}
 			SetupWizardPanel.createOrShow(context, {
 				llmClient,
 				broker: auth.broker,
@@ -1238,6 +1251,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('sota.restoreCheckpoint', async () => {
+			if (usesDaemonRuntime()) { void vscode.window.showInformationMessage(vscode.l10n.t('Use Backtrack in Codypendent to restore or fork a shared run checkpoint.')); return; }
 			const all = checkpointManager.listAll();
 			if (all.length === 0) {
 				vscode.window.showInformationMessage('No checkpoints to restore.');

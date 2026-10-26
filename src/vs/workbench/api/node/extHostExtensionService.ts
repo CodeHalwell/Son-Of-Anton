@@ -81,37 +81,6 @@ class NodeModuleESMInterceptor extends RequireInterceptor {
 		return `data:text/javascript;base64,${Buffer.from(scriptContent).toString('base64')}`;
 	}
 
-	// This string is a script that runs in the loader thread of NodeJS.
-	private static _loaderScript = `
-	let lookup;
-	export const initialize = async (context) => {
-		let requestIds = 0;
-		const { port } = context;
-		const pendingRequests = new Map();
-		port.onmessage = (event) => {
-			const { id, url } = event.data;
-			pendingRequests.get(id)?.(url);
-		};
-		lookup = url => {
-			// debugger;
-			const myId = requestIds++;
-			return new Promise((resolve) => {
-				pendingRequests.set(myId, resolve);
-				port.postMessage({ id: myId, url, });
-			});
-		};
-	};
-	export const resolve = async (specifier, context, nextResolve) => {
-		if (specifier !== 'vscode' || !context.parentURL) {
-			return nextResolve(specifier, context);
-		}
-		const otherUrl = await lookup(context.parentURL);
-		return {
-			url: otherUrl,
-			shortCircuit: true,
-		};
-	};`;
-
 	private static _vscodeImportFnName = `_VSCODE_IMPORT_VSCODE_API`;
 
 	private readonly _store = new DisposableStore();
@@ -121,8 +90,6 @@ class NodeModuleESMInterceptor extends RequireInterceptor {
 	}
 
 	protected override _installInterceptor(): void {
-
-		type Message = { id: string; url: string };
 
 		const apiInstances = new BidirectionalMap<typeof vscode, string>();
 		const apiImportDataUrl = new Map<string, string>();
@@ -137,59 +104,47 @@ class NodeModuleESMInterceptor extends RequireInterceptor {
 			}
 		});
 
-		const { port1, port2 } = new MessageChannel();
-
 		let apiModuleFactory: INodeModuleFactory | undefined;
 
-		// this is a workaround for the fact that the layer checker does not understand
-		// that onmessage is NodeJS API here
-		const port1LayerCheckerWorkaround: any = port1;
+		// Node 24 can resolve ESM imports synchronously. An asynchronous loader that
+		// waits for the main thread deadlocks when that thread is linking an extension.
+		const hooks = nodeModule.registerHooks({
+			resolve: (specifier, context, nextResolve) => {
+				if (specifier !== 'vscode' || !context.parentURL) {
+					return nextResolve(specifier, context);
+				}
 
-		port1LayerCheckerWorkaround.onmessage = (e: { data: Message }) => {
+				// Get the vscode-module factory - which is the same logic that's also used by
+				// the CommonJS require interceptor
+				if (!apiModuleFactory) {
+					apiModuleFactory = this._factories.get('vscode');
+					assertType(apiModuleFactory);
+				}
 
-			// Get the vscode-module factory - which is the same logic that's also used by
-			// the CommonJS require interceptor
-			if (!apiModuleFactory) {
-				apiModuleFactory = this._factories.get('vscode');
-				assertType(apiModuleFactory);
+				const uri = URI.parse(context.parentURL);
+
+				// Get or create the API instance. The interface is per extension and extensions are
+				// looked up by the importing module URI and path containment.
+				const apiInstance = apiModuleFactory.load('_not_used', uri, () => { throw new Error('CANNOT LOAD MODULE from here.'); });
+				let key = apiInstances.get(apiInstance);
+				if (!key) {
+					key = generateUuid();
+					apiInstances.set(apiInstance, key);
+				}
+
+				// Create and cache a data-url which is the import script for the API instance
+				let scriptDataUrlSrc = apiImportDataUrl.get(key);
+				if (!scriptDataUrlSrc) {
+					const jsCode = `const _vscodeInstance = globalThis.${NodeModuleESMInterceptor._vscodeImportFnName}('${key}');\n\n${Object.keys(apiInstance).map((name => `export const ${name} = _vscodeInstance['${name}'];`)).join('\n')}`;
+					scriptDataUrlSrc = NodeModuleESMInterceptor._createDataUri(jsCode);
+					apiImportDataUrl.set(key, scriptDataUrlSrc);
+				}
+
+				return { url: scriptDataUrlSrc, shortCircuit: true };
 			}
-
-			const { id, url } = e.data;
-			const uri = URI.parse(url);
-
-			// Get or create the API instance. The interface is per extension and extensions are
-			// looked up by the uri (e.data.url) and path containment.
-			const apiInstance = apiModuleFactory.load('_not_used', uri, () => { throw new Error('CANNOT LOAD MODULE from here.'); });
-			let key = apiInstances.get(apiInstance);
-			if (!key) {
-				key = generateUuid();
-				apiInstances.set(apiInstance, key);
-			}
-
-			// Create and cache a data-url which is the import script for the API instance
-			let scriptDataUrlSrc = apiImportDataUrl.get(key);
-			if (!scriptDataUrlSrc) {
-				const jsCode = `const _vscodeInstance = globalThis.${NodeModuleESMInterceptor._vscodeImportFnName}('${key}');\n\n${Object.keys(apiInstance).map((name => `export const ${name} = _vscodeInstance['${name}'];`)).join('\n')}`;
-				scriptDataUrlSrc = NodeModuleESMInterceptor._createDataUri(jsCode);
-				apiImportDataUrl.set(key, scriptDataUrlSrc);
-			}
-
-			port1.postMessage({
-				id,
-				url: scriptDataUrlSrc
-			});
-		};
-
-		nodeModule.register(NodeModuleESMInterceptor._createDataUri(NodeModuleESMInterceptor._loaderScript), {
-			parentURL: import.meta.url,
-			data: { port: port2 },
-			transferList: [port2],
 		});
 
-		this._store.add(toDisposable(() => {
-			port1.close();
-			port2.close();
-		}));
+		this._store.add(toDisposable(() => hooks.deregister()));
 	}
 }
 

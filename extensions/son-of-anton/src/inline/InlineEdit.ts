@@ -6,6 +6,8 @@ import * as vscode from 'vscode';
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import { LlmClient, ModelId } from 'son-of-anton-core/llm/LlmClient';
+import { usesDaemonRuntime } from '../daemon/DaemonChat';
+import { requestDaemonText } from '../daemon/DaemonText';
 
 /**
  * Provides inline edit functionality triggered by Cmd+K / Ctrl+K.
@@ -87,7 +89,7 @@ export class InlineEditProvider implements vscode.Disposable {
 					if (cancellationToken.isCancellationRequested) {
 						controller.abort();
 					}
-					return await this.llmClient.request({
+					return await (usesDaemonRuntime() ? requestDaemonText : this.llmClient.request.bind(this.llmClient))({
 						model: vscode.workspace.getConfiguration('sota').get<ModelId>('defaultModel', 'sonnet'),
 						messages: [{ role: 'user', content: prompt }],
 						systemPrompt: 'You are a code editing assistant. Return ONLY the modified code with no explanations, no markdown fences, no surrounding text. The code should be a direct replacement for the selected region. Preserve leading indentation and trailing newlines.',

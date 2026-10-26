@@ -7,6 +7,16 @@ import * as vscode from 'vscode';
 /** Localized labels shared with the isolated chat webview. */
 export function getChatUiStrings(): Record<string, string> {
 	return {
+		sharedRuntimeStatus: vscode.l10n.t('Codypendent · {0} · {1} Active Runs'),
+		sharedConfigureModels: vscode.l10n.t('Configure Models in Codypendent'),
+		sharedRefresh: vscode.l10n.t('Refresh Shared Runtime'),
+		sharedLegacyHistory: vscode.l10n.t('This history belongs to the native compatibility runtime. Choose native and reload the window to continue it, or start a new shared conversation. The original history is retained.'),
+		sharedLegacySettings: vscode.l10n.t('Choose Compatibility Runtime'),
+		sharedHistoryBounded: vscode.l10n.t('Showing the most recent activity. Full history is retained by Codypendent.'),
+		sharedApproveOnce: vscode.l10n.t('Approve Once'),
+		sharedReject: vscode.l10n.t('Reject'),
+		sharedAnswer: vscode.l10n.t('Answer…'),
+		sharedRunUsage: vscode.l10n.t('Latest Run · {0} Input · {1} Output · {2}'),
 		acpOpenWorkspace: vscode.l10n.t('Open a project folder to use this ACP agent.'),
 		acpTrustWorkspace: vscode.l10n.t('Review workspace trust to use this ACP agent.'),
 		openFolder: vscode.l10n.t('Open Folder'),
@@ -42,6 +52,7 @@ export function getChatUiStrings(): Record<string, string> {
 		allWorkspaces: vscode.l10n.t('All Workspaces'),
 		thisWorkspace: vscode.l10n.t('This Workspace'),
 		clearHistoryFilters: vscode.l10n.t('Clear Filters'),
+		sharedHistoryBookmark: vscode.l10n.t('Shared session · IDE bookmark'),
 		historyWorkspaceUnknown: vscode.l10n.t('Earlier conversation'),
 		openAiProviderDescription: vscode.l10n.t('OpenAI chat, reasoning and coding models. Or sign in via Codex CLI.'),
 		googleProviderDescription: vscode.l10n.t('Google Gemini models discovered from your account.'),

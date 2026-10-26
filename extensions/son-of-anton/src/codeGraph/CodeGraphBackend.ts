@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { createHash } from 'node:crypto';
+import { usesDaemonRuntime } from '../daemon/DaemonChat';
 
 export type CodeGraphBackendState = 'off' | 'starting' | 'embedded' | 'docker' | 'degraded' | 'failed';
 export type CodeGraphEmbedderMode = 'none' | 'local' | 'provider';
@@ -71,6 +72,10 @@ export class CodeGraphBackend implements vscode.Disposable {
 		if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = undefined; }
 		this.descriptor = undefined;
 		this.stderr = '';
+		if (usesDaemonRuntime()) {
+			this.setState('off', vscode.l10n.t('The shared graph is owned by Codypendent. Use Shared Code Graph or Build Shared Code Graph.'));
+			return;
+		}
 		const config = this.options.getConfiguration?.() ?? vscode.workspace.getConfiguration('sota.codeGraph');
 		const choice = config.get<CodeGraphBackendChoice>('backend', 'auto');
 		const workspace = this.options.getWorkspaceRoot?.() ?? this.options.workspaceRoot;

@@ -532,6 +532,18 @@
 		let pendingQueueDraft;
 		let providerCatalogSnapshot;
 		let latestConnectionStatus;
+		let daemonBackend = document.body.dataset.runtime === 'codypendent';
+		let daemonState;
+		let legacySharedConversation = false;
+		let daemonPendingDraft;
+		const daemonControls = document.createElement('section');
+		daemonControls.className = 'daemon-controls'; daemonControls.hidden = true;
+		messageList.after(daemonControls);
+		const legacyNotice = document.createElement('section'); legacyNotice.className = 'daemon-controls'; legacyNotice.hidden = true;
+		const legacyText = document.createElement('p'); legacyText.textContent = uiText('sharedLegacyHistory');
+		const legacySettings = document.createElement('button'); legacySettings.type = 'button'; legacySettings.textContent = uiText('sharedLegacySettings');
+		legacySettings.addEventListener('click', () => vscode.postMessage({ type: 'daemonLegacySettings', conversationId: activeConversationId }));
+		legacyNotice.append(legacyText, legacySettings); messageList.before(legacyNotice);
 		function composerMessage() {
 			return { type: 'sendMessage', conversationId: activeConversationId, text: messageInput.value.trim(), model: currentModel,
 				attachments: [...attachments], mentionsKinded: currentContextMentions(),
@@ -1063,7 +1075,7 @@
 				metaEl.className = 'history-pane-row-meta';
 				const count = Number(conv.messageCount || 0);
 				const messageWord = count === 1 ? 'message' : 'messages';
-				metaEl.textContent = [conv.workspaceName || uiText('historyWorkspaceUnknown'), formatRelativeTime(conv.updatedAt), count + ' ' + messageWord].join(' · ');
+				metaEl.textContent = [conv.workspaceName || uiText('historyWorkspaceUnknown'), formatRelativeTime(conv.updatedAt), conv.shared ? uiText('sharedHistoryBookmark') : count + ' ' + messageWord].join(' · ');
 				body.appendChild(metaEl);
 				row.appendChild(body);
 
@@ -2404,6 +2416,10 @@
 		}
 		function acceptTurn(message) {
 			if (message.conversationId !== activeConversationId || typeof message.requestId !== 'string' || typeof message.turnId !== 'string') return;
+			if (daemonBackend) {
+				if (message.requestId === activeRequestId) { activeTurnId = message.turnId; activeHostTurnPending = true; }
+				return;
+			}
 			const slots = requestSlots.get(message.requestId);
 			if (!slots || slots.turnId || message.requestId !== activeRequestId) return;
 			slots.turnId = message.turnId; activeTurnId = message.turnId; activeHostTurnPending = true;
@@ -2451,13 +2467,39 @@
 			} else for (const checkpoint of checkpointsByTurnIndex.get(record.persistedIndex) || []) insertCheckpointStripe(wrapper, checkpoint);
 		}
 		function scheduleTimelineWindow() {
-			if (updatingTimeline || timelineFrame !== null) return;
+			if (daemonBackend || updatingTimeline || timelineFrame !== null) return;
 			timelineFrame = requestAnimationFrame(() => {
 				timelineFrame = null;
 				historyWindow.observe(nextConversationIndex - 1);
 				if (followingLatest) historyWindow.latest();
 				renderTimelineWindow();
 			});
+		}
+		function renderDaemonSnapshot(state, writable) {
+			daemonState = state;
+			const saved = { index: nextConversationIndex, role: lastSenderRole, specialist: lastAssistantSpecialist, prompt: lastUserPrompt, draft: lastPromptDraft };
+			renderingHistory = true;
+			try {
+				if (state.sessionId) SotaWorkflows.renderDaemonRows(messageList, state.projection.rows, row => {
+					const role = row.kind === 'user' ? 'user' : row.kind === 'assistant' ? 'assistant' : 'system';
+					return addMessage(role, row.kind === 'patch' ? '```diff\n' + row.text + '\n```' : row.text,
+						{ timestamp: Date.parse(row.timestamp || '') || undefined, specialistId: 'anton', usageUnavailable: true });
+				});
+			} finally {
+				renderingHistory = false; nextConversationIndex = saved.index; lastSenderRole = saved.role;
+				lastAssistantSpecialist = saved.specialist; lastUserPrompt = saved.prompt; lastPromptDraft = saved.draft;
+			}
+			SotaWorkflows.renderDaemonControls(daemonControls, state, writable === true, (type, id, approve) =>
+				vscode.postMessage({ type, id, action: approve ? 'approve' : 'reject', conversationId: activeConversationId }), uiText);
+			setStreamingState(activeHostTurnPending || state.projection.activeRuns.length > 0);
+			const latestPrompt = state.projection.rows.findLast(row => row.kind === 'user');
+			if (latestPrompt) updateTranscriptTaskHeader(0, latestPrompt.text);
+			const usage = state.projection.runs?.at(-1)?.usage;
+			const meter = document.getElementById('transcriptTaskMeter');
+			if (meter) meter.textContent = uiText('sharedRunUsage', usage?.inputTokens ?? '—', usage?.outputTokens ?? '—',
+				typeof usage?.costMicros === 'number' ? '$' + (usage.costMicros / 1_000_000).toFixed(4) : '—');
+			document.getElementById('hdrCost').hidden = true;
+			updateEmptyState(); scrollToBottom();
 		}
 		function loadEarlierHistory() {
 			followingLatest = false; historyWindow.older(); renderTimelineWindow('older');
@@ -2806,6 +2848,7 @@
 				return;
 			}
 			if (!renderOnly && workspaceBlocked) { resolveWorkspaceButton.focus(); return; }
+			if (!renderOnly && legacySharedConversation) { legacySettings.focus(); return; }
 			if (!renderOnly && isCurrentModelUnavailable()) { modelChip.focus(); return; }
 			let text = messageInput.value.trim();
 
@@ -2817,6 +2860,18 @@
 			text = extractInlineUrlMentions(text);
 
 			if (!text && mentions.length === 0 && attachments.length === 0 && imageAttachments.length === 0) return;
+			if (daemonBackend && !renderOnly) {
+				const draft = captureComposerDraft();
+				const fingerprint = JSON.stringify(draft);
+				const saved = vscode.getState()?.daemonPending;
+				activeRequestId = requestId || (saved?.conversationId === activeConversationId && saved.fingerprint === fingerprint ? saved.requestId : crypto.randomUUID());
+				activeTurnId = null; activeHostTurnPending = true;
+				daemonPendingDraft = { conversationId: activeConversationId, requestId: activeRequestId, fingerprint };
+				vscode.setState({ ...vscode.getState(), daemonPending: daemonPendingDraft });
+				persistDraft(); setStreamingState(true);
+				vscode.postMessage({ ...composerMessage(), text, requestId: activeRequestId });
+				return;
+			}
 
 			clearPromptRestore();
 			const submittedDraft = { ...captureComposerDraft(), text };
@@ -2909,13 +2964,13 @@
 		 * by `setStreamingState` and overrides the empty styling.
 		 */
 		function updateSendAffordance() {
-			document.getElementById('queueMessageBtn').hidden = !isStreaming;
-			document.getElementById('redirectMessageBtn').hidden = !isStreaming;
+			document.getElementById('queueMessageBtn').hidden = daemonBackend || !isStreaming;
+			document.getElementById('redirectMessageBtn').hidden = daemonBackend || !isStreaming;
 			const unavailable = isCurrentModelUnavailable();
 			document.getElementById('unavailableModelNotice').hidden = !unavailable;
 			document.getElementById('queueMessageBtn').disabled = unavailable;
 			document.getElementById('redirectMessageBtn').disabled = unavailable;
-			sendBtn.disabled = !isStreaming && unavailable;
+			sendBtn.disabled = !isStreaming && (unavailable || legacySharedConversation);
 			if (isStreaming) {
 				sendBtn.classList.remove('is-empty');
 				return;
@@ -3201,9 +3256,10 @@
 		}
 
 		function isSavedModel(model) {
-			return typeof model === 'string' && (model.startsWith('catalog:') || MODEL_METADATA_RAW.has(model));
+			return typeof model === 'string' && (model.startsWith('daemon:') || model.startsWith('catalog:') || MODEL_METADATA_RAW.has(model));
 		}
 		function isCurrentModelUnavailable() {
+			if (daemonBackend) return !currentModel.startsWith('daemon:') || Boolean(providerCatalogSnapshot && !discoveredModels.some(model => model.id === currentModel));
 			if (!currentModel.startsWith('catalog:') || !providerCatalogSnapshot) return false;
 			const provider = providerCatalogSnapshot.providers.find(entry => entry.id === currentModel.split(':')[1]);
 			const configuredInventory = provider && provider.configurationComplete === true && (
@@ -4146,7 +4202,7 @@
 			for (const node of modelMenu.children) {
 				if (node.classList.contains('popover-section-label')) { group = node; group.hidden = true; }
 				if (node.matches('[data-model]')) {
-					node.hidden = !canSelectAdapterModel(node.dataset.model, getCurrentAcpAgent()) || ![node.dataset.model, node.textContent, group?.textContent].join(' ').toLocaleLowerCase().includes(query);
+					node.hidden = (daemonBackend ? !node.dataset.model.startsWith('daemon:') : !canSelectAdapterModel(node.dataset.model, getCurrentAcpAgent())) || ![node.dataset.model, node.textContent, group?.textContent].join(' ').toLocaleLowerCase().includes(query);
 					if (!node.hidden && group) group.hidden = false;
 				}
 			}
@@ -4354,6 +4410,36 @@
 			// acknowledged, but cannot finish or append tokens to a newer bubble.
 			if (message.requestId && message.turnId && message.type !== 'messageMetrics' && (message.conversationId !== activeConversationId || message.requestId !== activeRequestId || message.turnId !== activeTurnId)) return;
 			switch (message.type) {
+				case 'daemonLegacy':
+					if (message.conversationId === activeConversationId) {
+						legacySharedConversation = message.legacy === true; legacyNotice.hidden = !legacySharedConversation; updateSendAffordance();
+					}
+					break;
+				case 'daemonRuntime':
+					daemonBackend = true; agentChip.disabled = true;
+					if (!currentModel.startsWith('daemon:')) currentModel = 'daemon:default';
+					if (message.error) { draftStatus.hidden = false; draftStatus.textContent = message.error; }
+					filterModels(); updateModelLabel(); updateAuthGate(null); updateSendAffordance();
+					break;
+				case 'daemonStatus':
+					if (message.conversationId === activeConversationId) { draftStatus.hidden = false; draftStatus.textContent = message.error; }
+					break;
+				case 'daemonAccepted':
+					if (daemonPendingDraft?.requestId === message.requestId && daemonPendingDraft.conversationId === activeConversationId) {
+						if (daemonPendingDraft.fingerprint === JSON.stringify(captureComposerDraft())) {
+							pushCommandHistory(messageInput.value); messageInput.value = ''; attachments = []; mentions = []; imageAttachments = [];
+							renderContextChips(); persistDraft(); updateSendAffordance();
+						}
+						daemonPendingDraft = undefined; vscode.setState({ ...vscode.getState(), daemonPending: undefined });
+					}
+					break;
+				case 'daemonSubmissionFailed':
+					// The composer is retained until durable acceptance. Keep its
+					// stable request identity for an explicit retry after a lost reply.
+					break;
+				case 'daemonSnapshot':
+					if (message.conversationId === activeConversationId) renderDaemonSnapshot(message.state, message.canWrite);
+					break;
 				case 'streamToken':
 					// Inline tool-result review: the arrival of an assistant
 					// token AFTER any active tool cards means the model is
@@ -4452,6 +4538,7 @@
 					break;
 				case 'requestSettled':
 					activeHostTurnPending = false; refreshPromptReuseAffordance();
+					if (daemonBackend) { setStreamingState(Boolean(daemonState?.projection.activeRuns.length)); break; }
 					if (isStreaming) {
 						finalizeStreamingText();
 						clearStreamingIndicator();
@@ -4515,12 +4602,12 @@
 				}
 				case 'providerCatalog': {
 					providerCatalogSnapshot = message.snapshot;
-					discoveredModels = (message.snapshot?.providers || []).flatMap(provider => provider.models.filter(model => model.chat !== false && typeof model.id === 'string' && model.id.startsWith('catalog:') && typeof model.label === 'string').map(model => ({ ...model, providerName: provider.name })));
+					discoveredModels = (message.snapshot?.providers || []).flatMap(provider => provider.models.filter(model => model.chat !== false && typeof model.id === 'string' && (model.id.startsWith('catalog:') || model.id.startsWith('daemon:')) && typeof model.label === 'string').map(model => ({ ...model, providerName: provider.name })));
 					const catalogIds = new Set(discoveredModels.map(model => model.id));
 					// Provider-controlled IDs belong in maps, never object properties. Also
 					// retire metadata for models removed from the current provider snapshot.
-					for (const id of MODEL_LABELS.keys()) { if (id.startsWith('catalog:')) MODEL_LABELS.delete(id); }
-					for (const id of MODEL_METADATA_RAW.keys()) { if (id.startsWith('catalog:') && !catalogIds.has(id)) MODEL_METADATA_RAW.delete(id); }
+					for (const id of MODEL_LABELS.keys()) { if (id.startsWith('catalog:') || id.startsWith('daemon:')) MODEL_LABELS.delete(id); }
+					for (const id of MODEL_METADATA_RAW.keys()) { if ((id.startsWith('catalog:') || id.startsWith('daemon:')) && !catalogIds.has(id)) MODEL_METADATA_RAW.delete(id); }
 					for (const [id, metadata] of Object.entries(message.metadata || {})) { if (catalogIds.has(id)) MODEL_METADATA_RAW.set(id, metadata); }
 					for (const model of discoveredModels) MODEL_LABELS.set(model.id, model.label);
 					filterModels(); updateModelLabel(); updateModelMenuChecks();
@@ -4858,6 +4945,7 @@
 					setSecurityPulse(false);
 					break;
 				case 'tasksSnapshot':
+					if (message.conversationId && message.conversationId !== activeConversationId) break;
 					renderTasksPane(message);
 					break;
 				case 'historySnapshot':
@@ -7332,6 +7420,7 @@
 			if (!emptyStateReady || !emptyStateAuth) {
 				return;
 			}
+			if (daemonBackend) { emptyStateReady.hidden = false; emptyStateAuth.hidden = true; return; }
 			// Defensive: if the payload is missing both shape markers we treat
 			// auth as available rather than locking the user out behind a CTA.
 			const hasProviders = status && Array.isArray(status.providers);

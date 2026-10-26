@@ -1,0 +1,11 @@
+src/**
+test/**
+node_modules/**
+out/**
+vendor/*.tgz
+package-lock.json
+tsconfig*.json
+esbuild.mts
+dist/*.map
+!runtime/codypendent/node-runtime/**
+!runtime/codypendent/node-runtime/.codypendent-runtime-seal.json

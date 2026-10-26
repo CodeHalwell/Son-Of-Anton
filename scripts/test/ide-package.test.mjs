@@ -25,7 +25,7 @@ async function fixture(t, platform = 'darwin') {
 	const directory = await realpath(await mkdtemp(path.join(tmpdir(), 'sota-package-test-'))), root = path.join(directory, 'repo');
 	t.after(() => rm(directory, { recursive: true, force: true }));
 	await mkdir(path.join(root, 'scripts'), { recursive: true });
-	for (const name of ['package-ide.mjs', 'sign-ide.mjs', 'ide-release-policy.mjs', 'staged-directory.mjs']) { await cp(new URL(`../${name}`, import.meta.url), path.join(root, 'scripts', name)); }
+	for (const name of ['package-ide.mjs', 'sign-ide.mjs', 'ide-release-policy.mjs', 'staged-directory.mjs', 'elf-runtime.mjs', 'install-permissions.mjs', 'bundle-codypendent-node.mjs']) { await cp(new URL(`../${name}`, import.meta.url), path.join(root, 'scripts', name)); }
 	const preload = path.join(root, 'mock-tools.mjs');
 	await cp(new URL('./fixtures/ide-signing-subprocess.mjs', import.meta.url), preload);
 	const product = { nameLong: 'Fixture IDE', nameShort: 'Fixture', applicationName: 'fixture', linuxIconName: 'fixture', urlProtocol: 'fixture', darwinBundleIdentifier: 'com.example.fixture' };

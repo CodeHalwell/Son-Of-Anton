@@ -10,7 +10,9 @@ import * as http from 'http';
 import * as https from 'https';
 import { URL } from 'url';
 import { imageSize } from 'image-size';
-import { ISizeCalculationResult } from 'image-size/dist/types/interface';
+import { imageSizeFromFile } from 'image-size/fromFile';
+
+type ISizeCalculationResult = ReturnType<typeof imageSize>;
 
 const reUrl = /^https?:/;
 export type ImageInfoWithScale = {
@@ -46,13 +48,7 @@ function getImageSizeFromFile(file: string): Promise<ImageInfoWithScale | undefi
 			}
 		}
 
-		imageSize(file, (err: Error | null, size?: ISizeCalculationResult) => {
-			if (err) {
-				reject(err);
-			} else {
-				resolve(sizeForFileName(path.basename(file), size));
-			}
-		});
+		imageSizeFromFile(file).then(size => resolve(sizeForFileName(path.basename(file), size)), reject);
 	});
 }
 

@@ -36,7 +36,7 @@ const commit = getVersion(root);
 const sourceMappingURLBase = `https://son-of-anton-sourcemaps.localhost/sourcemaps/${commit}`;
 
 function minifyExtensionResources(input: Stream): Stream {
-	const jsonFilter = filter(['**/*.json', '**/*.code-snippets'], { restore: true });
+	const jsonFilter = filter(['**/*.json', '**/*.code-snippets', '!**/runtime/codypendent/node-runtime/**'], { restore: true });
 	return input
 		.pipe(jsonFilter)
 		.pipe(buffer())
@@ -301,12 +301,19 @@ function fromLocalEsbuild(extensionPath: string, esbuildConfigFileName: string):
 	}).then(fileNames => {
 		const files = fileNames
 			.map(fileName => path.join(extensionPath, fileName))
-			.map(filePath => new File({
-				path: filePath,
-				stat: fs.statSync(filePath),
-				base: extensionPath,
-				contents: fs.createReadStream(filePath)
-			}));
+			.map(filePath => {
+				// The daemon authenticates the exact Node file/link tree. Retain
+				// its launcher symlinks instead of flattening them into scripts.
+				const sealedRuntime = path.relative(extensionPath, filePath).replaceAll('\\', '/').startsWith('runtime/codypendent/node-runtime/');
+				const stat = sealedRuntime ? fs.lstatSync(filePath) : fs.statSync(filePath);
+				return new File({
+					path: filePath, stat, base: extensionPath,
+					// A complete Node tree has thousands of files. Read its small
+					// resources sequentially to avoid exhausting macOS file handles.
+					contents: stat.isSymbolicLink() ? null : sealedRuntime ? fs.readFileSync(filePath) : fs.createReadStream(filePath),
+					...(stat.isSymbolicLink() ? { symlink: fs.readlinkSync(filePath) } : {})
+				});
+			});
 
 		es.readArray(files).pipe(result);
 	}).catch(err => {

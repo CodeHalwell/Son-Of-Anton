@@ -1,0 +1,121 @@
+{
+  "name": "son-of-anton-daemon",
+  "displayName": "Son of Anton Shared Sessions",
+  "description": "Shared agent sessions powered by the Codypendent Rust daemon.",
+  "version": "0.1.0",
+  "publisher": "son-of-anton",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CodeHalwell/Son-Of-Anton.git",
+    "directory": "extensions/son-of-anton-daemon"
+  },
+  "type": "module",
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "AI"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "main": "./dist/extension.cjs",
+  "activationEvents": [
+    "onView:sota.sharedSessions",
+    "onCommand:sota.openSharedSessions",
+    "onCommand:sota.daemon.ensure",
+    "onCommand:sota.daemon.graph",
+    "onCommand:sota.daemon.graph.build",
+    "onCommand:sota.daemon.knowledge",
+    "onCommand:sota.daemon.terminal",
+    "onCommand:sota.daemon.board",
+    "onCommand:sota.daemon.council",
+    "onCommand:sota.daemon.recordMemory"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Shared sessions are read-only until this workspace is trusted."
+    },
+    "virtualWorkspaces": {
+      "supported": false
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "sota.openSharedSessions",
+        "title": "Son of Anton: Open Shared Sessions"
+      },
+      {
+        "command": "sota.daemon.graph",
+        "title": "Shared Code Graph",
+        "category": "Son of Anton"
+      },
+      {
+        "command": "sota.daemon.graph.build",
+        "title": "Build Shared Code Graph",
+        "category": "Son of Anton"
+      },
+      {
+        "command": "sota.daemon.knowledge",
+        "title": "Browse Shared Knowledge",
+        "category": "Son of Anton"
+      },
+      {
+        "command": "sota.daemon.terminal",
+        "title": "Open Codypendent Terminal",
+        "category": "Son of Anton"
+      },
+      {
+        "command": "sota.daemon.board",
+        "title": "Open Shared Task Board",
+        "category": "Son of Anton"
+      },
+      {
+        "command": "sota.daemon.council",
+        "title": "Review with Shared Council",
+        "category": "Son of Anton"
+      }
+    ],
+    "views": {
+      "sota-chat": [
+        {
+          "type": "webview",
+          "id": "sota.sharedSessions",
+          "name": "Shared Sessions"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Son of Anton Shared Sessions",
+      "properties": {
+        "sota.daemon.socketPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Codypendent daemon socket override. Leave empty to use Codypendent's standard discovery."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mts",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "test": "vitest run",
+    "vscode:prepublish": "npm run typecheck && npm run build"
+  },
+  "dependencies": {
+    "@codypendent/protocol": "file:vendor/codypendent-protocol-1.1.0.tgz"
+  },
+  "devDependencies": {
+    "@types/jsdom": "^21.1.7",
+    "@types/node": "^22.5.0",
+    "@types/vscode": "1.96.0",
+    "esbuild": "^0.28.2",
+    "jsdom": "^26.1.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
+  }
+}

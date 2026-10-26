@@ -31,7 +31,7 @@
     "http-proxy-agent": "^7.0.0",
     "https-proxy-agent": "^7.0.2",
     "jschardet": "3.1.4",
-    "katex": "^0.16.22",
+    "katex": "^0.19.1",
     "kerberos": "2.1.1",
     "minimist": "^1.2.8",
     "node-pty": "^1.2.0-beta.10",
@@ -46,6 +46,9 @@
     "node-gyp-build": "4.8.1",
     "kerberos@2.1.1": {
       "node-addon-api": "7.1.0"
+    },
+    "@anthropic-ai/sandbox-runtime": {
+      "zod": "^4.6.6"
     }
   }
 }

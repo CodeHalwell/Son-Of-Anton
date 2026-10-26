@@ -3,6 +3,8 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import * as vscode from 'vscode';
+import { DaemonChat, usesDaemonRuntime, hasSharedSession } from '../daemon/DaemonChat';
+import type { NodeSessionState } from '@codypendent/protocol/node';
 import { getChatUiStrings } from './chatUiStrings';
 import { ChatTurnQueue } from './ChatTurnQueue';
 import { resolveChatSpecialist } from './ChatModelRouting';
@@ -350,6 +352,7 @@ const APPROVAL_PREVIEW_LINES = 30;
  * chat experience stays consistent regardless of placement.
  */
 export class ChatSession {
+	private daemonChat?: DaemonChat;
 	private conversation: ChatMessage[] = [];
 	private currentConversationId: string;
 	private conversationWriteToken?: ConversationWriteToken;
@@ -694,7 +697,7 @@ export class ChatSession {
 	 * thrashing the postMessage channel.
 	 */
 	private postCostUpdate(): void {
-		if (this.disposed || !this.costReporter) {
+		if (this.disposed || !this.costReporter || usesDaemonRuntime()) {
 			return;
 		}
 		if (this.costUpdateDebounceTimer) {
@@ -815,6 +818,7 @@ export class ChatSession {
 	}
 
 	dispose(): void {
+		this.daemonChat?.dispose();
 		// H17 — `session-end` lifecycle hook. Fire-and-forget BEFORE flipping
 		// `disposed = true` and tearing the rest down: `dispose` is sync so we
 		// can't await the hook, and the React-cleanup analogue in the CLI's
@@ -1130,6 +1134,11 @@ export class ChatSession {
 		if (this.disposed) {
 			return;
 		}
+		if (usesDaemonRuntime()) {
+			try { await this.getDaemonChat().select(this.currentConversationId); }
+			catch (error) { if (!this.disposed) { void this.webview.postMessage({ type: 'daemonRuntime', connected: false, error: error instanceof Error ? error.message : String(error) }); } }
+			return;
+		}
 		// Detect API-key fallbacks alongside the OAuth broker query so the
 		// webview can decide whether to show the auth gate. We tolerate failures
 		// from each source independently — a missing config or a thrown command
@@ -1299,6 +1308,7 @@ export class ChatSession {
 		this.postFollowupQueue();
 		this.postHistorySnapshot();
 		this.webview.postMessage({ type: 'conversationCleared', conversationId: this.currentConversationId, lastModel: this.currentModel });
+		if (usesDaemonRuntime()) { this.postProviderCatalog(); }
 		// Reset the running cost meter so a fresh chat starts at $0.00. The
 		// CostReporter's onDidChange will fanout the empty totals; the
 		// dedicated `costReset` message is the canonical "hide and zero" cue
@@ -1326,6 +1336,12 @@ export class ChatSession {
 
 	postProviderCatalog(includeModels = true): void {
 		if (this.disposed) { return; }
+		if (usesDaemonRuntime()) {
+			void this.webview.postMessage({ type: 'daemonLegacy', conversationId: this.currentConversationId,
+				legacy: !hasSharedSession(this.currentConversationId) && (this.conversationStore.load(this.currentConversationId)?.messages.length ?? 0) > 0 });
+			if (includeModels) { void this.getDaemonChat().select(this.currentConversationId).then(() => this.daemonChat?.refreshModels()).catch(error => this.webview.postMessage({ type: 'daemonRuntime', connected: false, error: error instanceof Error ? error.message : String(error) })); }
+			return;
+		}
 		if (activeProviderFinder && includeModels) { void this.webview.postMessage({ type: 'providerCatalog', snapshot: activeProviderFinder.snapshot(), metadata: MODEL_METADATA }); }
 		void this.webview.postMessage({ type: 'agentCapabilities', capabilities: this.agentBridge?.getCapabilities(this.currentSpecialistId, this.currentModel), workspaceState: !vscode.workspace.workspaceFolders?.length ? 'empty' : vscode.workspace.isTrusted ? 'ready' : 'untrusted' });
 	}
@@ -1336,6 +1352,12 @@ export class ChatSession {
 	}
 
 	private selectChatRoute(model: ModelId, requestedSpecialistId: string, previousSelection?: { model: ModelId; specialistId: string }): void {
+		if (usesDaemonRuntime()) {
+			if (!model.startsWith('daemon:')) { throw new Error(vscode.l10n.t('Choose a model configured in Codypendent.')); }
+			this.currentModel = model; this.currentSpecialistId = 'anton';
+			this.postChatSelection(previousSelection?.model ?? model, previousSelection?.specialistId ?? requestedSpecialistId);
+			return;
+		}
 		const specialistId = resolveChatSpecialist(model, requestedSpecialistId, this.agentBridge);
 		this.currentModel = model;
 		this.currentSpecialistId = specialistId;
@@ -1404,6 +1426,7 @@ export class ChatSession {
 		this.postBoardSnapshot();
 		this.postFollowupQueue();
 		this.postHistorySnapshot();
+		if (usesDaemonRuntime()) { this.postProviderCatalog(); }
 	}
 
 	/** Replace a deleted active chat while leaving unrelated conversations and streams alone. */
@@ -1506,6 +1529,7 @@ export class ChatSession {
 		if (this.disposed) {
 			return;
 		}
+		if (usesDaemonRuntime()) { void this.daemonChat?.refreshBoard().catch(() => {}); return; }
 		const snapshot: BoardSnapshot | undefined = this.taskBoardModel?.getSnapshot(this.currentConversationId);
 		const tasks = snapshot ? snapshot.tasks.map((t: BoardTask) => ({
 			id: t.id,
@@ -1566,7 +1590,7 @@ export class ChatSession {
 				id: s.id,
 				title: s.title,
 				updatedAt: s.updatedAt,
-				messageCount: s.messageCount,
+				messageCount: s.messageCount, shared: hasSharedSession(s.id),
 				lastSpecialist: s.lastSpecialist,
 				workspaceName: s.workspaceName,
 				pinned: s.pinned, archived: s.archived, deletedAt: s.deletedAt, branch: s.branch,
@@ -1666,12 +1690,15 @@ export class ChatSession {
 	}
 
 	private resolveChatModel(saved?: ModelId): ModelId {
+		if (usesDaemonRuntime()) { return saved?.startsWith('daemon:') ? saved : 'daemon:default'; }
 		if (typeof saved === 'string' && (Object.prototype.hasOwnProperty.call(MODEL_METADATA, saved) || saved.startsWith('catalog:acp:'))) { return saved; }
 		const configured = vscode.workspace.getConfiguration('sota').get<string>('defaultModel', 'sonnet');
 		return typeof configured === 'string' && (Object.prototype.hasOwnProperty.call(MODEL_METADATA, configured) || configured.startsWith('catalog:acp:')) ? configured as ModelId : 'sonnet';
 	}
 
 	private saveConversation(): void {
+		// Daemon transcripts are projections. Retain legacy records intact for compatibility.
+		if (usesDaemonRuntime()) { return; }
 		const lastSpecialist = this.currentSpecialistId as AgentHandle | 'anton';
 		this.conversationStore.update(
 			this.currentConversationId,
@@ -1762,7 +1789,7 @@ export class ChatSession {
 						}
 						break;
 					case 'selectModel':
-						if (message.conversationId === this.currentConversationId && typeof message.model === 'string' && (Object.prototype.hasOwnProperty.call(MODEL_METADATA, message.model) || message.model.startsWith('catalog:acp:'))) {
+						if (message.conversationId === this.currentConversationId && typeof message.model === 'string' && (Object.prototype.hasOwnProperty.call(MODEL_METADATA, message.model) || message.model.startsWith('catalog:acp:') || usesDaemonRuntime() && message.model.startsWith('daemon:'))) {
 							const requested = message.specialistId ?? this.currentSpecialistId;
 							try { this.selectChatRoute(message.model, requested); }
 							catch (error) { this.postChatSelection(message.model, requested, error instanceof Error ? error.message : String(error)); }
@@ -1855,6 +1882,11 @@ export class ChatSession {
 						break;
 					}
 					case 'cancelRequest':
+						if (usesDaemonRuntime()) {
+							const runtime = this.getDaemonChat();
+							if (this.activeTurn && !runtime.isSubmitting && !this.activeTurn.userMessagePersisted) { this.activeTurn.controller.abort(); }
+							await runtime.cancel(); break;
+						}
 						this.followupQueue.pause(this.currentConversationId);
 						this.postFollowupQueue();
 						this.abortController?.abort();
@@ -1875,6 +1907,27 @@ export class ChatSession {
 						clearTimeout(pending.timer);
 						const action: ApprovalDecision['action'] = message.action === 'approve' ? 'approve' : 'reject';
 						pending.resolve({ action, reason: typeof message.reason === 'string' ? message.reason : undefined });
+						break;
+					}
+					case 'daemonApprovalResponse': {
+						if (usesDaemonRuntime() && message.conversationId === this.currentConversationId && typeof message.id === 'string') {
+							await this.getDaemonChat().approve(message.id, message.action === 'approve');
+						}
+						break;
+					}
+					case 'daemonSetup':
+						if (usesDaemonRuntime() && message.conversationId === this.currentConversationId) { await vscode.commands.executeCommand('sota.daemon.terminal'); }
+						break;
+					case 'daemonRefresh':
+						if (usesDaemonRuntime() && message.conversationId === this.currentConversationId) { await this.getDaemonChat().reconnect(); }
+						break;
+					case 'daemonLegacySettings':
+						if (message.conversationId === this.currentConversationId) { await vscode.commands.executeCommand('workbench.action.openSettings', 'sota.runtime.backend'); }
+						break;
+					case 'daemonAnswerQuestion': {
+						if (usesDaemonRuntime() && message.conversationId === this.currentConversationId && typeof message.id === 'string') {
+							await this.answerDaemonQuestion(message.id);
+						}
 						break;
 					}
 					case 'toolResultEdited': {
@@ -3050,6 +3103,7 @@ export class ChatSession {
 
 	private async runChatTurn(message: WebviewMessage, owner: ChatTurn): Promise<void> {
 		this.validateContextExclusions(message);
+		if (usesDaemonRuntime()) { await this.runViaDaemon(message, owner); return; }
 		const controller = owner.controller;
 		const current = () => this.ownsTurn(owner) && !controller.signal.aborted;
 		const post = (payload: Record<string, unknown>) => { if (payload.type === 'streamError' || payload.type === 'spendCapBlocked') { owner.failed = true; } if (this.ownsTurn(owner)) { void this.webview.postMessage({ ...payload, conversationId: owner.conversationId, requestId: owner.requestId, turnId: owner.turnId }); } };
@@ -3848,6 +3902,76 @@ export class ChatSession {
 		// the user actually typed, matching the CLI's `useAgentStream` shape.
 		this.turnsRun += 1;
 		this.firePostResponseHook(rawText, fullAssistantText, specialistId, model, mode);
+	}
+
+	private getDaemonChat(): DaemonChat {
+		this.daemonChat ??= new DaemonChat({
+			post: message => { if (!this.disposed) { void this.webview.postMessage(message); } },
+			title: id => this.conversationStore.load(id)?.summary.title ?? 'Shared conversation',
+			onState: (state: NodeSessionState, conversationId: string) => {
+				if (this.disposed || conversationId !== this.currentConversationId || !state.sessionId) { return; }
+				const stored = this.conversationStore.load(conversationId);
+				if (stored && state.status === 'attached' && (!stored.summary.title || stored.summary.title === 'New conversation') && stored.summary.title !== state.projection.title) {
+					this.conversationStore.rename(conversationId, state.projection.title);
+				}
+				this.conversation = state.projection.rows.map(row => ({ role: row.kind === 'user' ? 'user' : row.kind === 'assistant' ? 'assistant' : 'system',
+					content: row.kind === 'patch' ? `\`\`\`diff\n${row.text}\n\`\`\`` : row.text,
+					timestamp: Date.parse(row.timestamp ?? '') || 0, specialistId: 'anton', model: this.currentModel, usageUnavailable: true }));
+				this.postBoardSnapshot();
+			},
+		});
+		return this.daemonChat;
+	}
+
+	private async runViaDaemon(message: WebviewMessage, owner: ChatTurn): Promise<void> {
+		if (!hasSharedSession(owner.conversationId) && (this.conversationStore.load(owner.conversationId)?.messages.length ?? 0) > 0) {
+			throw new Error(vscode.l10n.t('This conversation belongs to the native compatibility runtime. Select native in sota.runtime.backend to continue it, or start a new shared conversation. Its original history is retained.'));
+		}
+		if (Array.isArray(message.images) && message.images.length) { throw new Error(vscode.l10n.t('The shared runtime does not currently advertise image understanding. Remove the images or select the native compatibility runtime.')); }
+		const runtime = this.getDaemonChat();
+		const mode = message.chatMode === 'plan' ? 'plan' : message.chatMode === 'act' ? 'act' : this.currentMode;
+		this.currentMode = mode;
+		this.currentModel = typeof message.model === 'string' && message.model.startsWith('daemon:') ? message.model : 'daemon:default';
+		const context = await this.collectTurnContext(message);
+		if (!this.ownsTurn(owner) || owner.controller.signal.aborted) { return; }
+		const text = [message.text, context.attachmentMarkdown, context.workspaceMarkdown].filter(Boolean).join('\n\n');
+		if (!text.trim()) { return; }
+		void this.webview.postMessage({ type: 'requestStarted', conversationId: owner.conversationId, requestId: owner.requestId,
+			turnId: owner.turnId, specialistId: 'anton', userMessage: message.text ?? '' });
+		try {
+			await runtime.send(owner.conversationId, text, mode === 'plan' ? 'Plan' : 'Build', this.currentModel, owner.requestId,
+				owner.controller.signal, () => {
+					owner.userMessagePersisted = true;
+					if (this.ownsTurn(owner)) { void this.webview.postMessage({ type: 'daemonAccepted', conversationId: owner.conversationId,
+						requestId: owner.requestId, turnId: owner.turnId }); }
+				});
+		} catch (error) {
+			if (!owner.userMessagePersisted && this.ownsTurn(owner)) { void this.webview.postMessage({ type: 'daemonSubmissionFailed',
+				conversationId: owner.conversationId, requestId: owner.requestId, turnId: owner.turnId, draft: message }); }
+			throw error;
+		} finally {
+			if (this.ownsTurn(owner)) { void this.webview.postMessage({ type: 'requestEnded', conversationId: owner.conversationId,
+				requestId: owner.requestId, turnId: owner.turnId }); }
+		}
+	}
+
+	private async answerDaemonQuestion(id: string): Promise<void> {
+		const question = this.daemonChat?.snapshot?.projection.questions.find(item => item.id === id);
+		if (!question) { return; }
+		const answers: string[][] = [];
+		for (const prompt of question.questions) {
+			const items = prompt.options.map(option => ({ label: option.label, description: option.description, custom: false }));
+			if (prompt.custom !== false) { items.push({ label: vscode.l10n.t('Write an answer…'), description: '', custom: true }); }
+			const selected = await vscode.window.showQuickPick(items, { title: prompt.header, placeHolder: prompt.question, canPickMany: prompt.multiple });
+			if (!selected) { return; }
+			const answer: string[] = [];
+			for (const item of Array.isArray(selected) ? selected : [selected]) {
+				const value = item.custom ? await vscode.window.showInputBox({ prompt: prompt.question }) : item.label;
+				if (value === undefined) { return; } answer.push(value);
+			}
+			if (!answer.length) { return; } answers.push(answer);
+		}
+		await this.daemonChat?.answer(id, { type: 'Answered', answers });
 	}
 
 	/**
@@ -4759,6 +4883,7 @@ export class ChatSession {
 		const initialTab: ChatTab = this.currentTab;
 		const conversationId = this.currentConversationId.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 		const uiStringsJson = JSON.stringify(getChatUiStrings()).replace(/</g, '\\u003c');
+		const runtime = usesDaemonRuntime() ? 'codypendent' : 'native';
 
 		return /* html */`<!DOCTYPE html>
 <html lang="en">
@@ -4769,7 +4894,7 @@ export class ChatSession {
 	<link href="${cssUri}" rel="stylesheet">
 	<title>Son of Anton Chat</title>
 </head>
-<body data-conversation-id="${conversationId}" data-default-model="${defaultModel}" data-initial-tab="${initialTab}">
+<body data-runtime="${runtime}" data-conversation-id="${conversationId}" data-default-model="${defaultModel}" data-initial-tab="${initialTab}">
 	<div class="chat">
 		<div class="chat-header">
 			<div class="hdr-titles">

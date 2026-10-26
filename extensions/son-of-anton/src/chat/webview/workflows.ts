@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 export { contextMentions, inlineUrlMentions, mentionSourceId, migrateMentionExclusions } from '../ContextSources';
+import type { NodeSessionState, TranscriptRow } from '@codypendent/protocol/node';
 
 type Text = (key: string, ...args: Array<string | number>) => string;
 type QueueAction = 'remove' | 'edit' | 'up' | 'down' | 'resume' | 'pause';
@@ -13,6 +14,55 @@ function button(label: string, action: () => void): HTMLButtonElement {
 	element.type = 'button'; element.textContent = label; element.setAttribute('aria-label', label);
 	element.addEventListener('click', action);
 	return element;
+}
+
+/** Reconcile bounded daemon rows without replacing the composer or unchanged rows. */
+export function renderDaemonRows(root: HTMLElement, rows: TranscriptRow[], render: (row: TranscriptRow) => HTMLElement): void {
+	const existing = new Map(Array.from(root.querySelectorAll<HTMLElement>('[data-daemon-row]')).map(node => [node.dataset.daemonRow!, node]));
+	const keep = new Set<HTMLElement>();
+	let position: Element | null = root.querySelector('.msg');
+	for (const row of rows) {
+		let node = existing.get(row.id);
+		if (!node || node.dataset.daemonText !== row.text) {
+			const replacement = render(row); replacement.dataset.daemonRow = row.id; replacement.dataset.daemonText = row.text;
+			if (node) { node.replaceWith(replacement); if (position === node) { position = replacement; } }
+			node = replacement;
+		}
+		keep.add(node);
+		if (position === node) { position = node.nextElementSibling; }
+		else { root.insertBefore(node, position); }
+	}
+	for (const node of Array.from(root.querySelectorAll<HTMLElement>('.msg'))) { if (!keep.has(node)) { node.remove(); } }
+}
+
+/** Controls reflect pending daemon requests; the host validates trust and stale replies. */
+export function renderDaemonControls(root: HTMLElement, state: NodeSessionState, writable: boolean,
+	act: (type: string, id?: string, approve?: boolean) => void, text: Text): void {
+	const focus = document.activeElement instanceof HTMLElement ? document.activeElement.dataset.daemonControl : undefined;
+	root.replaceChildren(); root.hidden = false;
+	const status = document.createElement('p'); status.setAttribute('role', 'status');
+	status.textContent = text('sharedRuntimeStatus', state.status, state.projection.activeRuns.length); root.append(status);
+	const setup = button(text('sharedConfigureModels'), () => act('daemonSetup'));
+	setup.disabled = !writable; root.append(setup);
+	root.append(button(text('sharedRefresh'), () => act('daemonRefresh')));
+	if (state.projection.historyTruncated) { const notice = document.createElement('p'); notice.textContent = text('sharedHistoryBounded'); root.append(notice); }
+	const enabled = writable && state.status === 'attached';
+	const action = (key: string, label: string, callback: () => void): HTMLButtonElement => {
+		const control = button(label, callback); control.dataset.daemonControl = key; control.disabled = !enabled; return control;
+	};
+	for (const approval of state.projection.approvals) {
+		const row = document.createElement('div'); row.className = 'daemon-approval';
+		const description = document.createElement('pre'); description.textContent = `${approval.risk}\n${approval.action}`; row.append(description);
+		row.append(action(`${approval.id}:approve`, text('sharedApproveOnce'), () => act('daemonApprovalResponse', approval.id, true)),
+			action(`${approval.id}:reject`, text('sharedReject'), () => act('daemonApprovalResponse', approval.id, false)));
+		root.append(row);
+	}
+	for (const question of state.projection.questions) {
+		const row = document.createElement('div');
+		const description = document.createElement('p'); description.textContent = question.questions.map(item => item.question).join('\n'); row.append(description);
+		row.append(action(`${question.id}:answer`, text('sharedAnswer'), () => act('daemonAnswerQuestion', question.id))); root.append(row);
+	}
+	if (focus) { Array.from(root.querySelectorAll<HTMLButtonElement>('button')).find(node => node.dataset.daemonControl === focus)?.focus(); }
 }
 
 /** Render authoritative host queue snapshots; draft bodies remain in the host. */
