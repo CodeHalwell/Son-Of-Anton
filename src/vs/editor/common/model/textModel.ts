@@ -1221,7 +1221,8 @@ export class TextModel extends Disposable implements model.ITextModel, IDecorati
 			matchMapper = (searchRange: Range) => TextModelSearch.findMatches(this, new SearchParams(searchString, isRegex, matchCase, wordSeparators), searchRange, captureMatches, limitResultCount);
 		}
 
-		return uniqueSearchRanges.map(matchMapper).reduce((arr, matches: model.FindMatch[]) => arr.concat(matches), []);
+		// Optimization: Use flat() instead of reduce(concat) for O(N) performance
+		return uniqueSearchRanges.map(matchMapper).flat();
 	}
 
 	public findNextMatch(searchString: string, rawSearchStart: IPosition, isRegex: boolean, matchCase: boolean, wordSeparators: string, captureMatches: boolean): model.FindMatch | null {

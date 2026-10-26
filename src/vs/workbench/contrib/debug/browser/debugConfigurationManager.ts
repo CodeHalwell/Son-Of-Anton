@@ -171,7 +171,8 @@ export class ConfigurationManager implements IConfigurationManager {
 		await this.adapterManager.activateDebuggers('onDebugInitialConfigurations');
 		const results = await Promise.all(this.configProviders.filter(p => p.type === type && p.triggerKind === DebugConfigurationProviderTriggerKind.Initial && p.provideDebugConfigurations).map(p => p.provideDebugConfigurations!(folderUri, token)));
 
-		return results.reduce((first, second) => first.concat(second), []);
+		// Optimization: Use flat() instead of reduce(concat) for O(N) performance
+		return results.flat();
 	}
 
 	async getDynamicProviders(): Promise<{ label: string; type: string; getProvider: () => Promise<IDebugConfigurationProvider | undefined>; pick: () => Promise<{ launch: ILaunch; config: IConfig; label: string } | undefined> }[]> {
@@ -350,8 +351,9 @@ export class ConfigurationManager implements IConfigurationManager {
 
 	private setCompoundSchemaValues(): void {
 		const compoundConfigurationsSchema = (<IJSONSchema>launchSchema.properties!['compounds'].items).properties!['configurations'];
+		// Optimization: Use flat() instead of reduce(concat) for O(N) performance
 		const launchNames = this.launches.map(l =>
-			l.getConfigurationNames(true)).reduce((first, second) => first.concat(second), []);
+			l.getConfigurationNames(true)).flat();
 		(<IJSONSchema>compoundConfigurationsSchema.items).oneOf![0].enum = launchNames;
 		(<IJSONSchema>compoundConfigurationsSchema.items).oneOf![1].properties!.name.enum = launchNames;
 
