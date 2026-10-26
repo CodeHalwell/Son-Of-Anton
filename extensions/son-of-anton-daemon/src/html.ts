@@ -33,7 +33,9 @@ export function renderBoardHtml(options: { nonce: string; style: string; cspSour
 <script nonce="${nonce}">
 const api = acquireVsCodeApi();
 for (const type of ['refresh', 'add']) document.getElementById(type).onclick = () => api.postMessage({type});
-window.addEventListener('message', ({data}) => {
+window.addEventListener('message', event => {
+	if (event.origin !== window.origin || !event.data || typeof event.data !== 'object') return;
+	const data = event.data;
 	if (data.type === 'error') { document.getElementById('error').textContent = data.error; return; }
 	if (data.type !== 'board') return;
 	document.getElementById('error').textContent = ''; document.getElementById('repository').textContent = data.repository;
