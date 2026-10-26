@@ -65,7 +65,9 @@ permissions:
 
 concurrency:
   group: ide-distribution-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  # Finish the active native matrix so its verified dependency cache is
+  # available to the newest pending revision. GitHub coalesces pending runs.
+  cancel-in-progress: false
 
 jobs:
   prepare:
