@@ -1,6 +1,6 @@
 /*---------------------------------------------------------------------------------------------
- * Copyright (c) Microsoft Corporation. All rights reserved.
- * Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
@@ -12,24 +12,34 @@ import type { SharedSessionState } from '../src/session.js';
 let script: string;
 const windows: JSDOM[] = [];
 beforeAll(async () => {
-	const result = await build({ entryPoints: [fileURLToPath(new URL('../src/webview.ts', import.meta.url))],
-		bundle: true, write: false, platform: 'browser', format: 'iife' });
+	const result = await build({
+		entryPoints: [fileURLToPath(new URL('../src/webview.ts', import.meta.url))],
+		bundle: true, write: false, platform: 'browser', format: 'iife'
+	});
 	script = result.outputFiles[0].text;
 });
 afterEach(() => { for (const dom of windows.splice(0)) { dom.window.close(); } });
 
 function mount() {
-	const html = renderSessionHtml({ nonce: 'fixture-nonce', script: 'https://fixture/webview.js',
-		style: 'https://fixture/session.css', cspSource: 'https://fixture', localize: text => text });
+	const html = renderSessionHtml({
+		nonce: 'fixture-nonce', script: 'https://fixture/webview.js',
+		style: 'https://fixture/session.css', cspSource: 'https://fixture', localize: text => text
+	});
 	const dom = new JSDOM(html, { runScripts: 'outside-only', url: 'https://fixture/' });
 	windows.push(dom);
 	const sent: Array<Record<string, string>> = [];
 	let saved: object = {};
-	Object.assign(dom.window, { acquireVsCodeApi: () => ({ postMessage: (message: Record<string, string>) => sent.push(message),
-		getState: () => saved, setState: (state: object) => { saved = state; } }) });
+	Object.assign(dom.window, {
+		acquireVsCodeApi: () => ({
+			postMessage: (message: Record<string, string>) => sent.push(message),
+			getState: () => saved, setState: (state: object) => { saved = state; }
+		})
+	});
 	dom.window.eval(script);
-	const state: SharedSessionState = { status: 'attached', sessionId: '11111111-1111-1111-1111-111111111111',
-		projection: { title: 'Shared session', rows: [], activeRuns: [], approvals: [], questions: [], historyTruncated: false } };
+	const state: SharedSessionState = {
+		status: 'attached', sessionId: '11111111-1111-1111-1111-111111111111',
+		projection: { title: 'Shared session', rows: [], activeRuns: [], approvals: [], questions: [], historyTruncated: false }
+	};
 	const receive = (message: object): void => { dom.window.dispatchEvent(new dom.window.MessageEvent('message', { data: message })); };
 	const update = (trusted = true): void => receive({ type: 'state', trusted, library: [], state, error: '' });
 	return { dom, sent, state, update, receive, html };
@@ -59,8 +69,8 @@ describe('shared session webview', () => {
 		view.update();
 		expect(view.dom.window.document.querySelector('#transcript img')).toBeNull();
 		expect(view.dom.window.document.querySelector('#transcript')!.textContent).toContain('<img');
-		expect(view.html).toContain("default-src 'none'");
-		expect(view.html).toContain("script-src 'nonce-fixture-nonce'");
+		expect(view.html).toContain('default-src \'none\'');
+		expect(view.html).toContain('script-src \'nonce-fixture-nonce\'');
 	});
 
 	it('disables prompts and approvals while untrusted or disconnected', () => {

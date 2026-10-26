@@ -24,7 +24,7 @@ if (systemOrt && (!process.env.ORT_LICENSE_FILE || !process.env.ORT_NOTICES_FILE
 if (systemOrt) {
 	const version = execFileSync('python3', ['-c', `import ctypes,sys
 class ApiBase(ctypes.Structure):
- _fields_=[('get_api',ctypes.c_void_p),('version',ctypes.CFUNCTYPE(ctypes.c_char_p))]
+	_fields_=[('get_api',ctypes.c_void_p),('version',ctypes.CFUNCTYPE(ctypes.c_char_p))]
 library=ctypes.CDLL(sys.argv[1]);library.OrtGetApiBase.restype=ctypes.POINTER(ApiBase)
 print(library.OrtGetApiBase().contents.version().decode())`, path.join(systemOrt, 'libonnxruntime.so.1.22.0')], { encoding: 'utf8' }).trim();
 	if (version !== '1.22.0') { throw new Error(`ONNX Runtime 1.22.0 is required; supplied SDK reports ${version}`); }

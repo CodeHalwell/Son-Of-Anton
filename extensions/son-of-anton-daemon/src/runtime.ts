@@ -1,6 +1,6 @@
 /*---------------------------------------------------------------------------------------------
- * Copyright (c) Microsoft Corporation. All rights reserved.
- * Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import * as vscode from 'vscode';
 import { execFile } from 'node:child_process';
@@ -54,10 +54,12 @@ export async function openTerminal(context: vscode.ExtensionContext): Promise<vo
 	const directory = path.join(context.extensionPath, 'runtime/codypendent');
 	const manifest = JSON.parse(await readFile(path.join(directory, 'manifest.json'), 'utf8')) as { platform: string; arch: string };
 	if (manifest.platform !== process.platform || manifest.arch !== process.arch) { throw new Error(vscode.l10n.t('Install the matching Codypendent runtime for this machine.')); }
-	const terminal = vscode.window.createTerminal({ name: 'Codypendent', cwd: folder.uri,
+	const terminal = vscode.window.createTerminal({
+		name: 'Codypendent', cwd: folder.uri,
 		shellPath: path.join(directory, 'codypendent'), shellArgs: [], env: {
 			CODYPENDENT_SOCKET: vscode.workspace.getConfiguration('sota.daemon').get<string>('socketPath') || resolveSocketPath(),
-		} });
+		}
+	});
 	context.subscriptions.push(terminal); terminal.show();
 }
 

@@ -28,6 +28,10 @@ export const all = Object.freeze<string[]>([
 	'!test/**/out/**',
 	'!**/node_modules/**',
 	'!**/*.js.map',
+	// Compressed build inputs have separate archive integrity checks.
+	'!build/codypendent/vendor/*.tar.gz',
+	'!extensions/son-of-anton-daemon/vendor/*.tgz',
+	'!extensions/son-of-anton-daemon/runtime/**',
 ]);
 
 export const unicodeFilter = Object.freeze<string[]>([
@@ -194,6 +198,8 @@ export const copyrightFilter = Object.freeze<string[]>([
 	'!build/**/*.init',
 	'!build/darwin/patch-dmg.py',
 	'!build/linux/libcxx-fetcher.*',
+	// Python uses its native comment syntax for the equivalent MIT header.
+	'!extensions/son-of-anton-daemon/test/pty-client.py',
 	'!build/npm/gyp/custom-headers/*.patch',
 	'!resources/linux/snap/snapcraft.yaml',
 	'!resources/win32/bin/code.js',

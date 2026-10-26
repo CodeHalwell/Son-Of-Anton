@@ -1,6 +1,6 @@
 /*---------------------------------------------------------------------------------------------
- * Copyright (c) Microsoft Corporation. All rights reserved.
- * Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -48,7 +48,7 @@ const destination = path.join(root, 'extensions/son-of-anton-daemon/runtime/cody
 await withStagedDirectory(destination, async staged => {
 	const files = [];
 	for (const [name, from] of [['codypendent', binary], ['codypendent-ui-worker-launcher', launcher]]) {
-		if (!from) continue;
+		if (!from) { continue; }
 		await copyFile(from, path.join(staged, name)); await chmod(path.join(staged, name), 0o755);
 		files.push({ name, sha256: sha256(await readFile(from)) });
 	}

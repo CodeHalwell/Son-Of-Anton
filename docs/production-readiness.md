@@ -47,6 +47,8 @@ Review CI identified existing dependency advisories. The pinned runtime now incl
 
 This change contains Tier 1 additions, Tier 2 integration hooks and Tier 3 changes to existing extension UI and build/installer scripts. The existing chat and inline surfaces need an adapter to use one daemon-owned session instead of starting competing runtimes. The existing assembly hooks must include the companion extension, verified SDK and native runtime in ordinary installers. Package permission normalization ensures installers built under a private umask remain readable and executable by their users; ELF selection avoids shipping incompatible optional native modules. Keeping these changes in the existing assembly path makes installer verification exercise the same product users receive. Senior engineer review is required before merge under the repository's modification-tier policy.
 
+Text hygiene excludes the compressed vendor inputs and generated runtime directory. Separate source-archive integrity checks validate the vendored bytes, while the companion's TypeScript, CSS and test sources retain the repository's normal formatting, header and lint checks.
+
 ## Known limits
 
 The shared graph is structural and evidence-qualified; it is not a claim of complete semantic impact or automatic test selection. Optional local embedding models have not been downloaded or evaluated in this session. Unknown usage remains unknown. A completed run or a manually moved board card does not establish validation success.

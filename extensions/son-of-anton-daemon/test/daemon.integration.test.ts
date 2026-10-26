@@ -1,6 +1,6 @@
 /*---------------------------------------------------------------------------------------------
- * Copyright (c) Microsoft Corporation. All rights reserved.
- * Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import * as http from 'node:http';
 import * as os from 'node:os';
@@ -29,10 +29,14 @@ it.skipIf(!binary)('retains a real daemon run across client disconnect and repla
 		requested = true;
 		await new Promise<void>(resolve => { releaseModel = resolve; });
 		response.writeHead(200, { 'Content-Type': 'text/event-stream' });
-		response.end('data: ' + JSON.stringify({ id: 'fixture', object: 'chat.completion.chunk', created: 0, model: 'shared-fixture',
-			choices: [{ index: 0, delta: { role: 'assistant', content: 'Shared runtime verified.' }, finish_reason: null }] }) + '\n\n'
-			+ 'data: ' + JSON.stringify({ id: 'fixture', object: 'chat.completion.chunk', created: 0, model: 'shared-fixture',
-				choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 } })
+		response.end('data: ' + JSON.stringify({
+			id: 'fixture', object: 'chat.completion.chunk', created: 0, model: 'shared-fixture',
+			choices: [{ index: 0, delta: { role: 'assistant', content: 'Shared runtime verified.' }, finish_reason: null }]
+		}) + '\n\n'
+			+ 'data: ' + JSON.stringify({
+				id: 'fixture', object: 'chat.completion.chunk', created: 0, model: 'shared-fixture',
+				choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 }
+			})
 			+ '\n\ndata: [DONE]\n\n');
 	});
 	await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -40,12 +44,18 @@ it.skipIf(!binary)('retains a real daemon run across client disconnect and repla
 	if (!address || typeof address === 'string') { throw new Error('No fixture address.'); }
 	await writeFile(path.join(data, 'models.toml'), `[[model]]\nid = "hosted-default"\nprovider = "openai-compatible"\nbase_url = "http://127.0.0.1:${address.port}/v1"\nmodel = "shared-fixture"\napi_key_env = ""\n`);
 	const socketPath = path.join(directory, 'daemon.sock');
-	const daemon = spawn(binary!, ['__daemon'], { cwd: repository, env: { ...process.env,
-		CODYPENDENT_DATA_DIR: data, CODYPENDENT_SOCKET: socketPath, RUST_LOG: 'warn' }, stdio: ['ignore', 'ignore', 'pipe'] });
+	const daemon = spawn(binary!, ['__daemon'], {
+		cwd: repository, env: {
+			...process.env,
+			CODYPENDENT_DATA_DIR: data, CODYPENDENT_SOCKET: socketPath, RUST_LOG: 'warn'
+		}, stdio: ['ignore', 'ignore', 'pipe']
+	});
 	let logs = '';
 	daemon.stderr.on('data', chunk => { logs = (logs + chunk.toString()).slice(-4000); });
-	const makeClient = (): SharedSession => new SharedSession({ socketPath, canWrite: () => true,
-		onChange: () => {}, onError: () => {}, timeoutMs: 10000 });
+	const makeClient = (): SharedSession => new SharedSession({
+		socketPath, canWrite: () => true,
+		onChange: () => { }, onError: () => { }, timeoutMs: 10000
+	});
 	const anton = makeClient(); const observer = makeClient(); const reopened = makeClient();
 	let terminal: ReturnType<typeof spawn> | undefined;
 	let terminalText = '';

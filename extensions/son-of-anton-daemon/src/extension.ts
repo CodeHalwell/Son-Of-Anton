@@ -1,6 +1,6 @@
 /*---------------------------------------------------------------------------------------------
- * Copyright (c) Microsoft Corporation. All rights reserved.
- * Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import * as vscode from 'vscode';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -102,8 +102,10 @@ class SharedSessionView implements vscode.WebviewViewProvider, vscode.Disposable
 			{ label: vscode.l10n.t('Learnings'), type: 'Learnings' as const }, { label: vscode.l10n.t('Documents'), type: 'Documents' as const }],
 			{ title: vscode.l10n.t('Knowledge Section') });
 		if (!section) { return; }
-		const reply = await this.session!.readService({ type: 'ReadKnowledge', session_id: chosen.session.session_id,
-			section: { type: section.type }, offset: 0, limit: 100 });
+		const reply = await this.session!.readService({
+			type: 'ReadKnowledge', session_id: chosen.session.session_id,
+			section: { type: section.type }, offset: 0, limit: 100
+		});
 		if (reply.type !== 'KnowledgePage') { throw new Error(vscode.l10n.t('The daemon did not return a knowledge page.')); }
 		const document = await vscode.workspace.openTextDocument({ language: 'json', content: JSON.stringify(reply.page, null, 2) });
 		await vscode.window.showTextDocument(document, { preview: true });
@@ -124,7 +126,8 @@ class SharedSessionView implements vscode.WebviewViewProvider, vscode.Disposable
 
 	private async handle(message: ViewMessage): Promise<void> {
 		if (this.disposed) { return; }
-		if ('sessionId' in message && message.type !== 'attach' && message.sessionId !== this.session?.snapshot.sessionId) {
+		if ((message.type === 'submit' || message.type === 'approve' || message.type === 'reject' || message.type === 'question' || message.type === 'cancel')
+			&& message.sessionId !== this.session?.snapshot.sessionId) {
 			throw new Error(vscode.l10n.t('The selected session changed. Retry from the current session.'));
 		}
 		switch (message.type) {
@@ -194,11 +197,13 @@ class SharedSessionView implements vscode.WebviewViewProvider, vscode.Disposable
 			catch { return false; }
 		};
 		const editor = vscode.window.activeTextEditor;
-		const update: IdeContextUpdate = { diagnostics_revision: this.diagnosticsRevision,
+		const update: IdeContextUpdate = {
+			diagnostics_revision: this.diagnosticsRevision,
 			open_files: vscode.workspace.textDocuments.filter(document => document.uri.scheme === 'file' && belongs(document.uri.fsPath)).map(document => document.uri.fsPath),
 			dirty_buffers: vscode.workspace.textDocuments.filter(document => document.isDirty && document.uri.scheme === 'file' && belongs(document.uri.fsPath)).map(document => {
 				const text = document.getText(); return { path: document.uri.fsPath, sha256: createHash('sha256').update(text).digest('hex'), byte_length: Buffer.byteLength(text) };
-			}) };
+			})
+		};
 		if (editor?.document.uri.scheme === 'file' && belongs(editor.document.uri.fsPath)) {
 			update.active_file = editor.document.uri.fsPath;
 			update.selection = { path: editor.document.uri.fsPath, range: { start: editor.selection.start, end: editor.selection.end } };
@@ -210,17 +215,21 @@ class SharedSessionView implements vscode.WebviewViewProvider, vscode.Disposable
 		if (this.disposed || this.publishTimer) { return; }
 		this.publishTimer = setTimeout(() => {
 			this.publishTimer = undefined;
-			void this.view?.webview.postMessage({ type: 'state', state: this.session?.snapshot,
-				library: this.library, trusted: vscode.workspace.isTrusted, error: this.error });
+			void this.view?.webview.postMessage({
+				type: 'state', state: this.session?.snapshot,
+				library: this.library, trusted: vscode.workspace.isTrusted, error: this.error
+			});
 		}, 50);
 	}
 	private showError(error: Error): void { this.error = error.message; this.schedulePublish(); }
 
 	private html(webview: vscode.Webview): string {
-		return renderSessionHtml({ nonce: randomBytes(24).toString('hex'),
+		return renderSessionHtml({
+			nonce: randomBytes(24).toString('hex'),
 			script: webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist/webview.js')).toString(),
 			style: webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media/session.css')).toString(),
-			cspSource: webview.cspSource, localize: text => vscode.l10n.t(text) });
+			cspSource: webview.cspSource, localize: text => vscode.l10n.t(text)
+		});
 	}
 
 	dispose(): void {

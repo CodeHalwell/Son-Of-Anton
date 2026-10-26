@@ -1,10 +1,10 @@
 /*---------------------------------------------------------------------------------------------
- * Copyright (c) Microsoft Corporation. All rights reserved.
- * Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 export function renderSessionHtml(options: { nonce: string; script: string; style: string; cspSource: string; localize: (text: string) => string }): string {
 	const { nonce, script, style, cspSource } = options;
-	const label = (text: string): string => options.localize(text).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]!));
+	const label = (text: string): string => options.localize(text).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&#39;' }[character]!));
 	return `<!doctype html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource}; script-src 'nonce-${nonce}';"><link rel="stylesheet" href="${style}"></head>
 <body><h2>${label('Shared Sessions')}</h2><p id="status" role="status"></p><p id="error" role="alert"></p>
@@ -23,7 +23,7 @@ export function renderSessionHtml(options: { nonce: string; script: string; styl
 /** Board payloads are untrusted: render all card data through textContent. */
 export function renderBoardHtml(options: { nonce: string; style: string; cspSource: string; localize: (text: string) => string }): string {
 	const { nonce } = options;
-	const label = (text: string): string => options.localize(text).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]!));
+	const label = (text: string): string => options.localize(text).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&#39;' }[character]!));
 	return `<!doctype html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${options.cspSource}; script-src 'nonce-${nonce}'">
 <link rel="stylesheet" href="${options.style}"></head><body>
@@ -34,25 +34,25 @@ export function renderBoardHtml(options: { nonce: string; style: string; cspSour
 const api = acquireVsCodeApi();
 for (const type of ['refresh', 'add']) document.getElementById(type).onclick = () => api.postMessage({type});
 window.addEventListener('message', ({data}) => {
- if (data.type === 'error') { document.getElementById('error').textContent = data.error; return; }
- if (data.type !== 'board') return;
- document.getElementById('error').textContent = ''; document.getElementById('repository').textContent = data.repository;
- document.getElementById('add').disabled = !data.trusted; document.getElementById('truncation').textContent = data.truncation || '';
- const cards = document.getElementById('cards'); cards.replaceChildren();
- const columns = new Map();
- for (const status of new Set(['todo', 'doing', 'review', 'done', ...data.items.map(item => item.status || 'todo')])) {
-  const column = document.createElement('section'), heading = document.createElement('h3'); column.className = 'shared-board-column';
-  heading.textContent = status; column.append(heading); columns.set(status, column); cards.append(column);
- }
- for (const item of data.items) {
-  const card = document.createElement('article'), title = document.createElement('h4'), detail = document.createElement('p');
-  title.textContent = typeof item.payload?.title === 'string' ? item.payload.title : JSON.stringify(item.payload);
-  detail.textContent = [item.status || 'todo', item.assignee, 'r' + item.revision].filter(Boolean).join(' · ');
-  card.append(title, detail);
-  for (const type of ['move', 'assign']) { const button = document.createElement('button'); button.textContent = document.getElementById('labels').content.querySelector('#' + type + '-label').textContent;
-   button.disabled = !data.trusted; button.onclick = () => api.postMessage({type, id: item.id}); card.append(button); }
-  columns.get(item.status || 'todo').append(card);
- }
+	if (data.type === 'error') { document.getElementById('error').textContent = data.error; return; }
+	if (data.type !== 'board') return;
+	document.getElementById('error').textContent = ''; document.getElementById('repository').textContent = data.repository;
+	document.getElementById('add').disabled = !data.trusted; document.getElementById('truncation').textContent = data.truncation || '';
+	const cards = document.getElementById('cards'); cards.replaceChildren();
+	const columns = new Map();
+	for (const status of new Set(['todo', 'doing', 'review', 'done', ...data.items.map(item => item.status || 'todo')])) {
+		const column = document.createElement('section'), heading = document.createElement('h3'); column.className = 'shared-board-column';
+		heading.textContent = status; column.append(heading); columns.set(status, column); cards.append(column);
+	}
+	for (const item of data.items) {
+		const card = document.createElement('article'), title = document.createElement('h4'), detail = document.createElement('p');
+		title.textContent = typeof item.payload?.title === 'string' ? item.payload.title : JSON.stringify(item.payload);
+		detail.textContent = [item.status || 'todo', item.assignee, 'r' + item.revision].filter(Boolean).join(' · ');
+		card.append(title, detail);
+		for (const type of ['move', 'assign']) { const button = document.createElement('button'); button.textContent = document.getElementById('labels').content.querySelector('#' + type + '-label').textContent;
+			button.disabled = !data.trusted; button.onclick = () => api.postMessage({type, id: item.id}); card.append(button); }
+		columns.get(item.status || 'todo').append(card);
+	}
 }); api.postMessage({type:'ready'});
 </script></body></html>`;
 }

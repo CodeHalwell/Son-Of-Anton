@@ -1,6 +1,6 @@
 /*---------------------------------------------------------------------------------------------
- * Copyright (c) Microsoft Corporation. All rights reserved.
- * Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import * as vscode from 'vscode';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -24,16 +24,20 @@ export async function openBoard(context: vscode.ExtensionContext): Promise<void>
 	let busy = false;
 	let items: BlackboardItemView[] = [];
 	const scope = { type: 'RepositoryBoard' as const, repository };
-	const session = new NodeSession({ clientName: 'son-of-anton-board', canWrite: () => vscode.workspace.isTrusted,
+	const session = new NodeSession({
+		clientName: 'son-of-anton-board', canWrite: () => vscode.workspace.isTrusted,
 		socketPath: vscode.workspace.getConfiguration('sota.daemon').get<string>('socketPath') || undefined,
-		onChange: () => {}, onError: error => { if (!disposed) { void panel.webview.postMessage({ type: 'error', error }); } } });
+		onChange: () => { }, onError: error => { if (!disposed) { void panel.webview.postMessage({ type: 'error', error }); } }
+	});
 	const refresh = async (): Promise<void> => {
 		const reply = await session.readService({ type: 'ReadBlackboard', workflow_run_id: '', board_repository: repository, include_superseded: false });
 		if (disposed || reply.type !== 'BlackboardItems') { return; }
 		const tasks = reply.items.filter(item => item.kind === 'task');
 		items = tasks.slice(0, 1000);
-		void panel.webview.postMessage({ type: 'board', repository, items, trusted: vscode.workspace.isTrusted,
-			truncation: tasks.length > items.length ? vscode.l10n.t('Showing {0} of {1} tasks. Open Codypendent to inspect the full board.', items.length, tasks.length) : '' });
+		void panel.webview.postMessage({
+			type: 'board', repository, items, trusted: vscode.workspace.isTrusted,
+			truncation: tasks.length > items.length ? vscode.l10n.t('Showing {0} of {1} tasks. Open Codypendent to inspect the full board.', items.length, tasks.length) : ''
+		});
 	};
 	const perform = async (action: () => Promise<void>): Promise<void> => {
 		if (disposed || busy) { return; }
@@ -44,7 +48,7 @@ export async function openBoard(context: vscode.ExtensionContext): Promise<void>
 	};
 	const timer = setInterval(() => { void perform(refresh); }, 3000);
 	const subscriptions = [panel.webview.onDidReceiveMessage((message: unknown) => {
-		if (!message || typeof message !== 'object' || !('type' in message)) { return; }
+		if (!message || typeof message !== 'object') { return; }
 		const request = message as { type: unknown; id?: unknown };
 		void perform(async () => {
 			if (request.type === 'ready' || request.type === 'refresh') { await refresh(); return; }
@@ -68,7 +72,9 @@ export async function openBoard(context: vscode.ExtensionContext): Promise<void>
 	}), vscode.workspace.onDidGrantWorkspaceTrust(() => { void perform(async () => { await session.connect(); await refresh(); }); })];
 	panel.onDidDispose(() => { disposed = true; clearInterval(timer); session.disconnect(); subscriptions.forEach(item => item.dispose()); });
 	const nonce = randomBytes(24).toString('hex');
-	panel.webview.html = renderBoardHtml({ nonce, cspSource: panel.webview.cspSource,
-		style: panel.webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'media/session.css')).toString(), localize: text => vscode.l10n.t(text) });
+	panel.webview.html = renderBoardHtml({
+		nonce, cspSource: panel.webview.cspSource,
+		style: panel.webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'media/session.css')).toString(), localize: text => vscode.l10n.t(text)
+	});
 	await perform(async () => { await session.connect(); await refresh(); });
 }

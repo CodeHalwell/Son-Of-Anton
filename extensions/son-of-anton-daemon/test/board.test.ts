@@ -1,6 +1,6 @@
 /*---------------------------------------------------------------------------------------------
- * Copyright (c) Microsoft Corporation. All rights reserved.
- * Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import { JSDOM } from 'jsdom';
 import { describe, expect, it } from 'vitest';
@@ -13,8 +13,12 @@ describe('shared board boundary', () => {
 			const sent: object[] = [];
 			Object.assign(dom.window, { acquireVsCodeApi: () => ({ postMessage: (message: object) => sent.push(message) }) });
 			dom.window.eval(dom.window.document.querySelector('script')!.textContent!);
-			const publish = (trusted: boolean) => dom.window.dispatchEvent(new dom.window.MessageEvent('message', { data: { type: 'board', repository: '/repo', trusted,
-				items: [{ id: 'server-card', status: 'doing', revision: 3, payload: { title: '<img src=x onerror=alert(1)>' } }] } }));
+			const publish = (trusted: boolean) => dom.window.dispatchEvent(new dom.window.MessageEvent('message', {
+				data: {
+					type: 'board', repository: '/repo', trusted,
+					items: [{ id: 'server-card', status: 'doing', revision: 3, payload: { title: '<img src=x onerror=alert(1)>' } }]
+				}
+			}));
 			publish(false);
 			expect(dom.window.document.querySelector('img')).toBeNull();
 			expect(dom.window.document.querySelector('article h4')?.textContent).toContain('<img');

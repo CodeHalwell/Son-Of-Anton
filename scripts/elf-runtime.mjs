@@ -1,4 +1,7 @@
-/* Copyright (c) Microsoft Corporation. Licensed under the MIT License. */
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
 /** Only native ELF64 objects with dynamic dependencies belong in shlibdeps. */
 export function needsNativeLibraries(bytes, machine = 62) {
 	if (bytes.length < 64 || !bytes.subarray(0, 4).equals(Buffer.from([127, 69, 76, 70])) || bytes[4] !== 2 || bytes[5] !== 1 || bytes.readUInt16LE(18) !== machine) { return false; }
