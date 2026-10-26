@@ -35,6 +35,8 @@ Native GUI checks use a disposable loopback model, a temporary data directory an
 
 The companion tests exercised the exact release-profile CLI and confined UI-worker launcher shipped in the IDE package. The final board and memory-outcome checks passed against the vendored SDK. Local Linux packages were built on Debian 13; their dependency floors are specific to that host and do not establish compatibility with older distributions.
 
+Review CI identified existing dependency advisories. The pinned runtime now includes patched TLS, certificate, Tokio and ZIP dependencies; 541 focused Rust regressions passed after that update. Codypendent documents dated unmaintained-library exceptions under its existing dependency policy. Updated JavaScript SDK and frontend dependency trees audit clean. Final rebuilt installers and native CI are checked against the updated source pin before release.
+
 ## Review and remaining release gates
 
 - Run and retain the review branches' native CI evidence for both repositories.

@@ -3,7 +3,7 @@
 	"version": "1.1.0",
 	"archive": "codypendent-protocol-1.1.0.tgz",
 	"repository": "https://github.com/CodeHalwell/codypendent",
-	"baseCommit": "a6a3c41391bcb9989b625f823a5104f36f6ea9b9",
+	"baseCommit": "c4b3ef779040c35cbde0cdba2b32e8db65a0864e",
 	"includesLocalChanges": false,
 	"sourceSha256": "f5f8012dc7a10a1271b8c51635aff380c3878e6a5e6c70c5b8ea3b69baf6710f",
 	"archiveSha256": "b9464a226a77883799ef1207ff0ec644085173c345722ce2bf613d1dfca75f71",
