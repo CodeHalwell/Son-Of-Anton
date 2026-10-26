@@ -18,7 +18,7 @@ const addedSources = execFileSync('git', ['ls-files', '--others', '--exclude-sta
 	.split('\0').filter(name => /^crates\/.*\.rs$/.test(name));
 // Explicit build-input roots. Never collect an entire working tree or local configuration.
 const allowed = name => ['Cargo.toml', 'Cargo.lock', 'LICENSE', 'rust-toolchain.toml'].includes(name)
-	|| /^(crates|migrations|docs\/specs|sdk\/wasm)\//.test(name);
+	|| /^(crates|migrations|docs\/specs|sdk\/wasm|third_party\/tantivy-sstable)\//.test(name);
 const files = [...new Set([...tracked.filter(allowed), ...addedSources])].sort();
 const digest = createHash('sha256');
 for (const file of files) {

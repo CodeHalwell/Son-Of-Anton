@@ -131,7 +131,8 @@ jobs:
           - os: windows-2022
             target: win32-x64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
+    # Cold Intel compilation can exceed two hours before installer validation.
+    timeout-minutes: 180
     defaults:
       run:
         shell: bash
@@ -180,6 +181,10 @@ jobs:
         run: node -e "if (process.platform + '-' + process.arch !== process.env.EXPECTED_TARGET) throw Error('Runner architecture mismatch')"
       - name: Install locked dependencies
         run: |
+          # Electron 43 headers need the modern compiler already present on this image.
+          if [[ "$RUNNER_OS" == 'Linux' ]]; then
+            export CC=gcc-12 CXX=g++-12
+          fi
           npm ci
           npm --prefix son-of-anton-core ci
           npm --prefix son-of-anton-cli ci

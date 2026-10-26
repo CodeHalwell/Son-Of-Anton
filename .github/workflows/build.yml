@@ -74,6 +74,20 @@ jobs:
           path: out-build/
           retention-days: 1
 
+  native-rust-audit:
+    name: Native graph dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25
+        env:
+          RUSTUP_TOOLCHAIN: '1.85.0'
+        with:
+          command: check
+          manifest-path: crates/Cargo.toml
+          arguments: --all-features --locked
+          command-arguments: advisories
+
   runtime-audit:
     name: Shipped dependency audit
     needs: compile
