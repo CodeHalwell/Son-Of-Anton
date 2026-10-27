@@ -113,7 +113,7 @@ export class EngineSession {
 	private readonly databaseFiles = new Set<string>();
 	private modelCache?: string;
 
-	constructor(private readonly config: EngineConfig, private readonly changed: (status: EngineStatus) => void = () => {}) { }
+	constructor(private readonly config: EngineConfig, private readonly changed: (status: EngineStatus) => void = () => {}, private readonly watchFiles: typeof watch = watch) { }
 
 	private publish(status: EngineStatus): void {
 		if (this.disposed) { return; }
@@ -138,7 +138,7 @@ export class EngineSession {
 			});
 			await this.engine.init(this.config.dbPath);
 			if (this.disposed) { return; }
-			this.watcher = watch(this.config.indexRoot, { recursive: true }, (_event, filename) => {
+			this.watcher = this.watchFiles(this.config.indexRoot, { recursive: true }, (_event, filename) => {
 				if (!filename) { this.scheduleRefresh(); return; }
 				const name = filename.toString().replace(/\\/g, '/');
 				if (/(^|\/)(node_modules|target|dist|out)(\/|$)/.test(name)) { return; }

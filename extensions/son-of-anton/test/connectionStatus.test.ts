@@ -15,27 +15,43 @@ suite('Connection and specialist status', () => {
 	const settings = new Map<string, string | Array<{ id: string; command: string }>>();
 	let items: vscode.StatusBarItem[];
 	let listeners: Array<(event: vscode.ConfigurationChangeEvent) => void>;
+	let commands: Map<string, () => Promise<void>>;
 	let restore: () => void;
-	const disposable = { dispose() {} };
+	const disposable = { dispose() { } };
 
 	setup(() => {
-		settings.clear(); items = []; listeners = [];
+		settings.clear(); items = []; listeners = []; commands = new Map();
 		const original = {
 			createStatusBarItem: mock.window.createStatusBarItem,
 			getConfiguration: mock.workspace.getConfiguration,
 			onDidChangeConfiguration: mock.workspace.onDidChangeConfiguration,
+			onDidGrantWorkspaceTrust: mock.workspace.onDidGrantWorkspaceTrust,
+			onDidChangeWindowState: mock.window.onDidChangeWindowState,
+			executeCommand: mock.commands.executeCommand,
+			registerCommand: mock.commands.registerCommand,
+			showQuickPick: mock.window.showQuickPick,
 		};
-		Object.assign(mock.window, { createStatusBarItem: () => {
-			const item = { text: '', show() {}, dispose() {} } as vscode.StatusBarItem;
-			items.push(item); return item;
-		} });
+		Object.assign(mock.commands, {
+			registerCommand: (command: string, callback: () => Promise<void>) => {
+				commands.set(command, callback);
+				return { dispose: () => { commands.delete(command); } };
+			}
+		});
+		Object.assign(mock.window, {
+			onDidChangeWindowState: () => disposable, createStatusBarItem: () => {
+				const item = { text: '', show() { }, dispose() { } } as vscode.StatusBarItem;
+				items.push(item); return item;
+			}
+		});
 		Object.assign(mock.workspace, {
+			onDidGrantWorkspaceTrust: () => disposable,
 			getConfiguration: (section?: string) => ({ get: (key: string, fallback?: string) => settings.get(section ? `${section}.${key}` : key) ?? fallback }),
 			onDidChangeConfiguration: (listener: typeof listeners[number]) => { listeners.push(listener); return disposable; },
 		});
 		restore = () => {
-			Object.assign(mock.window, { createStatusBarItem: original.createStatusBarItem });
-			Object.assign(mock.workspace, { getConfiguration: original.getConfiguration, onDidChangeConfiguration: original.onDidChangeConfiguration });
+			Object.assign(mock.window, { createStatusBarItem: original.createStatusBarItem, onDidChangeWindowState: original.onDidChangeWindowState, showQuickPick: original.showQuickPick });
+			Object.assign(mock.commands, { executeCommand: original.executeCommand, registerCommand: original.registerCommand });
+			Object.assign(mock.workspace, { getConfiguration: original.getConfiguration, onDidChangeConfiguration: original.onDidChangeConfiguration, onDidGrantWorkspaceTrust: original.onDidGrantWorkspaceTrust });
 		};
 	});
 	teardown(() => restore());
@@ -43,9 +59,69 @@ suite('Connection and specialist status', () => {
 	function createStatus(status: () => Promise<ProviderStatus[]>) {
 		return new StatusBarManager(
 			{ hasActiveAgents: () => false, onDidChangeTasks: () => disposable } as unknown as AgentManager,
-			{ status, onDidDisconnect: () => {} } as unknown as CredentialBroker,
+			{ status, onDidDisconnect: () => { } } as unknown as CredentialBroker,
 		);
 	}
+
+	test('shared readiness uses the active daemon inventory and distinguishes empty, blocked and unavailable', async () => {
+		settings.set('sota.runtime.backend', 'codypendent');
+		let result: unknown = [];
+		let failed = false, brokerCalls = 0;
+		Object.assign(mock.commands, {
+			executeCommand: async (command: string) => {
+				assert.equal(command, 'sota.daemon.models');
+				if (failed) { throw new Error('Disconnected'); }
+				return result;
+			}
+		});
+		const manager = createStatus(async () => { brokerCalls++; return [{ id: 'legacy', displayName: 'Legacy', connected: true }]; });
+		try {
+			await manager.refreshAuth();
+			assert.equal(items[1].text, '$(account) Configure Codypendent');
+			assert.equal(items[1].command, 'sota.daemon.terminal');
+			result = [{ id: 'blocked', readiness: { state: 'blocked' } }];
+			await manager.refreshAuth();
+			assert.equal(items[1].text, '$(account) Check Codypendent Models');
+			result = [{ id: 'configured', readiness: { state: 'unverified' } }, { id: 'ready', readiness: { state: 'ready' } }];
+			await manager.refreshAuth();
+			assert.equal(items[1].text, '$(account) Codypendent: 2 Models');
+			assert.match((items[1].tooltip as vscode.MarkdownString).value, /Inference is verified when a model runs/);
+			failed = true;
+			await manager.refreshAuth();
+			assert.equal(items[1].text, '$(warning) Codypendent Unavailable');
+			assert.equal(brokerCalls, 0);
+		} finally { manager.dispose(); }
+	});
+
+	test('shared runtime hides native harness readiness and routes its palette command to Codypendent', async () => {
+		settings.set('sota.runtime.backend', 'codypendent');
+		const executed: string[] = [];
+		Object.assign(mock.commands, { executeCommand: async (command: string) => { executed.push(command); } });
+		Object.assign(mock.window, { showQuickPick: () => { assert.fail('Shared runtime must not open native harness actions'); } });
+		const harness = new HarnessStatusBarItem();
+		try {
+			const command = commands.get('sota.harness.openMenu');
+			assert.ok(command, 'The contributed palette command must have a handler');
+			await command();
+			assert.deepEqual({ text: items[0].text, listeners: listeners.length, executed }, { text: '', listeners: 0, executed: ['sota.daemon.terminal'] });
+		}
+		finally { harness.dispose(); }
+		assert.equal(commands.has('sota.harness.openMenu'), false);
+	});
+
+	test('native runtime keeps the harness palette actions', async () => {
+		settings.set('sota.runtime.backend', 'native');
+		let choices: Array<{ id: string }> = [];
+		Object.assign(mock.window, { showQuickPick: async (items: typeof choices) => { choices = items; return undefined; } });
+		Object.assign(mock.commands, { executeCommand: () => { assert.fail('Native menu must not open Codypendent'); } });
+		const harness = new HarnessStatusBarItem();
+		try {
+			const command = commands.get('sota.harness.openMenu');
+			assert.ok(command);
+			await command();
+			assert.deepEqual(choices.map(item => item.id), ['sign-in-codex', 'sign-in-claude', 'configure-acp', 'open-specialists', 'open-traces', 'docs']);
+		} finally { harness.dispose(); }
+	});
 
 	test('configured ACP routes are visible without an OAuth session', async () => {
 		settings.set('sota.acp.agents', [{ id: 'claude-acp', command: 'claude-agent-acp' }]);

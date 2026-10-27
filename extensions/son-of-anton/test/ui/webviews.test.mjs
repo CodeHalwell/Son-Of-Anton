@@ -2002,3 +2002,20 @@ test('legacy histories remain readable and cannot silently start an empty shared
 	await page.getByRole('button', { name: 'Choose Compatibility Runtime', exact: true }).click();
 	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'daemonLegacySettings', conversationId });
 });
+
+
+test('unconfigured shared models show setup guidance and preserve the draft through recovery', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	await post(page, { type: 'daemonRuntime', connected: true });
+	await post(page, { type: 'loadConversation', conversationId: 'shared-setup', lastModel: 'daemon:default', messages: [] });
+	const catalog = configured => ({ type: 'providerCatalog', snapshot: { updatedAt: Date.now(), software: [], providers: [{ id: 'codypendent', name: 'Codypendent', catalogStatus: configured ? 'ready' : 'not-configured', inferenceStatus: 'not-tested', credentialSource: 'daemon', models: [{ id: 'daemon:default', label: 'Automatic (Codypendent)', chat: configured, images: false }] }] }, metadata: {} });
+	await post(page, catalog(false));
+	await page.locator('#messageInput').fill('Keep my first prompt');
+	assert.equal(await page.locator('#unavailableModelNotice').isVisible(), true);
+	assert.match(await page.locator('#unavailableModelNotice').innerText(), /No model is configured in Codypendent/);
+	assert.equal(await page.locator('#sendBtn').isDisabled(), true);
+	await post(page, catalog(true));
+	assert.equal(await page.locator('#unavailableModelNotice').isVisible(), false);
+	assert.equal(await page.locator('#sendBtn').isDisabled(), false);
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Keep my first prompt');
+});

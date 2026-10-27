@@ -39,7 +39,8 @@ export class WebviewProtocolProvider implements IDisposable {
 				const url = FileAccess.asFileUri(relativeResourcePath);
 
 				const content = await this._fileService.readFile(url);
-				return new Response(content.value.buffer.buffer as ArrayBuffer, {
+				// Copy the byte view, not its potentially larger pooled backing allocation.
+				return new Response(new Uint8Array(content.value.buffer), {
 					headers: {
 						'Content-Type': entry.mime,
 						...COI.getHeadersFromQuery(request.url),

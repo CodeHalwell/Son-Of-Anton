@@ -19,6 +19,10 @@ it.skipIf(!binary)('retains a real daemon run across client disconnect and repla
 	const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), 'anton-daemon-')));
 	const data = path.join(directory, 'data'); const repository = path.join(directory, 'repo');
 	await Promise.all([mkdir(data), mkdir(repository)]);
+	// The TUI reads the ACP catalog during startup. Keep this handoff fixture
+	// independent of the public registry's network latency and availability.
+	await mkdir(path.join(data, 'acp'));
+	await writeFile(path.join(data, 'acp/registry.json'), JSON.stringify({ version: '1', agents: [] }));
 	await writeFile(path.join(repository, 'example.ts'), 'export function shared() { return true; }\n');
 	execFileSync('git', ['init', '-q'], { cwd: repository });
 	let releaseModel: (() => void) | undefined;
@@ -73,8 +77,8 @@ it.skipIf(!binary)('retains a real daemon run across client disconnect and repla
 		const exited = new Promise<void>(resolve => { if (child.exitCode !== null || child.signalCode !== null) { resolve(); } else { child.once('exit', () => resolve()); } });
 		child.stdin!.end(); await exited;
 	};
-	const until = async (check: () => boolean): Promise<void> => {
-		for (let count = 0; count < 400; count++) { if (check()) { return; } await new Promise(resolve => setTimeout(resolve, 25)); }
+	const until = async (check: () => boolean, timeoutMs = 10000): Promise<void> => {
+		for (const deadline = Date.now() + timeoutMs; Date.now() < deadline;) { if (check()) { return; } await new Promise(resolve => setTimeout(resolve, 25)); }
 		throw new Error(`Native daemon condition not reached. ${logs}\n${terminalText.slice(-6000)}`);
 	};
 	try {
@@ -111,7 +115,9 @@ it.skipIf(!binary)('retains a real daemon run across client disconnect and repla
 		if (process.env.CODYPENDENT_TEST_TUI === '1') {
 			openTerminal();
 			const enter = setInterval(() => terminal?.stdin?.write('\r'), 200);
-			try { await until(() => terminalText.includes('Explain this project')); }
+			// Cold TUI boot hydrates knowledge/model projections before rendering.
+			// Bound that startup separately from the shorter daemon-event waits.
+			try { await until(() => terminalText.includes('Explain this project'), 40000); }
 			finally { clearInterval(enter); }
 			await closeTerminal();
 		}
@@ -122,7 +128,7 @@ it.skipIf(!binary)('retains a real daemon run across client disconnect and repla
 		if (process.env.CODYPENDENT_TEST_TUI === '1') {
 			openTerminal();
 			const enter = setInterval(() => terminal?.stdin?.write('\r'), 200);
-			try { await until(() => terminalText.includes('Shared runtime verified.')); }
+			try { await until(() => terminalText.includes('Shared runtime verified.'), 40000); }
 			finally { clearInterval(enter); }
 			await closeTerminal();
 		}
@@ -136,4 +142,4 @@ it.skipIf(!binary)('retains a real daemon run across client disconnect and repla
 		server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
 		await rm(directory, { recursive: true, force: true });
 	}
-}, 30000);
+}, 100000);

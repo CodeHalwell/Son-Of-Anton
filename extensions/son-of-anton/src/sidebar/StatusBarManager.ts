@@ -3,6 +3,8 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import * as vscode from 'vscode';
+import type { NodeSession } from '@codypendent/protocol/node';
+import { onDidChangeSharedModels, usesDaemonRuntime } from '../daemon/DaemonChat';
 import { AgentManager } from 'son-of-anton-core/agents/AgentManager';
 import { CredentialBroker } from 'son-of-anton-core/auth/CredentialBroker';
 import type { ProviderStatus } from 'son-of-anton-core/auth/types';
@@ -77,6 +79,10 @@ export class StatusBarManager implements vscode.Disposable {
 			if (event.affectsConfiguration('sota')) { void this.refreshAuth(); }
 		}));
 		if (secrets) { this.disposables.push(secrets.onDidChange(() => { void this.refreshAuth(); })); }
+		this.disposables.push(onDidChangeSharedModels(() => { void this.refreshAuth(); }));
+		this.disposables.push(vscode.window.onDidChangeWindowState(state => {
+			if (state.focused && usesDaemonRuntime()) { void this.refreshAuth(); }
+		}), vscode.workspace.onDidGrantWorkspaceTrust(() => { void this.refreshAuth(); }));
 	}
 
 	/**
@@ -86,6 +92,27 @@ export class StatusBarManager implements vscode.Disposable {
 	async refreshAuth(): Promise<void> {
 		if (this.disposed) { return; }
 		const sequence = ++this.refreshSequence;
+		if (usesDaemonRuntime()) {
+			this.authItem.command = 'sota.daemon.terminal';
+			try {
+				const models = await vscode.commands.executeCommand<Awaited<ReturnType<NodeSession['probeModels']>>>('sota.daemon.models');
+				if (this.disposed || sequence !== this.refreshSequence) { return; }
+				if (!models) { throw new Error('Shared model inventory unavailable'); }
+				const usable = models.filter(model => ['ready', 'unverified'].includes(model.readiness.state));
+				this.authItem.text = '$(account) ' + (models.length === 0 ? vscode.l10n.t('Configure Codypendent')
+					: usable.length === 0 ? vscode.l10n.t('Check Codypendent Models') : vscode.l10n.t('Codypendent: {0} Models', usable.length));
+				const tooltip = new vscode.MarkdownString();
+				tooltip.appendText(models.length === 0 ? vscode.l10n.t('No model is configured in the active Codypendent runtime.')
+					: vscode.l10n.t('{0} configured models; {1} available for selection. Inference is verified when a model runs.', models.length, usable.length));
+				tooltip.appendText('\n' + vscode.l10n.t('Click to configure models in Codypendent.'));
+				this.authItem.tooltip = tooltip;
+			} catch {
+				if (this.disposed || sequence !== this.refreshSequence) { return; }
+				this.authItem.text = '$(warning) ' + vscode.l10n.t('Codypendent Unavailable');
+				this.authItem.tooltip = vscode.l10n.t('Could not read models from the active Codypendent runtime. Trust this workspace to start it, or open Codypendent to check its connection.');
+			}
+			return;
+		}
 		try {
 			const config = vscode.workspace.getConfiguration('sota');
 			const [providers, credentials] = await Promise.all([
