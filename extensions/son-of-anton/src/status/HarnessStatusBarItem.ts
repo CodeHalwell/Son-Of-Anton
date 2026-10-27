@@ -63,6 +63,7 @@ export class HarnessStatusBarItem implements vscode.Disposable {
 
 	constructor() {
 		this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 94);
+		this.disposables.push(vscode.commands.registerCommand(STATUS_COMMAND, () => this.handleClick()));
 		// Shared model readiness is displayed by StatusBarManager. Native CLI
 		// discovery does not describe the runtime selected for this window.
 		if (usesDaemonRuntime()) { return; }
@@ -74,9 +75,6 @@ export class HarnessStatusBarItem implements vscode.Disposable {
 		this.refreshSnapshot();
 		this.render();
 
-		this.disposables.push(
-			vscode.commands.registerCommand(STATUS_COMMAND, () => this.handleClick()),
-		);
 		// Listen for setting changes so a `sota.agents.<handle>.model` flip
 		// updates the pinned-count without requiring a click. CLI install /
 		// sign-in changes don't fire VS Code config events, so the home
@@ -141,8 +139,8 @@ export class HarnessStatusBarItem implements vscode.Disposable {
 		const pinSegment = acpSpecialists.length > 0
 			? vscode.l10n.t('{0} ACP routes', acpSpecialists.length)
 			: pinnedSpecialists.length > 0
-			? `${pinnedSpecialists.length} pinned`
-			: 'default models';
+				? `${pinnedSpecialists.length} pinned`
+				: 'default models';
 		this.item.text = `$(rocket) Codex ${codexGlyph} · Claude ${claudeGlyph} · ${pinSegment}`;
 
 		const lines: string[] = ['Son of Anton — harness state'];
@@ -180,6 +178,10 @@ export class HarnessStatusBarItem implements vscode.Disposable {
 	}
 
 	private async handleClick(): Promise<void> {
+		if (usesDaemonRuntime()) {
+			await vscode.commands.executeCommand('sota.daemon.terminal');
+			return;
+		}
 		this.refreshSnapshot();
 		this.render();
 		if (!this.snapshot) {
@@ -224,8 +226,8 @@ export class HarnessStatusBarItem implements vscode.Disposable {
 			label: acpSpecialists.length > 0
 				? vscode.l10n.t('$(person) Specialist Routing — {0} ACP Routes', acpSpecialists.length)
 				: pinnedSpecialists.length > 0
-				? `$(person) Specialist models — ${pinnedSpecialists.length} pinned`
-				: '$(person) Specialist models — all default',
+					? `$(person) Specialist models — ${pinnedSpecialists.length} pinned`
+					: '$(person) Specialist models — all default',
 			description: 'Open Settings → search "sota.agents" for per-agent model overrides',
 		});
 		items.push({
