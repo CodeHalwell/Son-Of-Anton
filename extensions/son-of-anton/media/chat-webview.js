@@ -2967,7 +2967,10 @@
 			document.getElementById('queueMessageBtn').hidden = daemonBackend || !isStreaming;
 			document.getElementById('redirectMessageBtn').hidden = daemonBackend || !isStreaming;
 			const unavailable = isCurrentModelUnavailable();
-			document.getElementById('unavailableModelNotice').hidden = !unavailable;
+			const modelNotice = document.getElementById('unavailableModelNotice');
+			modelNotice.hidden = !unavailable;
+			const noSharedModels = daemonBackend && providerCatalogSnapshot?.providers.some(provider => provider.id === 'codypendent' && provider.catalogStatus === 'not-configured');
+			modelNotice.querySelector('span').textContent = uiText(noSharedModels ? 'sharedModelsNotConfigured' : 'modelUnavailable');
 			document.getElementById('queueMessageBtn').disabled = unavailable;
 			document.getElementById('redirectMessageBtn').disabled = unavailable;
 			sendBtn.disabled = !isStreaming && (unavailable || legacySharedConversation);

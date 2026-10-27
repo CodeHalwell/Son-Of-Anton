@@ -245,6 +245,16 @@ export function activate(context: vscode.ExtensionContext): void {
 	const provider = new SharedSessionView(context);
 	context.subscriptions.push(provider, vscode.window.registerWebviewViewProvider('sota.sharedSessions', provider),
 		vscode.commands.registerCommand('sota.daemon.ensure', () => ensureDaemon(context)),
+		vscode.commands.registerCommand('sota.daemon.models', async () => {
+			await ensureDaemon(context);
+			const session = new SharedSession({
+				clientName: 'son-of-anton-readiness', clientVersion: '0.1.0',
+				socketPath: vscode.workspace.getConfiguration('sota.daemon').get<string>('socketPath') || undefined,
+				canWrite: () => false, onChange: () => { }, onError: () => { }
+			});
+			try { await session.connect(); return await session.probeModels(); }
+			finally { session.disconnect(); }
+		}),
 		vscode.commands.registerCommand('sota.daemon.terminal', () => openTerminal(context)),
 		vscode.commands.registerCommand('sota.daemon.council', (history?: boolean) => openCouncil(context, history)),
 		vscode.commands.registerCommand('sota.daemon.board', () => openBoard(context)),

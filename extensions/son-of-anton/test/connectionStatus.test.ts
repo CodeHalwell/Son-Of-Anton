@@ -24,18 +24,23 @@ suite('Connection and specialist status', () => {
 			createStatusBarItem: mock.window.createStatusBarItem,
 			getConfiguration: mock.workspace.getConfiguration,
 			onDidChangeConfiguration: mock.workspace.onDidChangeConfiguration,
+			onDidGrantWorkspaceTrust: mock.workspace.onDidGrantWorkspaceTrust,
+			onDidChangeWindowState: mock.window.onDidChangeWindowState,
+			executeCommand: mock.commands.executeCommand,
 		};
-		Object.assign(mock.window, { createStatusBarItem: () => {
+		Object.assign(mock.window, { onDidChangeWindowState: () => disposable, createStatusBarItem: () => {
 			const item = { text: '', show() {}, dispose() {} } as vscode.StatusBarItem;
 			items.push(item); return item;
 		} });
 		Object.assign(mock.workspace, {
+			onDidGrantWorkspaceTrust: () => disposable,
 			getConfiguration: (section?: string) => ({ get: (key: string, fallback?: string) => settings.get(section ? `${section}.${key}` : key) ?? fallback }),
 			onDidChangeConfiguration: (listener: typeof listeners[number]) => { listeners.push(listener); return disposable; },
 		});
 		restore = () => {
-			Object.assign(mock.window, { createStatusBarItem: original.createStatusBarItem });
-			Object.assign(mock.workspace, { getConfiguration: original.getConfiguration, onDidChangeConfiguration: original.onDidChangeConfiguration });
+			Object.assign(mock.window, { createStatusBarItem: original.createStatusBarItem, onDidChangeWindowState: original.onDidChangeWindowState });
+			Object.assign(mock.commands, { executeCommand: original.executeCommand });
+			Object.assign(mock.workspace, { getConfiguration: original.getConfiguration, onDidChangeConfiguration: original.onDidChangeConfiguration, onDidGrantWorkspaceTrust: original.onDidGrantWorkspaceTrust });
 		};
 	});
 	teardown(() => restore());
@@ -46,6 +51,41 @@ suite('Connection and specialist status', () => {
 			{ status, onDidDisconnect: () => {} } as unknown as CredentialBroker,
 		);
 	}
+
+	test('shared readiness uses the active daemon inventory and distinguishes empty, blocked and unavailable', async () => {
+		settings.set('sota.runtime.backend', 'codypendent');
+		let result: unknown = [];
+		let failed = false, brokerCalls = 0;
+		Object.assign(mock.commands, { executeCommand: async (command: string) => {
+			assert.equal(command, 'sota.daemon.models');
+			if (failed) { throw new Error('Disconnected'); }
+			return result;
+		} });
+		const manager = createStatus(async () => { brokerCalls++; return [{ id: 'legacy', displayName: 'Legacy', connected: true }]; });
+		try {
+			await manager.refreshAuth();
+			assert.equal(items[1].text, '$(account) Configure Codypendent');
+			assert.equal(items[1].command, 'sota.daemon.terminal');
+			result = [{ id: 'blocked', readiness: { state: 'blocked' } }];
+			await manager.refreshAuth();
+			assert.equal(items[1].text, '$(account) Check Codypendent Models');
+			result = [{ id: 'configured', readiness: { state: 'unverified' } }, { id: 'ready', readiness: { state: 'ready' } }];
+			await manager.refreshAuth();
+			assert.equal(items[1].text, '$(account) Codypendent: 2 Models');
+			assert.match((items[1].tooltip as vscode.MarkdownString).value, /Inference is verified when a model runs/);
+			failed = true;
+			await manager.refreshAuth();
+			assert.equal(items[1].text, '$(warning) Codypendent Unavailable');
+			assert.equal(brokerCalls, 0);
+		} finally { manager.dispose(); }
+	});
+
+	test('shared runtime does not show native harness readiness', () => {
+		settings.set('sota.runtime.backend', 'codypendent');
+		const harness = new HarnessStatusBarItem();
+		try { assert.equal(items[0].text, ''); assert.equal(listeners.length, 0); }
+		finally { harness.dispose(); }
+	});
 
 	test('configured ACP routes are visible without an OAuth session', async () => {
 		settings.set('sota.acp.agents', [{ id: 'claude-acp', command: 'claude-agent-acp' }]);

@@ -7,6 +7,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { usesDaemonRuntime } from '../daemon/DaemonChat';
 import { isClaudeCodeAvailable } from 'son-of-anton-core/llm/claudeCodeRunner';
 import { isCodexAvailable } from 'son-of-anton-core/llm/codexRunner';
 
@@ -62,6 +63,9 @@ export class HarnessStatusBarItem implements vscode.Disposable {
 
 	constructor() {
 		this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 94);
+		// Shared model readiness is displayed by StatusBarManager. Native CLI
+		// discovery does not describe the runtime selected for this window.
+		if (usesDaemonRuntime()) { return; }
 		this.item.command = STATUS_COMMAND;
 		this.item.text = '$(rocket) harness';
 		this.item.tooltip = 'Son of Anton — harness state. Click for sign-in / model overrides / harness stats.';

@@ -8,6 +8,22 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
+async function verifyWebview() {
+	const panel = vscode.window.createWebviewPanel('sota.installProbe', 'Installed webview check', vscode.ViewColumn.One, { enableScripts: true });
+	let timer, listener;
+	try {
+		const ready = new Promise((resolve, reject) => {
+			timer = setTimeout(() => reject(new Error('Installed webview did not execute: check the webview service worker and protocol response bounds')), 20000);
+			listener = panel.webview.onDidReceiveMessage(message => {
+				if (message.type === 'ready') { resolve(); }
+			});
+		});
+		panel.webview.html = '<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'nonce-install-probe\';"></head><body><h1>Installed webview</h1><script nonce="install-probe">acquireVsCodeApi().postMessage({type:"ready"});</script></body></html>';
+		await ready;
+		return { scriptsExecuted: true };
+	} finally { clearTimeout(timer); listener?.dispose(); panel.dispose(); }
+}
+
 async function verifyGraph(extension) {
 	const workspace = vscode.workspace.workspaceFolders[0].uri.fsPath;
 	await fs.writeFile(path.join(workspace, 'graph-fixture.ts'), 'export function installedGraphProbe() { return 42; }\n');
@@ -77,6 +93,8 @@ exports.run = async () => {
 	for (const command of required) { assert.ok(commands.includes(command), `Missing command ${command}`); }
 	// Read-only first-run surfaces must open without credentials or granting agent execution trust.
 	for (const command of ['sota.openChat', 'sota.openSetupWizard', 'sota.reviewWithCouncil']) { console.log(`[installation-test] Opening ${command}`); await vscode.commands.executeCommand(command); }
+	const webview = await verifyWebview();
+	console.log('[installation-test] Packaged webview executed');
 	const native = require(path.join(extension.extensionPath, 'runtime/codegraph/node_modules/@son-of-anton/codegraph-napi/engine.node'));
 	assert.equal(typeof native, 'object');
 	assert.ok(Object.keys(native).length, 'Native graph exports are missing');
@@ -84,5 +102,5 @@ exports.run = async () => {
 	console.log('[installation-test] Packaged graph query passed');
 	const files = await vscode.workspace.findFiles('**/graph-fixture.ts', null, 10);
 	assert.equal(files.length, 1, 'Installed workspace file search must find the graph fixture');
-	await fs.writeFile(process.env.SOTA_INSTALL_RESULT, JSON.stringify({ success: true, extensionPath: extension.extensionPath, debugger: debuggerInfo, sharedRuntime: { extensionPath: shared.extensionPath, backend: process.platform === 'win32' ? 'native' : 'codypendent' }, commands: required, graph, fileSearch: { matches: files.length }, graphExports: Object.keys(native), activationMs: Date.now() - started, memory: process.memoryUsage(), trusted: vscode.workspace.isTrusted }, null, 2));
+	await fs.writeFile(process.env.SOTA_INSTALL_RESULT, JSON.stringify({ success: true, extensionPath: extension.extensionPath, debugger: debuggerInfo, sharedRuntime: { extensionPath: shared.extensionPath, backend: process.platform === 'win32' ? 'native' : 'codypendent' }, commands: required, webview, graph, fileSearch: { matches: files.length }, graphExports: Object.keys(native), activationMs: Date.now() - started, memory: process.memoryUsage(), trusted: vscode.workspace.isTrusted }, null, 2));
 };

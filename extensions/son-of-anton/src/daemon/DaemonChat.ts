@@ -18,6 +18,9 @@ interface DaemonChatOptions {
 	onEvent?(event: SessionEvent): void;
 	createSession?(options: NodeSessionOptions): NodeSession;
 }
+const sharedModelsChanged = new vscode.EventEmitter<void>();
+export const onDidChangeSharedModels = sharedModelsChanged.event;
+
 let context: vscode.ExtensionContext | undefined;
 let configuredBackend: boolean | undefined;
 
@@ -174,6 +177,7 @@ export class DaemonChat implements vscode.Disposable {
 		if (!session) { return; }
 		const models = await session.probeModels();
 		if (this.session !== session) { return; }
+		sharedModelsChanged.fire();
 		this.post({ type: 'daemonRuntime', connected: true, sessionId: this.sessionId });
 		const available = (item: typeof models[number]): boolean => ['ready', 'unverified'].includes(item.readiness.state);
 		this.post({ type: 'providerCatalog', snapshot: { version: 1, updatedAt: Date.now(), software: [], providers: [{
