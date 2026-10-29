@@ -350,8 +350,7 @@ export class ConfigurationManager implements IConfigurationManager {
 
 	private setCompoundSchemaValues(): void {
 		const compoundConfigurationsSchema = (<IJSONSchema>launchSchema.properties!['compounds'].items).properties!['configurations'];
-		const launchNames = this.launches.map(l =>
-			l.getConfigurationNames(true)).reduce((first, second) => first.concat(second), []);
+		const launchNames = this.launches.flatMap(l => l.getConfigurationNames(true));
 		(<IJSONSchema>compoundConfigurationsSchema.items).oneOf![0].enum = launchNames;
 		(<IJSONSchema>compoundConfigurationsSchema.items).oneOf![1].properties!.name.enum = launchNames;
 
