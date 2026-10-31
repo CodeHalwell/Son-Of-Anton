@@ -1,17 +1,39 @@
-# Shared runtime release readiness
+# Product release readiness
 
-Status: release candidate under validation, not a published or signed production release. Evidence below is observed locally on Linux x64 on 2026-10-26. Cross-platform installers require their own successful native CI runs.
+Status: the independent-products branch is under validation and has not been
+published or signed. Son of Anton bundles its own engine and state; Codypendent
+attachment is explicit. See [the independent products boundary](independent-products.md).
+
+The current 2026-10-31 work includes repository-scoped workflow discovery,
+definition-bound launches, protected reconciliation, and scoped monitoring.
+Full built-in extension compilation and the core TypeScript check now pass with
+the pinned Node 22.23.4 and the complete locked extension dependencies installed.
+`bootstrap:sota` alone does not install all inherited Code OSS extension dependencies.
+
+The private engine source archive has also been refreshed and verified against
+all 758 selected build inputs from the current Codypendent checkout. It includes
+protocol 1.12, workflow catalogue discovery and atomic launch identity checks.
+Exact source and archive hashes are recorded in the
+[runtime manifest](../build/codypendent/vendor/manifest.json). This source check
+does not replace the fresh native binary and installer checks below.
+
+The installer and native-window observations below are **historical evidence from
+2026-10-26**, on earlier source and runtime pins. Their counts and successful
+packages do not validate the current independent-products branch. Fresh native installers,
+signing, update/reinstall checks, and platform CI are required before a production
+release. A debug native-window smoke build does not establish packaged resource
+completeness or a distributable release.
 
 ## Verified implementation
 
-- Primary Anton chat, VS Code participants and inline assistance use the shared daemon by default on Unix. Native mode is an explicit compatibility choice, frozen until reload.
+- Primary Anton chat, VS Code participants and inline assistance use Anton's private bundled daemon by default on Unix. Native mode is an explicit compatibility choice, frozen until reload. External attachment keeps configuration and lifecycle with the owning runtime.
 - Session switching/disconnect does not cancel durable work. Acceptance, cancellation, replay, sequence gaps, request deadlines, history failures and draft ownership have regression coverage.
 - Repository task cards, graph reads/builds and knowledge browsing use authenticated daemon services. Knowledge scopes derive from owned sessions; foreign and missing sessions have indistinguishable refusals.
 - Linux sandbox detection checks whether confinement actually works. Tests cover namespace-disabled hosts without allowing an unrestricted fallback.
 - Legacy local conversations remain visible and cannot be silently overwritten by shared-session snapshots.
 - SDK and runtime build inputs have vendored archives, integrity checks, MIT notices and source provenance. Runtime extraction and artifact replacement are staged atomically.
 
-## Observed evidence
+## Historical observed evidence (2026-10-26)
 
 | Boundary | Result |
 | --- | --- |

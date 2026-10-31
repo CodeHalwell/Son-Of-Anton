@@ -1423,7 +1423,7 @@
 					],
 					"default": "auto",
 					"scope": "machine",
-					"description": "Agent runtime. Auto uses the shared Codypendent daemon on Linux and macOS, and the native compatibility runtime on Windows. Reload Window after changing this setting."
+					"description": "Agent runtime. Auto uses Son of Anton's privately bundled Rust engine on Linux and macOS, and the native compatibility runtime on Windows. The codypendent value also selects the Rust engine; external attachment is controlled by sota.daemon.connection. Reload Window after changing this setting."
 				}
 			}
 		}

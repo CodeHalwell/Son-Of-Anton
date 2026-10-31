@@ -30,20 +30,13 @@ await withStagedDirectory(source, staged => tar.x({ cwd: staged, file: archive, 
 } }));
 const target = path.join(root, '.build/codypendent-target');
 const debug = process.argv.includes('--debug');
-const supplied = process.argv.indexOf('--binary');
-let binary;
-let launcher;
-if (supplied >= 0) {
-	assert.ok(debug, '--binary is restricted to local debug verification');
-	binary = path.resolve(process.argv[supplied + 1]);
-} else {
-	execFileSync('cargo', ['build', '--locked', ...(!debug ? ['--release'] : []), '-p', 'codypendent-cli', '--bin', 'codypendent',
-		'-p', 'codypendent-ui-worker-launcher', '--bin', 'codypendent-ui-worker-launcher'], {
-		cwd: source, stdio: 'inherit', env: { ...process.env, CARGO_TARGET_DIR: target, CODYPENDENT_BUILD_ID: manifest.sourceSha256 },
-	});
-	binary = path.join(target, debug ? 'debug' : 'release', 'codypendent');
-	launcher = path.join(target, debug ? 'debug' : 'release', 'codypendent-ui-worker-launcher');
-}
+assert.ok(!process.argv.includes('--binary'), 'Prebuilt binary overrides are unsupported: both runtime products must be built from the verified source archive.');
+execFileSync('cargo', ['build', '--locked', ...(!debug ? ['--release'] : []), '-p', 'codypendent-cli', '--bin', 'codypendent',
+	'-p', 'codypendent-ui-worker-launcher', '--bin', 'codypendent-ui-worker-launcher'], {
+	cwd: source, stdio: 'inherit', env: { ...process.env, CARGO_TARGET_DIR: target, CODYPENDENT_BUILD_ID: manifest.sourceSha256 },
+});
+const binary = path.join(target, debug ? 'debug' : 'release', 'codypendent');
+const launcher = path.join(target, debug ? 'debug' : 'release', 'codypendent-ui-worker-launcher');
 assert.match(execFileSync(binary, ['--version'], { encoding: 'utf8' }), new RegExp(`^codypendent ${manifest.version.replaceAll('.', '\\.')}\\b`));
 const destination = path.join(root, 'extensions/son-of-anton-daemon/runtime/codypendent');
 await withStagedDirectory(destination, async staged => {
@@ -58,6 +51,7 @@ await withStagedDirectory(destination, async staged => {
 		noticeFile: path.join(source, 'third_party/tantivy-sstable/LICENSE'),
 	});
 	await writeFile(path.join(staged, 'manifest.json'), JSON.stringify({ version: manifest.version, platform: process.platform, arch: process.arch,
+		runtimeProducts: ['codypendent', 'son-of-anton'],
 		profile: debug ? 'debug' : 'release', sourceSha256: manifest.sourceSha256, archiveSha256: manifest.archiveSha256, files, nodeRuntime,
 	}, null, '\t') + '\n');
 });

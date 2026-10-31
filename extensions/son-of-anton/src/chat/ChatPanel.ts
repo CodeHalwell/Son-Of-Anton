@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 import * as vscode from 'vscode';
 import { DaemonChat, usesDaemonRuntime, hasSharedSession } from '../daemon/DaemonChat';
+import { onDidChangeDaemonProviderCredentials, openDaemonModelSetup, saveDaemonProviderCredentials } from '../daemon/DaemonProviderSetup';
 import type { NodeSessionState } from '@codypendent/protocol/node';
 import { getChatUiStrings } from './chatUiStrings';
 import { ChatTurnQueue } from './ChatTurnQueue';
@@ -62,7 +63,7 @@ export type ChatMessageContentPart =
 export type ChatMessageContent = string | ReadonlyArray<ChatMessageContentPart>;
 
 export interface ChatMessage {
-	execution?: { route: 'acp' | 'native' | 'orchestrator'; outcome: 'completed' | 'cancelled' | 'failed'; latencyMs: number; inputTokens?: number; outputTokens?: number; estimatedCostUsd?: number };
+	execution?: { route: 'acp' | 'native' | 'orchestrator'; outcome: 'completed' | 'cancelled' | 'failed'; chatMode?: ChatMode; latencyMs: number; inputTokens?: number; outputTokens?: number; estimatedCostUsd?: number };
 	feedback?: 'up' | 'down';
 	feedbackAt?: number;
 	role: 'user' | 'assistant' | 'system';
@@ -353,6 +354,7 @@ const APPROVAL_PREVIEW_LINES = 30;
  */
 export class ChatSession {
 	private daemonChat?: DaemonChat;
+	private daemonProviderRefreshSequence = 0;
 	private conversation: ChatMessage[] = [];
 	private currentConversationId: string;
 	private conversationWriteToken?: ConversationWriteToken;
@@ -544,6 +546,7 @@ export class ChatSession {
 		this.disposables.push(
 			vscode.workspace.onDidGrantWorkspaceTrust(() => this.postProviderCatalog(false)),
 			vscode.workspace.onDidChangeWorkspaceFolders(() => this.postProviderCatalog(false)),
+			onDidChangeDaemonProviderCredentials(event => { if (usesDaemonRuntime()) { void this.refreshDaemonProviderModels(event.restartPending); } }),
 		);
 
 		if (this.conversation.length > 0) {
@@ -1346,6 +1349,24 @@ export class ChatSession {
 		void this.webview.postMessage({ type: 'agentCapabilities', capabilities: this.agentBridge?.getCapabilities(this.currentSpecialistId, this.currentModel), workspaceState: !vscode.workspace.workspaceFolders?.length ? 'empty' : vscode.workspace.isTrusted ? 'ready' : 'untrusted' });
 	}
 
+	/** A setup save updates every open composer without replacing its draft or history. */
+	private async refreshDaemonProviderModels(restartPending: boolean): Promise<void> {
+		if (this.disposed) { return; }
+		const sequence = ++this.daemonProviderRefreshSequence;
+		const conversationId = this.currentConversationId;
+		const chat = this.daemonChat;
+		const snapshot = chat?.snapshot;
+		if (!chat || !snapshot) { this.postProviderCatalog(); return; }
+		try {
+			if (restartPending || chat.isSubmitting || snapshot.projection.activeRuns.length) { await chat.refreshModels(); }
+			else { await chat.reconnect(); }
+		} catch {
+			if (!this.disposed && sequence === this.daemonProviderRefreshSequence && this.currentConversationId === conversationId) {
+				void this.webview.postMessage({ type: 'daemonRuntime', conversationId, connected: false, error: vscode.l10n.t('Model settings were saved. Reconnect the agent runtime to refresh model readiness.') });
+			}
+		}
+	}
+
 	/** Acknowledge both chips together; a stale reply must not replace a newer draft selection. */
 	private postChatSelection(requestedModel: ModelId, requestedSpecialistId: string, error?: string): void {
 		void this.webview.postMessage({ type: 'chatSelection', conversationId: this.currentConversationId, requestedModel, requestedSpecialistId, model: this.currentModel, specialistId: this.currentSpecialistId, error });
@@ -1748,7 +1769,8 @@ export class ChatSession {
 		if (!this.ownsTurn(owner)) { return; }
 		const message = this.conversation[messageIndex];
 		if (message.role === 'assistant') { owner.assistantMessageIndex = messageIndex; }
-		void this.webview.postMessage({ type: 'messagePersisted', conversationId: owner.conversationId, requestId: owner.requestId, turnId: owner.turnId, role: message.role, messageIndex, responseId: message.role === 'assistant' ? this.responseReference(message) : undefined });
+		void this.webview.postMessage({ type: 'messagePersisted', conversationId: owner.conversationId, requestId: owner.requestId, turnId: owner.turnId, role: message.role, messageIndex,
+			responseId: message.role === 'assistant' ? this.responseReference(message) : undefined, ...(message.execution ? { execution: message.execution } : {}) });
 	}
 
 	private setupMessageHandler(): void {
@@ -1916,7 +1938,7 @@ export class ChatSession {
 						break;
 					}
 					case 'daemonSetup':
-						if (usesDaemonRuntime() && message.conversationId === this.currentConversationId) { await vscode.commands.executeCommand('sota.daemon.terminal'); }
+						if (usesDaemonRuntime() && message.conversationId === this.currentConversationId) { await openDaemonModelSetup(); }
 						break;
 					case 'daemonRefresh':
 						if (usesDaemonRuntime() && message.conversationId === this.currentConversationId) { await this.getDaemonChat().reconnect(); }
@@ -2211,6 +2233,11 @@ export class ChatSession {
 				message: 'Unknown provider.',
 				deferred: false,
 			});
+			return;
+		}
+		if (usesDaemonRuntime()) {
+			const result = await saveDaemonProviderCredentials(provider as ProviderId, fields);
+			this.webview.postMessage({ type: 'providerSaveResult', provider, ...result });
 			return;
 		}
 		if (!this.secrets) {
@@ -3886,7 +3913,7 @@ export class ChatSession {
 				role: 'assistant',
 				content: fullAssistantText,
 				usageUnavailable: this.turnUsageUnavailable(model),
-				execution: { route: 'native', outcome: owner.failed ? 'failed' : controller.signal.aborted ? 'cancelled' : 'completed', latencyMs: Date.now() - this.streamStartedAt, inputTokens: Math.max(0, usage.input - this.lastInputTokens), outputTokens: Math.max(0, usage.output - this.lastOutputTokens), estimatedCostUsd: MODEL_METADATA[model]?.pricingStatus === 'unknown' ? undefined : Math.max(0, this.estimatedSessionCost(model) - this.lastEstimatedCost) },
+				execution: { route: 'native', outcome: owner.failed ? 'failed' : controller.signal.aborted ? 'cancelled' : 'completed', chatMode: mode, latencyMs: Date.now() - this.streamStartedAt, inputTokens: Math.max(0, usage.input - this.lastInputTokens), outputTokens: Math.max(0, usage.output - this.lastOutputTokens), estimatedCostUsd: MODEL_METADATA[model]?.pricingStatus === 'unknown' ? undefined : Math.max(0, this.estimatedSessionCost(model) - this.lastEstimatedCost) },
 				specialistId,
 				model,
 				timestamp: Date.now(),
@@ -4160,7 +4187,7 @@ export class ChatSession {
 			this.conversation.push({
 				role: 'assistant',
 				content: persisted,
-				execution: { route: acpRoute ? 'acp' : orchestratorRoute ? 'orchestrator' : 'native', outcome: owner.failed ? 'failed' : controller.signal.aborted ? 'cancelled' : 'completed', latencyMs: Date.now() - this.streamStartedAt, inputTokens: unmetered ? undefined : turnInputDelta, outputTokens: unmetered ? undefined : turnOutputDelta, estimatedCostUsd: unmetered || MODEL_METADATA[model]?.pricingStatus === 'unknown' ? undefined : turnCostDelta },
+				execution: { route: acpRoute ? 'acp' : orchestratorRoute ? 'orchestrator' : 'native', outcome: owner.failed ? 'failed' : controller.signal.aborted ? 'cancelled' : 'completed', chatMode: mode, latencyMs: Date.now() - this.streamStartedAt, inputTokens: unmetered ? undefined : turnInputDelta, outputTokens: unmetered ? undefined : turnOutputDelta, estimatedCostUsd: unmetered || MODEL_METADATA[model]?.pricingStatus === 'unknown' ? undefined : turnCostDelta },
 				usageUnavailable: unmetered,
 				specialistId,
 				model,
@@ -5480,7 +5507,7 @@ export class ChatSession {
 				<div class="popup mention-popup" id="mentionPopup" hidden role="listbox" aria-label="Workspace mentions"></div>
 				<div class="context-chips" id="contextChips"></div>
 				<span class="draft-status" id="draftStatus" hidden></span>
-				<div class="prompt-restore-notice" id="unavailableModelNotice" role="status" hidden><span data-ui-text="modelUnavailable"></span></div>
+				<div class="prompt-restore-notice" id="unavailableModelNotice" role="status" aria-atomic="true" hidden><span data-ui-text="modelUnavailable"></span><button type="button" id="configureModelsBtn" data-ui-text="sharedConfigureModels" hidden></button></div>
 				<div class="prompt-restore-notice" id="promptRestoreNotice" role="status" hidden><span data-ui-text="promptRestored"></span><button type="button" id="undoPromptRestore" data-ui-text="undoPromptRestore"></button></div>
 				<div class="composer-shell">
 					<div id="workspaceGate" class="workspace-gate" role="status" hidden><span id="workspaceGateMessage"></span><button id="resolveWorkspace" type="button"></button></div>

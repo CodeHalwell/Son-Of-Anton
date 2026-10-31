@@ -77,18 +77,18 @@ suite('Connection and specialist status', () => {
 		const manager = createStatus(async () => { brokerCalls++; return [{ id: 'legacy', displayName: 'Legacy', connected: true }]; });
 		try {
 			await manager.refreshAuth();
-			assert.equal(items[1].text, '$(account) Configure Codypendent');
-			assert.equal(items[1].command, 'sota.daemon.terminal');
+			assert.equal(items[1].text, '$(account) Configure Models');
+			assert.equal(items[1].command, 'sota.openSetupWizard');
 			result = [{ id: 'blocked', readiness: { state: 'blocked' } }];
 			await manager.refreshAuth();
-			assert.equal(items[1].text, '$(account) Check Codypendent Models');
+			assert.equal(items[1].text, '$(account) Check Models');
 			result = [{ id: 'configured', readiness: { state: 'unverified' } }, { id: 'ready', readiness: { state: 'ready' } }];
 			await manager.refreshAuth();
-			assert.equal(items[1].text, '$(account) Codypendent: 2 Models');
+			assert.equal(items[1].text, '$(account) Agent Models: 2');
 			assert.match((items[1].tooltip as vscode.MarkdownString).value, /Inference is verified when a model runs/);
 			failed = true;
 			await manager.refreshAuth();
-			assert.equal(items[1].text, '$(warning) Codypendent Unavailable');
+			assert.equal(items[1].text, '$(warning) Agent Runtime Unavailable');
 			assert.equal(brokerCalls, 0);
 		} finally { manager.dispose(); }
 	});

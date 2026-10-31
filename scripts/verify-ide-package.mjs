@@ -77,6 +77,7 @@ try {
 		const directory = path.join(resources, 'extensions/son-of-anton-daemon/runtime/codypendent');
 		const shared = JSON.parse(await readFile(path.join(directory, 'manifest.json')));
 		assert.deepEqual([shared.platform, shared.arch, shared.profile], [process.platform, process.arch, 'release']);
+		assert.ok(shared.runtimeProducts?.includes('son-of-anton'), 'Bundled agent engine must support independent Son of Anton storage');
 		assert.ok(shared.files.some(file => file.name === 'codypendent-ui-worker-launcher'), 'Missing confined worker launcher');
 		assert.ok(shared.nodeRuntime, 'Missing sealed component-worker Node runtime');
 		await verifyCodypendentNode(path.join(directory, 'node-runtime'), shared.nodeRuntime);
