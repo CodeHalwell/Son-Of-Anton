@@ -15,6 +15,7 @@ export interface FirstRunDeps {
 	readonly llmClient: LlmClient;
 	readonly context: vscode.ExtensionContext;
 	readonly getConfig: (section: string) => vscode.WorkspaceConfiguration;
+	readonly runtimeSetup?: Pick<SetupWizardDeps, 'runtime' | 'saveCredentials' | 'readCredentialState'>;
 }
 
 /**
@@ -38,7 +39,9 @@ export async function maybeShowFirstRunSignInPrompt(deps: FirstRunDeps): Promise
 		return;
 	}
 
-	const state = await detectCredentials(context.secrets, getConfig('sota'), broker);
+	const state = deps.runtimeSetup?.readCredentialState
+		? await deps.runtimeSetup.readCredentialState()
+		: await detectCredentials(context.secrets, getConfig('sota'), broker);
 	if (hasAnyProvider(state)) {
 		await context.globalState.update(FIRST_RUN_DISMISSED_KEY, true);
 		return;
@@ -49,6 +52,7 @@ export async function maybeShowFirstRunSignInPrompt(deps: FirstRunDeps): Promise
 		broker,
 		secrets: context.secrets,
 		config: getConfig('sota'),
+		...deps.runtimeSetup,
 	};
 	SetupWizardPanel.createOrShow(context, wizardDeps);
 }

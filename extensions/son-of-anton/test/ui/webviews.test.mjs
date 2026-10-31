@@ -80,7 +80,7 @@ async function openSurface(t, surface, width = 1440, initialState, suppliedHtml,
 }
 
 /** Exercise the panel's actual HTML generator without starting native services. */
-async function panelHtml(relativeFile, exportName, method, args = []) {
+async function panelHtml(relativeFile, exportName, method, args = [], properties = {}) {
 	const filename = path.join(extension, 'src', relativeFile + '.ts');
 	const typescript = require('typescript');
 	const source = await readFile(filename, 'utf8');
@@ -90,7 +90,7 @@ async function panelHtml(relativeFile, exportName, method, args = []) {
 	const localRequire = name => name === 'vscode' ? { workspace: {}, l10n: { t: (value, ...args) => value.replace(/\{(\d+)\}/g, (match, index) => args[Number(index)] === undefined ? match : String(args[Number(index)])) } } : name.startsWith('son-of-anton-core/') ? require(path.join(root, 'son-of-anton-core/dist', name.slice('son-of-anton-core/'.length))) : sourceRequire(name);
 	new Function('require', 'exports', compiled)(localRequire, exports);
 	if (!method) { return exports[exportName](...args); }
-	const panel = Object.assign(Object.create(exports[exportName].prototype), { panel: { webview: { cspSource: 'https://sota.test' } } });
+	const panel = Object.assign(Object.create(exports[exportName].prototype), { panel: { webview: { cspSource: 'https://sota.test' } } }, properties);
 	const result = panel[method](...args);
 	return method === 'update' ? panel.panel.webview.html : result;
 }
@@ -450,6 +450,137 @@ test('setup wizard: every provider form, help, save feedback, back, cancel and s
 	await page.setViewportSize({ width: 280, height: 620 });
 	await assertNoPageOverflow(page);
 	await screenshot(page, 'setup-wizard');
+});
+
+test('private runtime setup keeps model configuration inside Anton without inference or incompatible provider forms', async t => {
+	const html = await panelHtml('onboarding/SetupWizardPanel', 'SetupWizardPanel', 'renderHtml', [], { deps: { runtime: 'daemon' } });
+	const page = await openSurface(t, 'panel', 440, undefined, html);
+	assert.match(await page.locator('main > .lede').innerText(), /Saving does not call the provider or run inference/);
+	for (const provider of ['foundry', 'bedrock']) {
+		const card = page.locator(`.card[data-provider="${provider}"]`);
+		assert.equal(await card.isDisabled(), true);
+		assert.match(await card.innerText(), /native compatibility/);
+	}
+	for (const [provider, model] of [['anthropic', 'claude-haiku-4-5'], ['openai', 'gpt-4o-mini'], ['google', 'gemini-2.5-flash']]) {
+		await page.locator(`.card[data-provider="${provider}"]`).click();
+		const form = page.locator(`form[data-provider="${provider}"]`);
+		assert.equal(await form.locator('input[name="model"]').inputValue(), model);
+		await form.locator('input[name="apiKey"]').fill('synthetic-ui-credential');
+		await form.locator('input[name="model"]').fill('chosen-provider-model');
+		await form.getByRole('button', { name: 'Save Model', exact: true }).click();
+		const posted = await page.evaluate(() => sentMessages.at(-1));
+		assert.deepEqual(posted, { type: 'save-credentials', provider, fields: { apiKey: 'synthetic-ui-credential', model: 'chosen-provider-model' } });
+		assert.doesNotMatch(await form.locator('.status').innerText(), /validat/i);
+		await post(page, { type: 'save-result', provider, ok: true, deferred: true, message: 'Saved locally. Inference has not been tested.' });
+		assert.equal(await form.locator('input[name="apiKey"]').inputValue(), '');
+		await form.getByRole('button', { name: 'Cancel', exact: true }).click();
+	}
+	await assertNoPageOverflow(page);
+	await screenshot(page, 'private-runtime-setup');
+});
+
+test('reopened private setup retains the saved model during key rotation and protects edits from delayed status', async t => {
+	const html = await panelHtml('onboarding/SetupWizardPanel', 'SetupWizardPanel', 'renderHtml', [], { deps: { runtime: 'daemon' } });
+	const early = await openSurface(t, 'panel', 440, undefined, html);
+	await early.locator('.card[data-provider="openai"]').click();
+	const earlyForm = early.locator('form[data-provider="openai"]');
+	await earlyForm.locator('input[name="apiKey"]').fill('synthetic-rotated-key');
+	await earlyForm.getByRole('button', { name: 'Save Model', exact: true }).click();
+	assert.deepEqual(await early.evaluate(() => sentMessages.at(-1)), { type: 'save-credentials', provider: 'openai', fields: { apiKey: 'synthetic-rotated-key' } }, 'Saving before readiness arrives must retain the backend selection');
+
+	const reopened = await openSurface(t, 'panel', 440, undefined, html);
+	await post(reopened, { type: 'status', state: { openai: { hasApiKey: true }, runtimeModels: { openai: 'saved-custom-model' } } });
+	await reopened.locator('.card[data-provider="openai"]').click();
+	const form = reopened.locator('form[data-provider="openai"]');
+	assert.equal(await form.locator('input[name="model"]').inputValue(), 'saved-custom-model');
+	await form.locator('input[name="apiKey"]').fill('synthetic-new-key');
+	await form.getByRole('button', { name: 'Save Model', exact: true }).click();
+	assert.deepEqual(await reopened.evaluate(() => sentMessages.at(-1).fields), { apiKey: 'synthetic-new-key' });
+	await post(reopened, { type: 'save-result', provider: 'openai', ok: true, message: 'Saved' });
+	await form.locator('input[name="model"]').fill('user-selected-next-model');
+	await post(reopened, { type: 'status', state: { openai: { hasApiKey: true }, runtimeModels: { openai: 'saved-custom-model' } } });
+	assert.equal(await form.locator('input[name="model"]').inputValue(), 'user-selected-next-model');
+	await form.locator('input[name="apiKey"]').fill('synthetic-next-key');
+	await form.getByRole('button', { name: 'Save Model', exact: true }).click();
+	assert.deepEqual(await reopened.evaluate(() => sentMessages.at(-1).fields), { apiKey: 'synthetic-next-key', model: 'user-selected-next-model' });
+});
+
+test('completed native Plan handoff preserves feedback, attachments and images without sending or replaying history', async t => {
+	const conversationId = 'handoff-draft';
+	const image = { mime: 'image/png', base64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS1sAAAAASUVORK5CYII=', name: 'feedback.png' };
+	const draft = { text: 'Keep the public API stable.\nAdd regression tests.', attachments: ['terminal-output'], mentions: [{ kind: 'file', path: 'src/api.ts', label: 'src/api.ts' }], images: [image], includeContext: false, excludedContext: [], model: 'haiku', agent: 'anton-code', mode: 'plan' };
+	const page = await openSurface(t, 'chat', 420, { conversationDrafts: [[conversationId, draft]] });
+	const messages = [
+		{ role: 'user', content: 'Plan the API change', request: { text: 'Plan the API change', chatMode: 'plan', includeWorkspaceContext: false } },
+		{ role: 'assistant', content: '## Plan\n\n1. Preserve the API.\n2. Add regression tests.', responseId: 'native-plan', execution: { route: 'native', outcome: 'completed', chatMode: 'plan' } },
+	];
+	await post(page, { type: 'loadConversation', conversationId, lastMode: 'plan', lastModel: 'haiku', lastSpecialist: 'anton-code', messages });
+	const control = page.getByRole('button', { name: 'Implement This Plan', exact: true });
+	await control.waitFor();
+	const chips = await page.locator('#contextChips').innerText();
+	await control.click();
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Implement this plan.\n\n' + draft.text);
+	assert.equal(await page.locator('#messageInput').evaluate(node => node === document.activeElement), true);
+	assert.equal(await page.locator('#planActBtnAct').getAttribute('aria-checked'), 'true');
+	assert.equal(await page.locator('#contextChips').innerText(), chips);
+	assert.equal(await page.locator('#contextChips .attachment-thumb').count(), 1);
+	assert.equal(await page.locator('#includeWorkspaceContext').isChecked(), false);
+	assert.equal(await page.locator('.msg').count(), 2);
+	assert.equal(await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').length), 0);
+	assert.equal(await control.isVisible(), false);
+	await page.locator('#sendBtn').click();
+	const sent = await page.evaluate(() => sentMessages.findLast(message => message.type === 'sendMessage'));
+	assert.deepEqual({ mode: sent.chatMode, attachments: sent.attachments, mentions: sent.mentionsKinded, images: sent.images, context: sent.includeWorkspaceContext }, {
+		mode: 'act', attachments: draft.attachments, mentions: [{ kind: 'file', path: 'src/api.ts' }], images: [image], context: false,
+	});
+});
+
+test('native Plan handoff requires an acknowledged successful outcome and settled request', async t => {
+	const page = await openSurface(t, 'chat', 420);
+	const control = page.getByRole('button', { name: 'Implement This Plan', exact: true });
+	for (const execution of [undefined, { outcome: 'failed', chatMode: 'plan' }, { outcome: 'cancelled', chatMode: 'plan' }, { outcome: 'completed', chatMode: 'act' }]) {
+		await post(page, { type: 'loadConversation', conversationId: 'native-gates', lastMode: 'plan', messages: [{ role: 'assistant', content: 'Partial or unverified plan', responseId: 'ineligible', execution }] });
+		assert.equal(await control.isVisible(), false);
+	}
+	await post(page, { type: 'conversationCleared', conversationId: 'native-gates' });
+	await page.locator('#planActBtnPlan').click();
+	await page.locator('#messageInput').fill('Plan a safe migration'); await page.locator('#sendBtn').click();
+	const sent = await page.evaluate(() => sentMessages.findLast(message => message.type === 'sendMessage'));
+	const scope = { conversationId: 'native-gates', requestId: sent.requestId, turnId: 'plan-turn' };
+	await post(page, { type: 'turnAccepted', ...scope });
+	await post(page, { type: 'streamToken', ...scope, token: '## Migration plan\n\nPreserve the schema, then migrate incrementally.' });
+	await post(page, { type: 'messageComplete', ...scope });
+	assert.equal(await control.isVisible(), false);
+	await post(page, { type: 'messagePersisted', ...scope, role: 'assistant', messageIndex: 1, responseId: 'acknowledged-plan', execution: { outcome: 'completed', chatMode: 'plan' } });
+	assert.equal(await control.isVisible(), false);
+	await post(page, { type: 'requestSettled', ...scope, cancelled: false });
+	await control.waitFor();
+	assert.equal(await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').length), 1);
+});
+
+test('daemon Plan handoff uses retained run provenance and ignores Build, partial, failed and active runs', async t => {
+	const page = await openSurface(t, 'chat', 420);
+	await post(page, { type: 'daemonRuntime', connected: true });
+	const control = page.getByRole('button', { name: 'Implement This Plan', exact: true });
+	const completed = { id: 'plan-run', state: 'Completed', mode: 'Plan', disposition: { type: 'Completed' } };
+	const projection = { title: 'Retained plan', rows: [{ id: 'prompt', kind: 'user', text: 'Plan the migration' }, { id: 'plan-reply', kind: 'assistant', runId: 'plan-run', text: '## Plan\n\nMigrate in reviewed steps.' }], activeRuns: [], runs: [completed], approvals: [], questions: [], historyTruncated: false };
+	const snapshot = async (changes = {}, status = 'attached') => post(page, { type: 'daemonSnapshot', conversationId: 'initial-conversation', state: { sessionId: 'fixture-session', status, projection: { ...projection, ...changes } }, canWrite: true });
+	for (const changes of [
+		{ runs: [{ ...completed, mode: 'Build' }] }, { runs: [{ ...completed, mode: undefined }] },
+		{ runs: [{ ...completed, state: 'Cancelled', disposition: { type: 'Cancelled' } }] },
+		{ runs: [{ ...completed, state: 'Failed', disposition: { type: 'Failed', reason: 'Fixture' } }] },
+		{ runs: [{ ...completed, disposition: undefined }] }, { activeRuns: ['another-run'] },
+		{ rows: [{ ...projection.rows[1], text: ' ' }] }, { rows: [{ ...projection.rows[1], runId: 'different-run' }] },
+		{ runs: [completed, { id: 'newer-build', mode: 'Build', state: 'Completed', disposition: { type: 'Completed' } }] },
+	]) { await snapshot(changes); assert.equal(await control.isVisible(), false); }
+	await snapshot({}, 'closed'); assert.equal(await control.isVisible(), false);
+	await snapshot(); await control.waitFor();
+	await control.click();
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Implement this plan.');
+	assert.equal(await page.locator('#planActBtnAct').getAttribute('aria-checked'), 'true');
+	assert.equal(await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').length), 0);
+	await snapshot(); assert.equal(await control.isVisible(), false);
+	assert.equal(await page.locator('#messageInput').inputValue(), 'Implement this plan.');
 });
 
 test('impact analysis: every filter and keyboard file navigation handle long content', async t => {
@@ -2005,17 +2136,44 @@ test('legacy histories remain readable and cannot silently start an empty shared
 
 
 test('unconfigured shared models show setup guidance and preserve the draft through recovery', async t => {
-	const page = await openSurface(t, 'chat', 400);
+	const conversationId = 'initial-conversation';
+	const draft = { text: 'Keep my first prompt', attachments: ['terminal-output'], mentions: [{ kind: 'file', path: 'src/source.ts', label: 'src/source.ts' }], model: 'daemon:default', includeContext: false };
+	const page = await openSurface(t, 'chat', 400, { conversationDrafts: [[conversationId, draft]] });
 	await post(page, { type: 'daemonRuntime', connected: true });
-	await post(page, { type: 'loadConversation', conversationId: 'shared-setup', lastModel: 'daemon:default', messages: [] });
 	const catalog = configured => ({ type: 'providerCatalog', snapshot: { updatedAt: Date.now(), software: [], providers: [{ id: 'codypendent', name: 'Codypendent', catalogStatus: configured ? 'ready' : 'not-configured', inferenceStatus: 'not-tested', credentialSource: 'daemon', models: [{ id: 'daemon:default', label: 'Automatic (Codypendent)', chat: configured, images: false }] }] }, metadata: {} });
 	await post(page, catalog(false));
-	await page.locator('#messageInput').fill('Keep my first prompt');
+	const chips = await page.locator('#contextChips').innerText();
 	assert.equal(await page.locator('#unavailableModelNotice').isVisible(), true);
-	assert.match(await page.locator('#unavailableModelNotice').innerText(), /No model is configured in Codypendent/);
+	assert.match(await page.locator('#unavailableModelNotice').innerText(), /No model is configured in the agent runtime/);
 	assert.equal(await page.locator('#sendBtn').isDisabled(), true);
+	assert.equal(await page.locator('#messageInput').getAttribute('aria-describedby'), 'unavailableModelNotice');
+	await page.locator('#messageInput').press('Enter');
+	assert.equal(await page.locator('#configureModelsBtn').evaluate(node => node === document.activeElement), true);
+	await page.locator('#configureModelsBtn').press('Enter');
+	assert.deepEqual(await page.evaluate(() => sentMessages.at(-1)), { type: 'daemonSetup', conversationId });
+	assert.equal(await page.evaluate(() => sentMessages.filter(message => message.type === 'sendMessage').length), 0);
+	assert.equal(await page.locator('#contextChips').innerText(), chips);
 	await post(page, catalog(true));
 	assert.equal(await page.locator('#unavailableModelNotice').isVisible(), false);
 	assert.equal(await page.locator('#sendBtn').isDisabled(), false);
 	assert.equal(await page.locator('#messageInput').inputValue(), 'Keep my first prompt');
+	assert.equal(await page.locator('#messageInput').evaluate(node => node === document.activeElement), true);
+	assert.equal(await page.locator('#messageInput').getAttribute('aria-describedby'), null);
+	assert.equal(await page.locator('#contextChips').innerText(), chips);
+	assert.equal(await page.locator('#includeWorkspaceContext').isChecked(), false);
+	await assertNoPageOverflow(page);
+});
+
+test('shared setup and refresh controls retain keyboard focus through live snapshots', async t => {
+	const page = await openSurface(t, 'chat', 400);
+	const state = { status: 'attached', sessionId: 'shared', projection: { title: 'Shared', rows: [], activeRuns: [], questions: [], approvals: [], historyTruncated: false } };
+	const update = () => post(page, { type: 'daemonSnapshot', conversationId: 'initial-conversation', state, canWrite: true });
+	await update();
+	for (const key of ['setup', 'refresh']) {
+		const control = page.locator('[data-daemon-control="' + key + '"]');
+		await control.focus(); await update();
+		assert.equal(await control.evaluate(node => node === document.activeElement), true);
+		await control.press('Enter');
+		assert.equal(await page.evaluate(() => sentMessages.at(-1).type), key === 'setup' ? 'daemonSetup' : 'daemonRefresh');
+	}
 });

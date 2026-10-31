@@ -30,14 +30,13 @@
     "find-up": "^5.0.0",
     "find-yarn-workspace-root": "^2.0.0",
     "jsonc-parser": "^3.2.0",
-    "minimatch": "^5.1.8",
+    "minimatch": "^11.0.3",
     "request-light": "^0.7.0",
     "which": "^4.0.0",
     "which-pm": "^2.1.1",
     "vscode-uri": "^3.0.8"
   },
   "devDependencies": {
-    "@types/minimatch": "^5.1.2",
     "@types/node": "22.x",
     "@types/which": "^3.0.0"
   },

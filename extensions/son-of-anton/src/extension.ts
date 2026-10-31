@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 import * as vscode from 'vscode';
 import { configureDaemonChat, usesDaemonRuntime, pickSharedConversation, hasSharedSession } from './daemon/DaemonChat';
+import { daemonSetupCallbacks } from './daemon/DaemonProviderSetup';
 import * as path from 'node:path';
 import { activateProviderFinder } from './providers/ProviderFinder';
 import { registerIdeUpdates } from './updates/IdeUpdates';
@@ -141,15 +142,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	// credential is already configured (OAuth, settings, env var, AWS chain).
 	// Deferred by a tick so the rest of activation (chat sidebar, status bar)
 	// is in place before the wizard panel grabs focus.
-	setTimeout(() => {
-		if (usesDaemonRuntime()) { return; }
-		void maybeShowFirstRunSignInPrompt({
-			broker: auth.broker,
-			llmClient,
-			context,
-			getConfig: (section) => vscode.workspace.getConfiguration(section),
-		});
+	const onboardingTimer = setTimeout(() => {
+		void (async () => {
+			const runtimeSetup = usesDaemonRuntime() ? daemonSetupCallbacks() : undefined;
+			if (runtimeSetup) {
+				const endpoint = await vscode.commands.executeCommand<{ mode: 'local' | 'external' }>('sota.daemon.endpoint');
+				if (endpoint?.mode !== 'local') { return; }
+			}
+			await maybeShowFirstRunSignInPrompt({ broker: auth.broker, llmClient, context,
+				getConfig: section => vscode.workspace.getConfiguration(section), runtimeSetup });
+		})().catch(() => { console.warn('[onboarding] Setup status is unavailable; open Son of Anton Setup to retry.'); });
 	}, 1000);
+	context.subscriptions.push({ dispose: () => clearTimeout(onboardingTimer) });
 	// Single shared tool registry threaded into all chat surfaces so tool-call
 	// orchestration is consistent regardless of where the chat is hosted.
 	const toolRegistry = new ToolRegistry();
@@ -1172,15 +1176,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	// whether the user has previously skipped or completed the auto-popup).
 	context.subscriptions.push(
 		vscode.commands.registerCommand('sota.openSetupWizard', () => {
-			if (usesDaemonRuntime()) {
-				if (!vscode.workspace.isTrusted) { void vscode.window.showInformationMessage(vscode.l10n.t('Trust this workspace to start Codypendent and configure models in its terminal. Existing shared sessions remain read-only.')); return; }
-				void vscode.commands.executeCommand('sota.daemon.terminal'); return;
-			}
 			SetupWizardPanel.createOrShow(context, {
 				llmClient,
 				broker: auth.broker,
 				secrets: context.secrets,
 				config: globalScopedConfig('sota'),
+				...(usesDaemonRuntime() ? daemonSetupCallbacks() : {}),
 			});
 		})
 	);

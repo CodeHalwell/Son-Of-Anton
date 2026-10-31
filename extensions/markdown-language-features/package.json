@@ -794,6 +794,11 @@
     "vscode-markdown-languageserver": "^0.5.0-alpha.12",
     "vscode-uri": "^3.0.3"
   },
+  "overrides": {
+    "vscode-languageclient": {
+      "minimatch": "11.0.1"
+    }
+  },
   "devDependencies": {
     "@types/dompurify": "^3.0.5",
     "@types/lodash.throttle": "^4.1.9",

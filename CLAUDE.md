@@ -137,7 +137,7 @@ Every PR description must state which tier of modification it contains.
 - **MCP servers:** TypeScript or Python
 
 ### Toolchain
-- Node.js version is pinned in `.nvmrc` (currently **22.22.0**).
+- Node.js version is pinned in `.nvmrc` (currently **22.23.4**).
 - IDE source is compiled with the gulp/`tsgo` build pipeline (see below) — **never** `npm run compile` for type-checking iterations.
 - `son-of-anton-core` and `son-of-anton-cli` build with plain `tsc -p tsconfig.json` (or `npm run watch`).
 - Services build/test independently within their own directory.

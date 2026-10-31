@@ -5,16 +5,23 @@
 import * as vscode from 'vscode';
 import { LlmClient } from 'son-of-anton-core/llm/LlmClient';
 import { CredentialBroker } from 'son-of-anton-core/auth/CredentialBroker';
-import { detectCredentials } from 'son-of-anton-core/credentials/credentialDetection';
-import { ProviderId, saveProviderCredentials } from 'son-of-anton-core/credentials/providerCredentialSaver';
+import { detectCredentials, type CredentialState } from 'son-of-anton-core/credentials/credentialDetection';
+import { ProviderId, saveProviderCredentials, type ProviderSaveResult } from 'son-of-anton-core/credentials/providerCredentialSaver';
 
 export const SETUP_WIZARD_SKIPPED_KEY = 'sotaOnboarding.setupWizardSkipped';
+
+export interface SetupCredentialState extends CredentialState {
+	readonly runtimeModels?: Partial<Record<ProviderId, string>>;
+}
 
 export interface SetupWizardDeps {
 	readonly llmClient: LlmClient;
 	readonly broker: CredentialBroker;
 	readonly secrets: vscode.SecretStorage;
 	readonly config: vscode.WorkspaceConfiguration;
+	readonly runtime?: 'daemon';
+	readonly saveCredentials?: (provider: ProviderId, fields: Record<string, string>) => Promise<ProviderSaveResult>;
+	readonly readCredentialState?: () => Promise<SetupCredentialState>;
 }
 
 interface SaveCredentialsMessage {
@@ -121,11 +128,17 @@ export class SetupWizardPanel {
 
 	private async handleSave(message: SaveCredentialsMessage): Promise<void> {
 		const { provider, fields } = message;
-		const result = await saveProviderCredentials(provider, fields, {
-			llmClient: this.deps.llmClient,
-			secrets: this.deps.secrets,
-			config: this.deps.config,
-		});
+		let result: ProviderSaveResult;
+		try {
+			if (this.deps.runtime === 'daemon' && !this.deps.saveCredentials) { throw new Error('Private runtime setup is unavailable'); }
+			result = this.deps.saveCredentials ? await this.deps.saveCredentials(provider, fields) : await saveProviderCredentials(provider, fields, {
+				llmClient: this.deps.llmClient,
+				secrets: this.deps.secrets,
+				config: this.deps.config,
+			});
+		} catch {
+			result = { ok: false, message: vscode.l10n.t('Provider setup could not finish. Try saving again.') };
+		}
 		this.panel.webview.postMessage({
 			type: 'save-result',
 			provider,
@@ -139,13 +152,22 @@ export class SetupWizardPanel {
 	}
 
 	private async pushStatus(): Promise<void> {
-		const state = await detectCredentials(this.deps.secrets, this.deps.config, this.deps.broker);
-		this.panel.webview.postMessage({ type: 'status', state });
+		try {
+			if (this.deps.runtime === 'daemon' && !this.deps.readCredentialState) { throw new Error('Private runtime readiness is unavailable'); }
+			const state = this.deps.readCredentialState ? await this.deps.readCredentialState() : await detectCredentials(this.deps.secrets, this.deps.config, this.deps.broker);
+			this.panel.webview.postMessage({ type: 'status', state });
+		} catch {
+			this.panel.webview.postMessage({ type: 'status', state: {} });
+		}
 	}
 
 	private renderHtml(): string {
 		const cspSource = this.panel.webview.cspSource;
 		const nonce = randomNonce();
+		const daemon = this.deps?.runtime === 'daemon';
+		const unsupported = daemon ? ' disabled' : '';
+		const unavailable = escapeHtml(vscode.l10n.t('Use native compatibility or configure this provider in the application that owns an explicitly attached runtime.'));
+		const modelField = (model: string): FormField[] => daemon ? [{ name: 'model', label: vscode.l10n.t('Provider Model ID'), type: 'text', value: model, hint: vscode.l10n.t('Saved locally. Provider access is checked when you send your first request.') }] : [];
 		// Inline styles + script kept self-contained so the wizard is one file
 		// to scan; the surface area is small enough that splitting into
 		// media/setup-wizard.css / .js would obscure rather than help.
@@ -251,7 +273,7 @@ export class SetupWizardPanel {
 <body>
 	<main class="shell">
 		<h1>Welcome to Son of Anton</h1>
-		<p class="lede">Pick a model provider to get started. You can switch between providers at any time, and add more later from the command palette.</p>
+		<p class="lede">${daemon ? escapeHtml(vscode.l10n.t('Configure a model for Son of Anton. Credentials stay in protected IDE storage. Saving does not call the provider or run inference. An explicitly attached runtime manages its own providers.')) : 'Pick a model provider to get started. You can switch between providers at any time, and add more later from the command palette.'}</p>
 
 		<section id="picker" class="section active">
 			<div class="cards">
@@ -265,14 +287,14 @@ export class SetupWizardPanel {
 					<div class="desc">GPT-4o and Codex via the OpenAI API. Uses an API key.</div>
 					<span class="badge" data-badge="openai">Not configured</span>
 				</button>
-				<button class="card" data-provider="foundry" type="button">
+				<button class="card" data-provider="foundry" type="button"${unsupported}>
 					<div class="name">Microsoft Foundry / Azure OpenAI</div>
-					<div class="desc">Azure-hosted OpenAI deployments. Needs an endpoint, key, and deployment name.</div>
+					<div class="desc">${daemon ? unavailable : 'Azure-hosted OpenAI deployments. Needs an endpoint, key, and deployment name.'}</div>
 					<span class="badge" data-badge="foundry">Not configured</span>
 				</button>
-				<button class="card" data-provider="bedrock" type="button">
+				<button class="card" data-provider="bedrock" type="button"${unsupported}>
 					<div class="name">Amazon Bedrock</div>
-					<div class="desc">Claude on AWS. Uses AWS credentials (profile or access keys).</div>
+					<div class="desc">${daemon ? unavailable : 'Claude on AWS. Uses AWS credentials (profile or access keys).'}</div>
 					<span class="badge" data-badge="bedrock">Not configured</span>
 				</button>
 				<button class="card" data-provider="google" type="button">
@@ -288,10 +310,12 @@ export class SetupWizardPanel {
 
 		${this.renderProviderForm('anthropic', 'Anthropic API Key', 'https://console.anthropic.com/settings/keys', [
 			{ name: 'apiKey', label: 'API Key', type: 'password', placeholder: 'sk-ant-...' },
+			...modelField('claude-haiku-4-5'),
 		])}
 
 		${this.renderProviderForm('openai', 'OpenAI API Key', 'https://platform.openai.com/api-keys', [
 			{ name: 'apiKey', label: 'API Key', type: 'password', placeholder: 'sk-...' },
+			...modelField('gpt-4o-mini'),
 		])}
 
 		${this.renderProviderForm('foundry', 'Microsoft Foundry / Azure OpenAI', 'https://portal.azure.com/#browse/Microsoft.CognitiveServices%2Faccounts', [
@@ -314,6 +338,7 @@ export class SetupWizardPanel {
 
 		${this.renderProviderForm('google', 'Google Gemini API Key', 'https://aistudio.google.com/apikey', [
 			{ name: 'apiKey', label: 'API Key', type: 'password', placeholder: 'AIza...' },
+			...modelField('gemini-2.5-flash'),
 		])}
 	</main>
 
@@ -323,6 +348,10 @@ export class SetupWizardPanel {
 		const cards = document.querySelectorAll('.card');
 		const sections = document.querySelectorAll('.section');
 		const badges = document.querySelectorAll('[data-badge]');
+		const editedModels = new Set();
+		document.querySelectorAll('form[data-provider] input[name="model"]').forEach(input => {
+			input.addEventListener('input', () => editedModels.add(input.closest('form').dataset.provider));
+		});
 		let selectedProvider = '';
 
 		function show(sectionId) {
@@ -365,9 +394,11 @@ export class SetupWizardPanel {
 				const provider = form.getAttribute('data-provider');
 				const status = form.querySelector('.status');
 				status.className = 'status pending';
-				status.textContent = 'Saving and validating...';
+				status.textContent = ${JSON.stringify(daemon ? vscode.l10n.t('Saving model configuration...') : 'Saving and validating...')};
 				const fields = {};
 				new FormData(form).forEach((value, key) => { fields[key] = String(value); });
+				// Untouched fields retain the saved model even when readiness arrives after Save.
+				if (${daemon} && !editedModels.has(provider)) delete fields.model;
 				vscode.postMessage({ type: 'save-credentials', provider, fields });
 			});
 		});
@@ -383,10 +414,16 @@ export class SetupWizardPanel {
 				const status = form.querySelector('.status');
 				status.className = 'status ' + (msg.ok ? 'ok' : 'err');
 				status.textContent = msg.message;
+				if (msg.ok) { form.querySelectorAll('input[type="password"]').forEach(input => { input.value = ''; }); }
 				return;
 			}
 			if (msg.type === 'status') {
 				const state = msg.state || {};
+				document.querySelectorAll('form[data-provider] input[name="model"]').forEach(input => {
+					const provider = input.closest('form').dataset.provider;
+					const model = state.runtimeModels?.[provider];
+					if (!editedModels.has(provider) && typeof model === 'string' && model) input.value = model;
+				});
 				badges.forEach(badge => {
 					const provider = badge.getAttribute('data-badge');
 					const entry = state[provider];
@@ -432,7 +469,7 @@ export class SetupWizardPanel {
 			<form data-provider="${provider}">
 				${inputs}
 				<div class="row-buttons">
-					<button class="primary" type="submit">Save and validate</button>
+					<button class="primary" type="submit">${this.deps?.runtime === 'daemon' ? escapeHtml(vscode.l10n.t('Save Model')) : 'Save and validate'}</button>
 					<button class="secondary back" type="button">Cancel</button>
 				</div>
 				<div class="status" role="status" aria-live="polite"></div>
@@ -448,7 +485,8 @@ export class SetupWizardPanel {
 			return `<label for="${id}"><span>${escapeHtml(field.label)}</span>${hint}<select id="${id}" name="${escapeHtml(field.name)}">${options}</select></label>`;
 		}
 		const placeholder = field.placeholder ? ` placeholder="${escapeHtml(field.placeholder)}"` : '';
-		return `<label for="${id}"><span>${escapeHtml(field.label)}</span>${hint}<input id="${id}" name="${escapeHtml(field.name)}" type="${field.type}" autocomplete="off" spellcheck="false"${placeholder} /></label>`;
+		const value = field.value ? ` value="${escapeHtml(field.value)}"` : '';
+		return `<label for="${id}"><span>${escapeHtml(field.label)}</span>${hint}<input id="${id}" name="${escapeHtml(field.name)}" type="${field.type}" autocomplete="off" spellcheck="false"${placeholder}${value} /></label>`;
 	}
 }
 
@@ -458,6 +496,7 @@ interface FormField {
 	readonly type: 'text' | 'password' | 'select';
 	readonly placeholder?: string;
 	readonly hint?: string;
+	readonly value?: string;
 	readonly options?: ReadonlyArray<string>;
 }
 

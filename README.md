@@ -1,6 +1,6 @@
 # Son of Anton
 
-Son of Anton is a Code OSS editor with a shared agent runtime, a task board, a CLI, and a local code graph. The editor and CLI use `son-of-anton-core`; the native Rust graph runs in a bundled MCP process. Cloud model and embedding requests go to the provider you configure. Docker services are optional.
+Son of Anton is a Code OSS editor with its own bundled agent engine, a task board, a CLI, and a local code graph. It runs independently of Codypendent. The editor retains `son-of-anton-core` for native compatibility; normal Unix agent sessions use a private copy of the Rust engine. Cloud model and embedding requests go to the provider you configure. Docker services are optional.
 
 Download installers from [GitHub Releases](https://github.com/CodeHalwell/Son-Of-Anton/releases), or build them with the [IDE distribution workflow](https://github.com/CodeHalwell/Son-Of-Anton/actions/workflows/ide-distribution.yml). See the [installation guide](docs/installation.md) for platform downloads, first launch, updates and recovery. IDE releases use the `ide-v` prefix.
 
@@ -14,11 +14,18 @@ npm run bootstrap:sota
 npm run watch
 ```
 
-Wait for the editor watch build to finish, then run `./scripts/code.sh` in a second terminal. `bootstrap:sota` installs and builds the core, CLI, graph MCP server, platform native module, extension, and board. After dependencies are installed, `node scripts/bootstrap-sota.mjs --skip-install --debug` rebuilds with a debug native module.
+Let root `npm ci` finish with install scripts enabled: its postinstall provisions
+the inherited built-in extensions as well as the editor's dependencies.
+`bootstrap:sota` builds the Son of Anton stack and does not replace that step.
+A partial install, such as root `npm ci --ignore-scripts`, can leave extension-local
+dependencies missing and produce compiler errors for Node modules or global types
+such as `Array`. Complete dependency setup before changing compiler settings.
 
-Open a workspace, configure a provider in Son of Anton chat, and ask Anton to explain a small part of the project. The task board exposes task status, search, filters and execution actions. Writes and commands follow the configured approval policy. Retained Git checkpoints capture the working tree and index; restoring previews affected paths and creates a recovery checkpoint.
+Wait for the editor watch build to finish, then run `./scripts/code.sh` in a second terminal. `bootstrap:sota` installs and builds the core, CLI, private Rust engine, graph MCP server, platform native module, extensions, and board. After dependencies are installed, `node scripts/bootstrap-sota.mjs --skip-install --debug` rebuilds the private engine and native graph with debug binaries.
 
-For CLI diagnostics:
+Open a workspace, configure a provider in Son of Anton chat, and ask Anton to explain a small part of the project. The Rust runtime's task board tracks and assigns repository work; moving a card does not launch a worker. Native compatibility mode also retains its planning and execution board. Writes and commands follow the owning runtime's approval policy. Native compatibility checkpoints capture the working tree and index; restoring previews affected paths and creates a recovery checkpoint. Rust sessions retain their own daemon-owned checkpoint records.
+
+For native compatibility CLI diagnostics, separate from the private Rust runtime:
 
 ```sh
 node son-of-anton-cli/dist/cli.js doctor
@@ -28,23 +35,41 @@ node son-of-anton-cli/dist/cli.js chat --no-tui "Explain this project"
 
 `doctor` makes no model requests. It reports local tools, credential presence, model tool support and installed graph assets, with repair actions. Account access and live graph readiness are separate checks.
 
-## Shared sessions with Codypendent
+## Independent agent runtime and optional Codypendent connection
 
-On Linux and macOS, the primary chat, agent participants and inline assistance use the bundled Codypendent runtime by default. **Open Shared Conversation** resumes a session from the native clients; **Open Shared Sessions** exposes activity, approvals and questions. Closing the editor leaves runs alive. The task board and graph use shared daemon state. Existing local histories remain available through the explicit native compatibility runtime, which is also the Windows default. See the [runtime and migration guide](docs/shared-runtime.md), [release evidence](docs/production-readiness.md) and [client guide](extensions/son-of-anton-daemon/README.md).
+On Linux and macOS, primary chat, agent participants and inline assistance use Anton's privately bundled Rust engine. Configure models through **Son of Anton: Open Setup Wizard**. Anton owns its storage, configuration, credentials and socket; closing the editor leaves runs alive. The task board and graph inspector use the same product-owned engine.
+
+**Son of Anton: Connect to Codypendent** explicitly attaches to a separately running companion runtime; **Use Local Agent Runtime** returns to Anton. **Open Shared Conversation** browses sessions in the selected runtime. External runtimes retain their own configuration and lifecycle. Existing native histories remain available through the native compatibility runtime, which is also the Windows default. See the [independent products plan](docs/independent-products.md), [runtime and migration guide](docs/shared-runtime.md) and [client guide](extensions/son-of-anton-daemon/README.md).
+
+## Repository workflows
+
+Choose **Son of Anton: Browse Repository Workflows** to inspect the selected
+runtime's real catalog for a local repository. Definitions show their source,
+version, digest, declared input types, and diagnostics. Enter each input as JSON;
+workflow-specific types remain the runtime's responsibility. **Start Workflow**
+is an explicit action in a trusted workspace and binds to the reviewed definition.
+
+The panel monitors its saved launch receipts, with pause, resume, cancellation,
+and node retry through the owning runtime. Closing it leaves durable work alive.
+An uncertain start retains its request securely for explicit **Reconcile Start**;
+reopening never starts or retries work automatically. Older external runtimes
+without workflow catalog support show an unavailable state.
 
 ## Code graph
 
-Shared mode uses Codypendent's structural graph and preserves evidence confidence. In native compatibility mode, the embedded graph requires no containers. It indexes supported source files, watches edits and removes deleted or moved symbols. A database belongs to one canonical workspace. Open the Code Graph status item to inspect initialization or errors.
+Rust mode uses the selected runtime's structural graph. Its inspector preserves evidence confidence, recorded revisions, freshness and result limits, with symbol drill-down and source navigation. In native compatibility mode, the embedded graph requires no containers. It indexes supported source files, watches edits and removes deleted or moved symbols. A database belongs to one canonical workspace. The native Code Graph status item reports that backend's initialization or errors.
 
-The default embedder is `none`: structural search works; semantic search is unavailable until an embedder is configured. Provider embeddings send selected source code to that provider and may incur charges. See the [graph guide](services/code-graph/README.md) for capabilities and packaged assets.
+The native compatibility graph's default embedder is `none`: structural search works; semantic search is unavailable until an embedder is configured. Provider embeddings send selected source code to that provider and may incur charges. The Rust graph inspector does not claim semantic retrieval or unsaved-buffer parity. See the [graph guide](services/code-graph/README.md) for the compatibility backend's capabilities and packaged assets.
 
 ## Credentials
 
-IDE/CLI credential sharing uses the OS credential store: Keychain on macOS, Secret Service (`secret-tool`) on Linux, and DPAPI on Windows. Environment variables remain usable without persisting them. `sota auth save` explicitly persists supported environment credentials. `sota auth migrate` verifies a migration from the legacy plaintext file before removing that file. Plaintext compatibility storage requires the explicit `SOTA_ALLOW_PLAINTEXT_SECRETS=1` environment setting.
+The private Rust engine uses the runtime extension's SecretStorage for credentials saved in Anton's wizard or chat forms. Keys reach private child processes as environment values; model files store environment variable names. External connections keep their own credentials. Configuring the native compatibility CLI does not automatically configure the private engine.
+
+Native compatibility IDE/CLI credential sharing uses the OS credential store: Keychain on macOS, Secret Service (`secret-tool`) on Linux, and DPAPI on Windows. Environment variables remain usable without persisting them. `sota auth save` explicitly persists supported environment credentials. `sota auth migrate` verifies a migration from the legacy plaintext file before removing that file. Plaintext compatibility storage requires the explicit `SOTA_ALLOW_PLAINTEXT_SECRETS=1` environment setting.
 
 ## ACP agents
 
-Every built-in specialist can run through `sota acp`. Configure external ACP agents per specialist to use installed Gemini, Codex or Claude adapters, with bounded process reuse, cancellation and permission handling. See the [ACP backend guide](docs/acp-backend.md) for configuration and compatibility limits.
+Every native compatibility specialist can run through `sota acp`. Configure external ACP agents per specialist to use installed Gemini, Codex or Claude adapters, with bounded process reuse, cancellation and permission handling. These per-specialist settings do not configure the Rust engine's separate model profiles. See the [ACP backend guide](docs/acp-backend.md) for native compatibility configuration and limits.
 
 ## Optional services
 
@@ -77,7 +102,8 @@ Build before running tests. The UI suite needs Playwright Chromium (`npx playwri
 | Path | Purpose |
 |---|---|
 | `extensions/son-of-anton` | Editor chat, task board, approvals, graph integration |
-| `son-of-anton-core` | Shared agent, provider, checkpoint and MCP runtime |
+| `extensions/son-of-anton-daemon` | Private Rust engine client, optional external attachment, graph inspector and runtime setup |
+| `son-of-anton-core` | Native compatibility agent, provider, checkpoint and MCP runtime |
 | `son-of-anton-cli` | Interactive and headless CLI |
 | `crates` | Native code graph and N-API binding |
 | `services/code-graph/mcp-server` | Bundled graph MCP process |

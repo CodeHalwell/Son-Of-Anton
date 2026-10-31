@@ -10,13 +10,16 @@ import type { IdeContextUpdate, SessionSummary } from '@codypendent/protocol';
 import { SharedSession } from './session.js';
 import { renderSessionHtml } from './html.js';
 import { parseViewMessage, type ViewMessage } from './messages.js';
-import { ensureDaemon, openTerminal, openCouncil } from './runtime.js';
+import { ensureDaemon, getRuntimeEndpoint, openTerminal, openCouncil, runRuntimeCli, type RuntimeEndpoint } from './runtime.js';
+import { configureProvider, providerStatus } from './providerSetup.js';
 import { openBoard } from './board.js';
 import { registerGraphCommands } from './graph.js';
+import { registerWorkflowCommands } from './workflows.js';
 
 class SharedSessionView implements vscode.WebviewViewProvider, vscode.Disposable {
 	private view?: vscode.WebviewView;
 	private session?: SharedSession;
+	private endpoint?: RuntimeEndpoint;
 	private library: SessionSummary[] = [];
 	private disposables: vscode.Disposable[] = [];
 	private viewDisposables: vscode.Disposable[] = [];
@@ -37,7 +40,7 @@ class SharedSessionView implements vscode.WebviewViewProvider, vscode.Disposable
 			vscode.languages.onDidChangeDiagnostics(() => { this.diagnosticsRevision++; schedule(); }),
 			vscode.workspace.onDidGrantWorkspaceTrust(() => { void this.reconnect().catch(error => this.showError(error)); }),
 			vscode.workspace.onDidChangeConfiguration(event => {
-				if (event.affectsConfiguration('sota.daemon.socketPath')) { void this.reconnect().catch(error => this.showError(error)); }
+				if (event.affectsConfiguration('sota.daemon')) { void this.reconnect().catch(error => this.showError(error)); }
 			}));
 	}
 
@@ -56,11 +59,13 @@ class SharedSessionView implements vscode.WebviewViewProvider, vscode.Disposable
 		}), view.onDidDispose(() => { if (this.view === view) { this.view = undefined; } }));
 	}
 
-	private newConnection(): SharedSession {
+	private newConnection(endpoint: RuntimeEndpoint): SharedSession {
 		this.session?.disconnect();
+		if (this.endpoint?.identity !== endpoint.identity) { this.library = []; }
+		this.endpoint = endpoint;
 		this.session = new SharedSession({
 			clientName: 'son-of-anton', clientVersion: '0.1.0',
-			socketPath: vscode.workspace.getConfiguration('sota.daemon').get<string>('socketPath') || undefined,
+			socketPath: endpoint.socketPath,
 			canWrite: () => vscode.workspace.isTrusted,
 			onChange: () => this.schedulePublish(), onError: message => { this.error = message; this.schedulePublish(); },
 		});
@@ -68,32 +73,42 @@ class SharedSessionView implements vscode.WebviewViewProvider, vscode.Disposable
 	}
 
 	private async refresh(): Promise<void> {
-		await ensureDaemon(this.context);
-		if (!this.session || this.session.snapshot.status === 'closed') { await this.newConnection().connect(); }
-		this.library = await this.session!.listSessions();
+		const endpoint = getRuntimeEndpoint();
+		await ensureDaemon(this.context, endpoint);
+		if (endpoint.identity !== getRuntimeEndpoint().identity) { throw new Error(vscode.l10n.t('The agent runtime connection changed. Refresh the session list again.')); }
+		if (!this.session || this.session.snapshot.status === 'closed' || this.endpoint?.identity !== endpoint.identity) { await this.newConnection(endpoint).connect(); }
+		const session = this.session!;
+		const library = await session.listSessions();
+		if (this.session !== session) { return; }
+		this.library = library;
 		this.error = '';
 		this.schedulePublish();
 	}
 
-	private async attach(session: SessionSummary): Promise<void> {
-		await ensureDaemon(this.context);
-		await this.newConnection().connect(session);
-		await this.context.workspaceState.update('sharedSessions.lastSessionId', session.session_id);
+	private async attach(session: SessionSummary, endpoint = this.endpoint): Promise<void> {
+		if (!endpoint || endpoint.identity !== getRuntimeEndpoint().identity) { throw new Error(vscode.l10n.t('The agent runtime connection changed. Refresh the session list before opening a session.')); }
+		await ensureDaemon(this.context, endpoint);
+		await this.newConnection(endpoint).connect(session);
+		await this.context.workspaceState.update(`sharedSessions.${endpoint.identity}.lastSessionId`, session.session_id);
 		this.error = '';
 		this.pushEditorContext();
 	}
 
 	private async reconnect(): Promise<void> {
 		if (this.disposed) { return; }
-		await ensureDaemon(this.context);
-		const id = this.session?.snapshot.sessionId;
+		const endpoint = getRuntimeEndpoint();
+		const id = this.endpoint?.identity === endpoint.identity ? this.session?.snapshot.sessionId : undefined;
+		this.session?.disconnect(); this.session = undefined;
+		if (this.endpoint?.identity !== endpoint.identity) { this.library = []; }
+		await this.refresh();
 		const selected = this.library.find(session => session.session_id === id);
-		if (selected) { await this.attach(selected); }
-		else { await this.newConnection().connect(); await this.refresh(); }
+		if (selected) { await this.attach(selected, endpoint); }
 	}
 
 	async openKnowledge(): Promise<void> {
 		await this.refresh();
+		const endpoint = this.endpoint!;
+		const session = this.session!;
 		const chosen = await vscode.window.showQuickPick(this.library.map(session => ({ label: session.title, description: session.repository ?? session.session_id, session })),
 			{ title: vscode.l10n.t('Knowledge Session') });
 		if (!chosen) { return; }
@@ -102,7 +117,8 @@ class SharedSessionView implements vscode.WebviewViewProvider, vscode.Disposable
 			{ label: vscode.l10n.t('Learnings'), type: 'Learnings' as const }, { label: vscode.l10n.t('Documents'), type: 'Documents' as const }],
 			{ title: vscode.l10n.t('Knowledge Section') });
 		if (!section) { return; }
-		const reply = await this.session!.readService({
+		if (endpoint.identity !== getRuntimeEndpoint().identity || session !== this.session) { throw new Error(vscode.l10n.t('The agent runtime connection changed. Open the knowledge browser again.')); }
+		const reply = await session.readService({
 			type: 'ReadKnowledge', session_id: chosen.session.session_id,
 			section: { type: section.type }, offset: 0, limit: 100
 		});
@@ -114,28 +130,33 @@ class SharedSessionView implements vscode.WebviewViewProvider, vscode.Disposable
 	async recordMemory(): Promise<void> {
 		if (!vscode.workspace.isTrusted) { throw new Error(vscode.l10n.t('Trust this workspace before recording memory.')); }
 		await ensureDaemon(this.context); await this.refresh();
+		const endpoint = this.endpoint!;
 		const selected = await vscode.window.showQuickPick(this.library.map(session => ({ label: session.title, description: session.repository ?? session.session_id, session })),
 			{ title: vscode.l10n.t('Memory Session') });
 		if (!selected) { return; }
 		const text = await vscode.window.showInputBox({ prompt: vscode.l10n.t('What should be remembered?'), validateInput: value => value.length > 20_000 ? vscode.l10n.t('Use at most 20,000 characters.') : undefined });
 		if (!text?.trim()) { return; }
-		await this.attach(selected.session);
+		await this.attach(selected.session, endpoint);
 		await this.session!.rememberMemory(text.trim());
 		void vscode.window.showInformationMessage(vscode.l10n.t('Memory request recorded. Inspect shared memory for the curation outcome.'));
 	}
 
 	private async handle(message: ViewMessage): Promise<void> {
 		if (this.disposed) { return; }
+		if (this.endpoint && this.endpoint.identity !== getRuntimeEndpoint().identity) {
+			await this.reconnect();
+			throw new Error(vscode.l10n.t('The agent runtime connection changed. Retry from the current session.'));
+		}
 		if ((message.type === 'submit' || message.type === 'approve' || message.type === 'reject' || message.type === 'question' || message.type === 'cancel')
 			&& message.sessionId !== this.session?.snapshot.sessionId) {
 			throw new Error(vscode.l10n.t('The selected session changed. Retry from the current session.'));
 		}
 		switch (message.type) {
 			case 'ready': {
-				await ensureDaemon(this.context);
+				await ensureDaemon(this.context, getRuntimeEndpoint());
 				if (this.session) { this.schedulePublish(); return; }
 				await this.refresh();
-				const last = this.context.workspaceState.get<string>('sharedSessions.lastSessionId');
+				const last = this.context.workspaceState.get<string>(`sharedSessions.${this.endpoint!.identity}.lastSessionId`);
 				const selected = this.library.find(session => session.session_id === last);
 				if (selected) { await this.attach(selected); }
 				break;
@@ -156,10 +177,12 @@ class SharedSessionView implements vscode.WebviewViewProvider, vscode.Disposable
 				const title = await vscode.window.showInputBox({ prompt: vscode.l10n.t('Name the shared session'), value: folder.name });
 				if (!title?.trim()) { return; }
 				await this.refresh();
-				let workspace = this.context.workspaceState.get<string>('sharedSessions.workspaceId');
-				if (!workspace) { workspace = randomUUID(); await this.context.workspaceState.update('sharedSessions.workspaceId', workspace); }
+				const endpoint = this.endpoint!;
+				let workspace = this.context.workspaceState.get<string>(`sharedSessions.${endpoint.identity}.workspaceId`);
+				if (!workspace) { workspace = randomUUID(); await this.context.workspaceState.update(`sharedSessions.${endpoint.identity}.workspaceId`, workspace); }
+				if (endpoint.identity !== getRuntimeEndpoint().identity) { throw new Error(vscode.l10n.t('The agent runtime connection changed. Create the session again.')); }
 				const id = await this.session!.createSession(title.trim(), workspace, realpathSync(folder.uri.fsPath));
-				await this.context.workspaceState.update('sharedSessions.lastSessionId', id);
+				await this.context.workspaceState.update(`sharedSessions.${endpoint.identity}.lastSessionId`, id);
 				await this.refresh(); this.pushEditorContext(); break;
 			}
 			case 'submit':
@@ -190,6 +213,8 @@ class SharedSessionView implements vscode.WebviewViewProvider, vscode.Disposable
 	}
 
 	private pushEditorContext(): void {
+		try { if (!this.endpoint || this.endpoint.identity !== getRuntimeEndpoint().identity) { return; } }
+		catch { return; }
 		const repository = this.session?.repositoryRoot;
 		if (!repository || !vscode.workspace.isTrusted) { return; }
 		const belongs = (file: string): boolean => {
@@ -242,14 +267,40 @@ class SharedSessionView implements vscode.WebviewViewProvider, vscode.Disposable
 
 export function activate(context: vscode.ExtensionContext): void {
 	registerGraphCommands(context);
+	registerWorkflowCommands(context);
 	const provider = new SharedSessionView(context);
 	context.subscriptions.push(provider, vscode.window.registerWebviewViewProvider('sota.sharedSessions', provider),
-		vscode.commands.registerCommand('sota.daemon.ensure', () => ensureDaemon(context)),
+		vscode.commands.registerCommand('sota.daemon.endpoint', () => getRuntimeEndpoint()),
+		vscode.commands.registerCommand('sota.daemon.ensure', (endpoint?: RuntimeEndpoint) => ensureDaemon(context, endpoint)),
+		vscode.commands.registerCommand('sota.daemon.configureProvider', async (request: Parameters<typeof configureProvider>[1]) => {
+			if (!vscode.workspace.isTrusted) { throw new Error(vscode.l10n.t('Trust this workspace before configuring the agent runtime.')); }
+			const endpoint = getRuntimeEndpoint();
+			return configureProvider(context, request, endpoint, args => runRuntimeCli(context, args, endpoint));
+		}),
+		vscode.commands.registerCommand('sota.daemon.providerStatus', async () => ({ ...await providerStatus(context), mode: getRuntimeEndpoint().mode })),
+		vscode.commands.registerCommand('sota.daemon.restart', async () => {
+			const endpoint = getRuntimeEndpoint();
+			await runRuntimeCli(context, ['daemon', 'restart'], endpoint);
+			void vscode.window.showInformationMessage(vscode.l10n.t('The idle Son of Anton agent runtime restarted. Reconnect any open sessions.'));
+		}),
+		vscode.commands.registerCommand('sota.daemon.useLocalRuntime', async () => {
+			const configuration = vscode.workspace.getConfiguration('sota.daemon');
+			await configuration.update('connection', 'local', vscode.ConfigurationTarget.Global);
+			await configuration.update('socketPath', '', vscode.ConfigurationTarget.Global);
+			void vscode.window.showInformationMessage(vscode.l10n.t('Son of Anton now uses its own agent runtime. Existing external sessions remain in their original runtime.'));
+		}),
+		vscode.commands.registerCommand('sota.daemon.connectCodypendent', async () => {
+			const configuration = vscode.workspace.getConfiguration('sota.daemon');
+			await configuration.update('socketPath', '', vscode.ConfigurationTarget.Global);
+			await configuration.update('connection', 'external', vscode.ConfigurationTarget.Global);
+			void vscode.window.showInformationMessage(vscode.l10n.t('Connected mode selected. Start Codypendent in its own application, then open shared sessions.'));
+		}),
 		vscode.commands.registerCommand('sota.daemon.models', async () => {
-			await ensureDaemon(context);
+			const endpoint = getRuntimeEndpoint();
+			await ensureDaemon(context, endpoint);
 			const session = new SharedSession({
 				clientName: 'son-of-anton-readiness', clientVersion: '0.1.0',
-				socketPath: vscode.workspace.getConfiguration('sota.daemon').get<string>('socketPath') || undefined,
+				socketPath: endpoint.socketPath,
 				canWrite: () => false, onChange: () => { }, onError: () => { }
 			});
 			try { await session.connect(); return await session.probeModels(); }

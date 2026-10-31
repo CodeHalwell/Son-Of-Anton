@@ -9,6 +9,41 @@ import type { NodeSessionState, TranscriptRow } from '@codypendent/protocol/node
 type Text = (key: string, ...args: Array<string | number>) => string;
 type QueueAction = 'remove' | 'edit' | 'up' | 'down' | 'resume' | 'pause';
 
+interface CompletedPlan { id: string }
+
+/** A retained response is eligible only when the host recorded its successful Plan outcome. */
+export function completedNativePlan(response: {
+	role?: string; content?: string | ReadonlyArray<{ type: string; text?: string }>; responseId?: string;
+	execution?: { outcome?: string; chatMode?: string };
+} | undefined): CompletedPlan | undefined {
+	if (response?.role !== 'assistant' || response.execution?.outcome !== 'completed' || response.execution.chatMode !== 'plan' || !response.responseId) { return undefined; }
+	const text = typeof response.content === 'string' ? response.content : response.content?.filter(part => part.type === 'text').map(part => part.text ?? '').join('\n');
+	return text?.trim() ? { id: response.responseId } : undefined;
+}
+
+/** Run mode comes from RunStarted; missing retained provenance never inherits the composer's mode. */
+export function completedDaemonPlan(projection: NodeSessionState['projection']): CompletedPlan | undefined {
+	if (projection.activeRuns.length || projection.approvals.length || projection.questions.length) { return undefined; }
+	const run = projection.runs?.at(-1);
+	if (run?.mode !== 'Plan' || run.state !== 'Completed' || run.disposition?.type !== 'Completed') { return undefined; }
+	return projection.rows.some(row => row.kind === 'assistant' && row.runId === run.id && row.text.trim()) ? { id: run.id } : undefined;
+}
+
+/** Preparing an implementation request changes the draft only; the user still decides when to send. */
+export function planImplementationDraft(current: string, instruction: string): string {
+	return current.length ? `${instruction}\n\n${current}` : instruction;
+}
+
+/** One affordance for the latest completed Plan, outside historical response action toolbars. */
+export function renderPlanHandoff(root: HTMLElement, visible: boolean, prepare: () => void, text: Text): void {
+	root.hidden = !visible;
+	if (root.childElementCount) { return; }
+	root.setAttribute('aria-label', text('planReady'));
+	const control = button(text('implementPlan'), prepare); control.className = 'secondary-button';
+	const explanation = document.createElement('p'); explanation.textContent = text('implementPlanHint');
+	root.append(control, explanation);
+}
+
 function button(label: string, action: () => void): HTMLButtonElement {
 	const element = document.createElement('button');
 	element.type = 'button'; element.textContent = label; element.setAttribute('aria-label', label);
@@ -43,8 +78,9 @@ export function renderDaemonControls(root: HTMLElement, state: NodeSessionState,
 	const status = document.createElement('p'); status.setAttribute('role', 'status');
 	status.textContent = text('sharedRuntimeStatus', state.status, state.projection.activeRuns.length); root.append(status);
 	const setup = button(text('sharedConfigureModels'), () => act('daemonSetup'));
-	setup.disabled = !writable; root.append(setup);
-	root.append(button(text('sharedRefresh'), () => act('daemonRefresh')));
+	setup.dataset.daemonControl = 'setup'; setup.disabled = !writable; root.append(setup);
+	const refresh = button(text('sharedRefresh'), () => act('daemonRefresh'));
+	refresh.dataset.daemonControl = 'refresh'; root.append(refresh);
 	if (state.projection.historyTruncated) { const notice = document.createElement('p'); notice.textContent = text('sharedHistoryBounded'); root.append(notice); }
 	const enabled = writable && state.status === 'attached';
 	const action = (key: string, label: string, callback: () => void): HTMLButtonElement => {

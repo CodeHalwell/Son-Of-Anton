@@ -59,7 +59,7 @@ jobs:
       matrix:
         include:
           - target: macos-arm64
-            runs-on: macos-14
+            runs-on: macos-15
             package-script: package:macos-arm64
             artefact-name: sota
             artefacts: |

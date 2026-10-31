@@ -7,12 +7,16 @@ import * as vscode from 'vscode';
 /** Localized labels shared with the isolated chat webview. */
 export function getChatUiStrings(): Record<string, string> {
 	return {
-		sharedRuntimeStatus: vscode.l10n.t('Codypendent · {0} · {1} Active Runs'),
-		sharedConfigureModels: vscode.l10n.t('Configure Models in Codypendent'),
+		planReady: vscode.l10n.t('Plan Ready'),
+		implementPlan: vscode.l10n.t('Implement This Plan'),
+		implementPlanPrompt: vscode.l10n.t('Implement this plan.'),
+		implementPlanHint: vscode.l10n.t('Prepare an editable request in Act mode. Nothing runs until you send it.'),
+		sharedRuntimeStatus: vscode.l10n.t('Agent Runtime · {0} · {1} Active Runs'),
+		sharedConfigureModels: vscode.l10n.t('Configure Models'),
 		sharedRefresh: vscode.l10n.t('Refresh Shared Runtime'),
 		sharedLegacyHistory: vscode.l10n.t('This history belongs to the native compatibility runtime. Choose native and reload the window to continue it, or start a new shared conversation. The original history is retained.'),
 		sharedLegacySettings: vscode.l10n.t('Choose Compatibility Runtime'),
-		sharedHistoryBounded: vscode.l10n.t('Showing the most recent activity. Full history is retained by Codypendent.'),
+		sharedHistoryBounded: vscode.l10n.t('Showing the most recent activity. Full history is retained by its agent runtime.'),
 		sharedApproveOnce: vscode.l10n.t('Approve Once'),
 		sharedReject: vscode.l10n.t('Reject'),
 		sharedAnswer: vscode.l10n.t('Answer…'),
@@ -108,7 +112,7 @@ export function getChatUiStrings(): Record<string, string> {
 		chooseModel: vscode.l10n.t('Choose a Model'),
 		searchModels: vscode.l10n.t('Search Models…'),
 		noModels: vscode.l10n.t('No models match your search.'),
-		sharedModelsNotConfigured: vscode.l10n.t('No model is configured in Codypendent. Configure a model to send your message.'),
+		sharedModelsNotConfigured: vscode.l10n.t('No model is configured in the agent runtime. Configure a model to send your message.'),
 		modelUnavailable: vscode.l10n.t('This model is no longer in the provider catalog. Choose another model to send your message.'),
 		draftSaved: vscode.l10n.t('Draft Saved'),
 		draftImages: vscode.l10n.t('Text Draft Saved · Images Kept Until Reload'),

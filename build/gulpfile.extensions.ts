@@ -24,6 +24,7 @@ import * as tsb from './lib/tsb/index.ts';
 import { createTsgoStream, spawnTsgo } from './lib/tsgo.ts';
 import * as util from './lib/util.ts';
 import watcher from './lib/watch/index.ts';
+import { patchLanguageClientGlobs } from './npm/patchLanguageClientGlobs.ts';
 
 const root = path.dirname(import.meta.dirname);
 const commit = getVersion(root);
@@ -172,7 +173,9 @@ const tasks = compilations.map(function (tsconfigFile) {
 		return pipeline;
 	}
 
-	const cleanTask = task.define(`clean-extension-${name}`, util.rimraf(out));
+	const cleanTask = task.define(`clean-extension-${name}`, task.series(() => {
+		patchLanguageClientGlobs(path.join(root, 'extensions', relativeDirname.split('/')[0]));
+	}, util.rimraf(out)));
 
 	const transpileTask = task.define(`transpile-extension:${name}`, task.series(cleanTask, () => {
 		const pipeline = createPipeline(false, true, true);

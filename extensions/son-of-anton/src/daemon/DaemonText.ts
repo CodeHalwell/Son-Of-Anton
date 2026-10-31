@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { NodeSession, type NodeSessionOptions } from '@codypendent/protocol/node';
 import type { LlmRequestOptions } from 'son-of-anton-core/llm/LlmClient';
+import { getDaemonEndpoint } from './DaemonChat';
 
 /** Short editor requests still execute through the daemon's policy/model path.
  * Each uses an internal, durable session so completions never pollute a chat.
@@ -21,7 +22,8 @@ export async function requestDaemonText(options: LlmRequestOptions,
 	if (!prompt.trim() || prompt.length > 100_000) { throw new Error(vscode.l10n.t('The inline context is too large. Select a smaller block.')); }
 	const aborted = (): Error => new Error(vscode.l10n.t('The editor request was cancelled.'));
 	if (options.signal?.aborted) { throw aborted(); }
-	await vscode.commands.executeCommand('sota.daemon.ensure');
+	const endpoint = await getDaemonEndpoint();
+	await vscode.commands.executeCommand('sota.daemon.ensure', endpoint);
 	if (options.signal?.aborted) { throw aborted(); }
 	let runId: string | undefined;
 	let terminal = false;
@@ -30,7 +32,7 @@ export async function requestDaemonText(options: LlmRequestOptions,
 	let cancelling: Promise<void> | undefined;
 	let wake = (): void => {};
 	const session = createSession({ clientName: 'son-of-anton-inline', canWrite: () => vscode.workspace.isTrusted,
-		socketPath: vscode.workspace.getConfiguration('sota.daemon').get<string>('socketPath') || undefined,
+		socketPath: endpoint.socketPath,
 		onChange: () => wake(), onError: () => {} });
 	const cancelAcceptedRun = async (): Promise<void> => {
 		if (runId) { cancelling ??= session.cancelRun(runId); await cancelling; }

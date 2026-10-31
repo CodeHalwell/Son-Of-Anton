@@ -1,7 +1,7 @@
 {
   "name": "son-of-anton-daemon",
-  "displayName": "Son of Anton Shared Sessions",
-  "description": "Shared agent sessions powered by the Codypendent Rust daemon.",
+  "displayName": "Son of Anton Agent Runtime",
+  "description": "Independent agent sessions with an optional Codypendent connection.",
   "version": "0.1.0",
   "publisher": "son-of-anton",
   "license": "MIT",
@@ -30,8 +30,12 @@
     "onCommand:sota.daemon.knowledge",
     "onCommand:sota.daemon.terminal",
     "onCommand:sota.daemon.board",
+    "onCommand:sota.daemon.workflows",
     "onCommand:sota.daemon.council",
-    "onCommand:sota.daemon.recordMemory"
+    "onCommand:sota.daemon.recordMemory",
+    "onCommand:sota.daemon.useLocalRuntime",
+    "onCommand:sota.daemon.connectCodypendent",
+    "onCommand:sota.daemon.restart"
   ],
   "capabilities": {
     "untrustedWorkspaces": {
@@ -65,7 +69,7 @@
       },
       {
         "command": "sota.daemon.terminal",
-        "title": "Open Codypendent Terminal",
+        "title": "Open Agent Terminal",
         "category": "Son of Anton"
       },
       {
@@ -74,8 +78,28 @@
         "category": "Son of Anton"
       },
       {
+        "command": "sota.daemon.workflows",
+        "title": "Browse Repository Workflows",
+        "category": "Son of Anton"
+      },
+      {
         "command": "sota.daemon.council",
         "title": "Review with Shared Council",
+        "category": "Son of Anton"
+      },
+      {
+        "command": "sota.daemon.useLocalRuntime",
+        "title": "Use Local Agent Runtime",
+        "category": "Son of Anton"
+      },
+      {
+        "command": "sota.daemon.connectCodypendent",
+        "title": "Connect to Codypendent",
+        "category": "Son of Anton"
+      },
+      {
+        "command": "sota.daemon.restart",
+        "title": "Restart Idle Agent Runtime",
         "category": "Son of Anton"
       }
     ],
@@ -89,13 +113,23 @@
       ]
     },
     "configuration": {
-      "title": "Son of Anton Shared Sessions",
+      "title": "Son of Anton Agent Runtime",
       "properties": {
+        "sota.daemon.connection": {
+          "type": "string",
+          "enum": [
+            "local",
+            "external"
+          ],
+          "default": "local",
+          "scope": "machine",
+          "description": "Use Son of Anton's own bundled agent engine, or explicitly connect to a running Codypendent runtime. External runtimes own their configuration and are never started or restarted by Son of Anton."
+        },
         "sota.daemon.socketPath": {
           "type": "string",
           "default": "",
           "scope": "machine",
-          "description": "Codypendent daemon socket override. Leave empty to use Codypendent's standard discovery."
+          "description": "Explicit external daemon socket path. A nonempty value selects an external runtime. Leave empty for the selected connection's standard discovery; the default local connection uses Son of Anton's private storage and socket."
         }
       }
     }

@@ -7,6 +7,7 @@
  */
 import path from 'node:path';
 import esbuild from 'esbuild';
+import { patchLanguageClientGlobs } from '../build/npm/patchLanguageClientGlobs.ts';
 
 type BuildOptions = Partial<esbuild.BuildOptions> & {
 	outdir: string;
@@ -76,6 +77,8 @@ function resolveOptions(config: RunConfig, outdir: string): BuildOptions {
 }
 
 export async function run(config: RunConfig, args: string[], didBuild?: (outDir: string) => unknown): Promise<void> {
+	const extension = path.relative(import.meta.dirname, config.srcDir).split(path.sep)[0];
+	patchLanguageClientGlobs(path.join(import.meta.dirname, extension));
 	let outdir = config.outdir;
 	const outputRootIndex = args.indexOf('--outputRoot');
 	if (outputRootIndex >= 0) {

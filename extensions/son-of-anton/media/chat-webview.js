@@ -534,8 +534,35 @@
 		let latestConnectionStatus;
 		let daemonBackend = document.body.dataset.runtime === 'codypendent';
 		let daemonState;
+		let consumedPlanHandoff;
+		const planHandoff = document.createElement('section');
+		planHandoff.className = 'daemon-controls plan-handoff'; planHandoff.hidden = true;
+		messageList.after(planHandoff);
+		function currentCompletedPlan() {
+			if (daemonBackend) return daemonState?.status === 'attached' ? SotaWorkflows.completedDaemonPlan(daemonState.projection) : undefined;
+			const plan = SotaWorkflows.completedNativePlan(historyWindow.get(historyWindow.length - 1));
+			return plan && [...messageList.querySelectorAll('.msg-assistant[data-response-id]')].some(node => node.dataset.responseId === plan.id) ? plan : undefined;
+		}
+		function refreshPlanHandoff() {
+			const plan = currentCompletedPlan();
+			SotaWorkflows.renderPlanHandoff(planHandoff, !!plan && plan.id !== consumedPlanHandoff && !isStreaming && !activeHostTurnPending && !legacySharedConversation, () => {
+				const latest = currentCompletedPlan();
+				if (!latest || latest.id === consumedPlanHandoff || isStreaming || activeHostTurnPending || legacySharedConversation) return;
+				consumedPlanHandoff = latest.id;
+				setPlanMode('act');
+				messageInput.value = SotaWorkflows.planImplementationDraft(messageInput.value, uiText('implementPlanPrompt'));
+				messageInput.dispatchEvent(new Event('input'));
+				persistDraft(); refreshPlanHandoff(); selectTab('chat'); messageInput.focus();
+				messageInput.setSelectionRange(messageInput.value.length, messageInput.value.length);
+			}, uiText);
+		}
 		let legacySharedConversation = false;
 		let daemonPendingDraft;
+		const configureModelsButton = document.getElementById('configureModelsBtn');
+		configureModelsButton.addEventListener('click', () => {
+			persistDraft();
+			vscode.postMessage({ type: 'daemonSetup', conversationId: activeConversationId });
+		});
 		const daemonControls = document.createElement('section');
 		daemonControls.className = 'daemon-controls'; daemonControls.hidden = true;
 		messageList.after(daemonControls);
@@ -2139,6 +2166,7 @@
 		function refreshPromptReuseAffordance() {
 			messageList.querySelectorAll('.msg-action-reuse').forEach(button => { button.disabled = isStreaming; });
 			messageList.querySelectorAll('.msg-action-branch').forEach(button => { button.disabled = isStreaming || activeHostTurnPending; });
+			refreshPlanHandoff();
 		}
 
 		/**
@@ -2393,12 +2421,13 @@
 		let updatingTimeline = false;
 		function resetEarlierHistory() {
 			historyWindow.reset(); earlierHistory = []; requestSlots.clear(); activeRequestId = null; activeTurnId = null; activeHostTurnPending = false;
+			consumedPlanHandoff = undefined; daemonState = undefined; planHandoff.hidden = true;
 			historyButton?.remove(); historyButton = null;
 			historyNewerControls?.remove(); historyNewerControls = null;
 			historyRangeLabel?.remove(); historyRangeLabel = null;
 			if (timelineFrame !== null) { cancelAnimationFrame(timelineFrame); timelineFrame = null; }
 		}
-		function historyOptions(msg) { return { persistedIndex: msg.persistedIndex, responseId: msg.responseId, requestId: msg.requestId, turnId: msg.turnId, timestamp: msg.timestamp, feedback: msg.feedback, specialistId: msg.specialistId || historySpecialist, usageUnavailable: msg.usageUnavailable === true, promptDraft: msg.promptDraft || (msg.role === 'user' ? promptDraftFromHistory(msg) : undefined) }; }
+		function historyOptions(msg) { return { persistedIndex: msg.persistedIndex, responseId: msg.responseId, requestId: msg.requestId, turnId: msg.turnId, timestamp: msg.timestamp, feedback: msg.feedback, execution: msg.execution, specialistId: msg.specialistId || historySpecialist, usageUnavailable: msg.usageUnavailable === true, promptDraft: msg.promptDraft || (msg.role === 'user' ? promptDraftFromHistory(msg) : undefined) }; }
 		function recordTimelineMessage(index, role, content, opts) {
 			if (renderingHistory) return;
 			historyWindow.set(index, { ...historyWindow.get(index), role, content, ...(opts || {}) });
@@ -2459,12 +2488,14 @@
 			const index = slots[message.role]; const record = historyWindow.get(index);
 			if (!record || record.role !== message.role || (message.role === 'assistant' && (typeof message.responseId !== 'string' || !message.responseId))) return;
 			record.persistedIndex = message.messageIndex; record.responseId = message.responseId;
+			if (message.execution) record.execution = message.execution;
 			const wrapper = messageList.querySelector('.msg[data-conversation-index="' + index + '"]');
 			stampPersistedIdentity(wrapper, record);
 			if (record.role === 'assistant') {
 				const actions = wrapper?.querySelector('.msg-actions');
 				if (actions) actions.replaceWith(buildAssistantActions(record.content, record));
 			} else for (const checkpoint of checkpointsByTurnIndex.get(record.persistedIndex) || []) insertCheckpointStripe(wrapper, checkpoint);
+			refreshPlanHandoff();
 		}
 		function scheduleTimelineWindow() {
 			if (daemonBackend || updatingTimeline || timelineFrame !== null) return;
@@ -2849,7 +2880,7 @@
 			}
 			if (!renderOnly && workspaceBlocked) { resolveWorkspaceButton.focus(); return; }
 			if (!renderOnly && legacySharedConversation) { legacySettings.focus(); return; }
-			if (!renderOnly && isCurrentModelUnavailable()) { modelChip.focus(); return; }
+			if (!renderOnly && isCurrentModelUnavailable()) { (configureModelsButton.hidden ? modelChip : configureModelsButton).focus(); return; }
 			let text = messageInput.value.trim();
 
 			// `@url <link>` is a deferred chip — when the user types '@url '
@@ -2971,6 +3002,11 @@
 			modelNotice.hidden = !unavailable;
 			const noSharedModels = daemonBackend && providerCatalogSnapshot?.providers.some(provider => provider.id === 'codypendent' && provider.catalogStatus === 'not-configured');
 			modelNotice.querySelector('span').textContent = uiText(noSharedModels ? 'sharedModelsNotConfigured' : 'modelUnavailable');
+			const setupFocused = document.activeElement === configureModelsButton;
+			configureModelsButton.hidden = !unavailable || !noSharedModels;
+			if (unavailable) { messageInput.setAttribute('aria-describedby', 'unavailableModelNotice'); }
+			else { messageInput.removeAttribute('aria-describedby'); }
+			if (setupFocused && configureModelsButton.hidden) { messageInput.focus(); }
 			document.getElementById('queueMessageBtn').disabled = unavailable;
 			document.getElementById('redirectMessageBtn').disabled = unavailable;
 			sendBtn.disabled = !isStreaming && (unavailable || legacySharedConversation);

@@ -93,23 +93,23 @@ export class StatusBarManager implements vscode.Disposable {
 		if (this.disposed) { return; }
 		const sequence = ++this.refreshSequence;
 		if (usesDaemonRuntime()) {
-			this.authItem.command = 'sota.daemon.terminal';
+			this.authItem.command = 'sota.openSetupWizard';
 			try {
 				const models = await vscode.commands.executeCommand<Awaited<ReturnType<NodeSession['probeModels']>>>('sota.daemon.models');
 				if (this.disposed || sequence !== this.refreshSequence) { return; }
 				if (!models) { throw new Error('Shared model inventory unavailable'); }
 				const usable = models.filter(model => ['ready', 'unverified'].includes(model.readiness.state));
-				this.authItem.text = '$(account) ' + (models.length === 0 ? vscode.l10n.t('Configure Codypendent')
-					: usable.length === 0 ? vscode.l10n.t('Check Codypendent Models') : vscode.l10n.t('Codypendent: {0} Models', usable.length));
+				this.authItem.text = '$(account) ' + (models.length === 0 ? vscode.l10n.t('Configure Models')
+					: usable.length === 0 ? vscode.l10n.t('Check Models') : vscode.l10n.t('Agent Models: {0}', usable.length));
 				const tooltip = new vscode.MarkdownString();
-				tooltip.appendText(models.length === 0 ? vscode.l10n.t('No model is configured in the active Codypendent runtime.')
+				tooltip.appendText(models.length === 0 ? vscode.l10n.t('No model is configured in the active agent runtime.')
 					: vscode.l10n.t('{0} configured models; {1} available for selection. Inference is verified when a model runs.', models.length, usable.length));
-				tooltip.appendText('\n' + vscode.l10n.t('Click to configure models in Codypendent.'));
+				tooltip.appendText('\n' + vscode.l10n.t('Click to configure models for the current runtime. External connections manage their own configuration.'));
 				this.authItem.tooltip = tooltip;
 			} catch {
 				if (this.disposed || sequence !== this.refreshSequence) { return; }
-				this.authItem.text = '$(warning) ' + vscode.l10n.t('Codypendent Unavailable');
-				this.authItem.tooltip = vscode.l10n.t('Could not read models from the active Codypendent runtime. Trust this workspace to start it, or open Codypendent to check its connection.');
+				this.authItem.text = '$(warning) ' + vscode.l10n.t('Agent Runtime Unavailable');
+				this.authItem.tooltip = vscode.l10n.t('Could not read models from the active agent runtime. Trust this workspace to start the local runtime, or check the selected external connection.');
 			}
 			return;
 		}
