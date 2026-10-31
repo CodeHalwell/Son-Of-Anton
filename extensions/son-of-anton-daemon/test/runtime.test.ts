@@ -8,12 +8,13 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createServer, type Server } from 'node:net';
 
-const host = vi.hoisted(() => ({ connection: 'local', socketPath: '', trusted: true }));
+const host = vi.hoisted(() => ({ connection: 'local', socketPath: '', trusted: true, createTerminal: vi.fn(() => ({ show: vi.fn(), dispose: vi.fn() })) }));
 vi.mock('vscode', () => ({
-	workspace: { getConfiguration: () => ({ get: (key: string) => key === 'connection' ? host.connection : host.socketPath }), get isTrusted() { return host.trusted; } },
+	window: { createTerminal: host.createTerminal, showQuickPick: async () => ({ label: 'fixture' }) },
+	workspace: { workspaceFolders: [{ uri: { scheme: 'file', fsPath: '/workspace' } }], getConfiguration: () => ({ get: (key: string) => key === 'connection' ? host.connection : host.socketPath }), get isTrusted() { return host.trusted; } },
 	l10n: { t: (value: string, ...args: string[]) => value.replace(/\{(\d+)\}/g, (_match, index: string) => args[Number(index)] ?? '') },
 }));
-import { ensureDaemon, getRuntimeEndpoint, runRuntimeCli } from '../src/runtime.js';
+import { ensureDaemon, getRuntimeEndpoint, openCouncil, openTerminal, runRuntimeCli } from '../src/runtime.js';
 
 describe('private agent engine process boundary', () => {
 	let root: string;
@@ -53,7 +54,7 @@ const result = { args: process.argv.slice(2), product: process.env.AGENT_RUNTIME
 	foreignPaths: ['CODYPENDENT_DATA_DIR','CODYPENDENT_CONFIG_DIR','CODYPENDENT_SOCKET'].filter(name => name in process.env),
 	hasCredential: !!process.env.SOTA_RUNTIME_ANTHROPIC_API_KEY };
 fs.mkdirSync(result.data, {recursive:true}); fs.writeFileSync(result.data + '/probe.json', JSON.stringify(result));
-process.stdout.write(JSON.stringify(result));\n`, { mode: 0o755 });
+process.stdout.write(JSON.stringify(process.argv[2] === 'council' ? [{ name: 'fixture' }] : result));\n`, { mode: 0o755 });
 	}
 
 	it('executes the bundled engine under private paths and keeps the companion store untouched', async () => {
@@ -64,6 +65,25 @@ process.stdout.write(JSON.stringify(result));\n`, { mode: 0o755 });
 		expect(JSON.parse(result.stdout)).toEqual({ args: ['models', 'list', '--json'], product: 'son-of-anton',
 			data: path.join(root, 'anton'), config: path.join(root, 'anton-config'), socket: path.join(root, 'anton.sock'), foreignPaths: [], hasCredential: true });
 		expect(await readFile(path.join(root, 'cody/sentinel'), 'utf8')).toBe('companion-state');
+	});
+
+	it('exposes only runtime paths to extensions inspecting either terminal', async () => {
+		await installFixture();
+		server = createServer(socket => socket.end());
+		await new Promise<void>(resolve => server!.listen(path.join(root, 'anton.sock'), resolve));
+		vi.stubEnv('SOTA_TERMINAL_TEST_SECRET', 'synthetic-ambient-secret');
+		const extension = { ...context, subscriptions: [] } as unknown as Parameters<typeof openTerminal>[0];
+		host.createTerminal.mockClear();
+		await openTerminal(extension);
+		await openCouncil(extension, true);
+		expect(host.createTerminal).toHaveBeenCalledTimes(2);
+		for (const call of host.createTerminal.mock.calls) {
+			expect(call).toEqual([expect.objectContaining({ env: {
+				AGENT_RUNTIME_PRODUCT: 'son-of-anton', SON_OF_ANTON_DATA_DIR: path.join(root, 'anton'),
+				SON_OF_ANTON_CONFIG_DIR: path.join(root, 'anton-config'), SON_OF_ANTON_SOCKET: path.join(root, 'anton.sock'),
+				CODYPENDENT_DATA_DIR: null, CODYPENDENT_CONFIG_DIR: null, CODYPENDENT_SOCKET: null,
+			} })]);
+		}
 	});
 
 	it('rejects an older bundled binary before it can ignore the product selector', async () => {

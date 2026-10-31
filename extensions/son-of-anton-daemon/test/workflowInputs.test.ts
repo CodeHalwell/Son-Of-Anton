@@ -37,6 +37,16 @@ describe('workflow input boundary', () => {
 		}
 	});
 
+	it('rejects unsafe integers before dispatch and preserves quoted identifiers and safe limits', () => {
+		for (const raw of ['9007199254740992', '-9007199254740992', '{"accounts":[9007199254740993]}', '1e20']) {
+			expect(parseWorkflowInputs({ value: declaration }, { value: raw })).toEqual({ ok: false, field: 'value', reason: 'unsafe-integer' });
+		}
+		const value = '["9007199254740993",9007199254740991,-9007199254740991,1.25]';
+		expect(parseWorkflowInputs({ value: declaration }, { value })).toEqual({
+			ok: true, inputs: { value: ['9007199254740993', Number.MAX_SAFE_INTEGER, Number.MIN_SAFE_INTEGER, 1.25] }
+		});
+	});
+
 	it('bounds the declared and supplied field counts without silently omitting required fields', () => {
 		const declarations = Object.fromEntries(Array.from({ length: WORKFLOW_MAX_INPUT_FIELDS + 1 }, (_, index) => [`field${index}`, declaration]));
 		expect(parseWorkflowInputs(declarations, {})).toEqual({ ok: false, reason: 'too-many' });

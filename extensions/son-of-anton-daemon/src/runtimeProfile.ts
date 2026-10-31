@@ -31,18 +31,29 @@ export function resolveRuntimeEndpoint(settings: RuntimeSettings, env: Env = pro
 	return { mode, socketPath: normalized, identity: createHash('sha256').update(`${mode}\0${normalized}`).digest('hex') };
 }
 
-/** Keep all child processes in Anton's namespace without changing the extension host's environment. */
-export function privateRuntimeEnvironment(endpoint: RuntimeEndpoint, env: Env = process.env, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
+function runtimePathOverrides(endpoint: RuntimeEndpoint, env: Env, platform: NodeJS.Platform) {
 	if (endpoint.mode !== 'local') { throw new Error('An external runtime owns its environment and configuration.'); }
 	const paths = resolveRuntimePaths(env, platform, 'son-of-anton');
+	return {
+		AGENT_RUNTIME_PRODUCT: 'son-of-anton', SON_OF_ANTON_DATA_DIR: paths.dataDir,
+		SON_OF_ANTON_CONFIG_DIR: paths.configDir, SON_OF_ANTON_SOCKET: endpoint.socketPath
+	};
+}
+
+/** Terminal creation options are visible to other extensions. Only expose namespace overrides. */
+export function terminalRuntimeEnvironment(endpoint: RuntimeEndpoint) {
+	return {
+		...runtimePathOverrides(endpoint, process.env, process.platform),
+		CODYPENDENT_DATA_DIR: null, CODYPENDENT_CONFIG_DIR: null, CODYPENDENT_SOCKET: null
+	};
+}
+
+export function privateRuntimeEnvironment(endpoint: RuntimeEndpoint, env: Env = process.env, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
 	const result = { ...env };
 	delete result.CODYPENDENT_DATA_DIR;
 	delete result.CODYPENDENT_CONFIG_DIR;
 	delete result.CODYPENDENT_SOCKET;
-	return {
-		...result, AGENT_RUNTIME_PRODUCT: 'son-of-anton', SON_OF_ANTON_DATA_DIR: paths.dataDir,
-		SON_OF_ANTON_CONFIG_DIR: paths.configDir, SON_OF_ANTON_SOCKET: endpoint.socketPath
-	};
+	return { ...result, ...runtimePathOverrides(endpoint, env, platform) };
 }
 
 /** A captured endpoint must still be selected before a command can use it. */

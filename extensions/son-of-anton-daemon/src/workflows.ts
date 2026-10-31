@@ -205,6 +205,7 @@ export function registerWorkflowCommands(context: vscode.ExtensionContext): void
 						if (!result.ok) {
 							const errors = {
 								required: vscode.l10n.t('Input {0} is required.', result.field ?? ''), 'invalid-json': vscode.l10n.t('Input {0} must be valid JSON.', result.field ?? ''),
+								'unsafe-integer': vscode.l10n.t('Input {0} contains an integer outside the safe range. Enter large identifiers as quoted strings.', result.field ?? ''),
 								'unknown-input': vscode.l10n.t('Input {0} is not declared by this workflow.', result.field ?? ''), 'too-large': vscode.l10n.t('Workflow inputs exceed the supported size limit.'),
 								'too-many': vscode.l10n.t('This workflow has more inputs than this panel supports.')
 							};
