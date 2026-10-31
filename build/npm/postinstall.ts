@@ -9,6 +9,7 @@ import * as os from 'os';
 import * as child_process from 'child_process';
 import { dirs } from './dirs.ts';
 import { root, stateFile, stateContentsFile, computeState, computeContents, isUpToDate } from './installStateHash.ts';
+import { patchLanguageClientGlobs } from './patchLanguageClientGlobs.ts';
 
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const rootNpmrcConfigKeys = getNpmrcConfigKeys(path.join(root, '.npmrc'));
@@ -96,6 +97,7 @@ async function npmInstallAsync(dir: string, opts?: child_process.SpawnOptions): 
 		}
 	}
 	removeParcelWatcherPrebuild(dir);
+	patchLanguageClientGlobs(path.join(root, dir));
 }
 
 function setNpmrcConfig(dir: string, env: NodeJS.ProcessEnv) {
@@ -209,6 +211,9 @@ async function runWithConcurrency(tasks: (() => Promise<void>)[], concurrency: n
 
 async function main() {
 	if (!process.env['VSCODE_FORCE_INSTALL'] && isUpToDate()) {
+		for (const dir of dirs) {
+			patchLanguageClientGlobs(path.join(root, dir));
+		}
 		log('.', 'All dependencies up to date, skipping postinstall.');
 		child_process.execSync('git config pull.rebase merges');
 		child_process.execSync('git config blame.ignoreRevsFile .git-blame-ignore-revs');
