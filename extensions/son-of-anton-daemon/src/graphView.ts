@@ -79,7 +79,7 @@ button:disabled{opacity:.6;cursor:default}input{font:inherit;color:var(--vscode-
 <p id="graph-progress" role="status" aria-live="polite" data-loading="${label('Loading recorded graph…')}">${label('Showing {0} matching nodes and {1} relationships in this page.', page.nodes.length, page.edges.length)}</p>
 <p id="graph-error" role="alert"></p>
 <div class="freshness${status.stale ? ' stale' : ''}" role="status"><strong>${label(status.stale ? 'Saved Graph Is Stale' : 'Saved Graph Is Current')}</strong>
-${status.stale_reason ? `<p>${escape(status.stale_reason)}</p>` : ''}<p>${label(status.working_tree_dirty ? 'Working tree has uncommitted tracked changes.' : 'Working tree has no uncommitted tracked changes.')}</p>
+${status.stale_reason ? `<p>${escape(status.stale_reason)}</p>` : ''}<p>${label(status.working_tree_dirty ? 'Working tree has uncommitted changes.' : 'Working tree has no uncommitted changes.')}</p>
 <p>${label('HEAD: {0}', status.head_revision)}</p><p>${label('{0} files, {1} nodes and {2} relationships recorded.', status.files, status.nodes, status.edges)}</p>
 <details><summary>${label('Stored Revisions')}</summary><ul>${storedRevisions}</ul></details></div>
 <div id="selection" tabindex="-1" data-focus-key="selection"><strong>${label('Selected Symbol')}</strong><p id="selected-symbol">${selected ? escape(selected.qualified_name) : label('No symbol selected. Choose a matching symbol or related endpoint to inspect its recorded relationships.')}</p>

@@ -107,6 +107,15 @@ describe('repository workflow panel authority', () => {
 		expect(state().error).toContain('Trust this workspace'); expect(host.start).not.toHaveBeenCalled();
 	});
 
+	it('blocks a rounded identifier at the form and launches with the exact quoted identifier', async () => {
+		const request = { type: 'start', workflowId: 'review', catalogRevision: 1 } as const;
+		await send({ ...request, inputValues: { target: '{"account":9007199254740993}' } });
+		expect(state().error).toContain('quoted strings');
+		expect(host.start).not.toHaveBeenCalled();
+		await send({ ...request, inputValues: { target: '{"account":"9007199254740993"}' } });
+		expect(host.start).toHaveBeenCalledExactlyOnceWith('review', { target: { account: '9007199254740993' } }, host.root, expect.anything());
+	});
+
 	it('retains an uncertain start across panel closure and reconciles the same intent without automatic replay', async () => {
 		host.start.mockRejectedValueOnce(new Error('Synthetic transport timeout'));
 		await start(); const request = host.start.mock.calls[0];
