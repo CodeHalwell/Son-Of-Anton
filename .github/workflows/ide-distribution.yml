@@ -65,9 +65,9 @@ permissions:
 
 concurrency:
   group: ide-distribution-${{ github.ref }}
-  # Finish the active native matrix so its compiled dependency cache is
-  # available to the newest pending revision. GitHub coalesces pending runs.
-  cancel-in-progress: false
+  # Validate the latest PR revision promptly; obsolete native builds must not
+  # block it. Push and tag builds finish normally, preserving release work.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   prepare:
@@ -122,7 +122,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             target: darwin-arm64
           - os: macos-15-intel
             target: darwin-x64
