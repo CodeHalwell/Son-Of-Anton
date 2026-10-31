@@ -72,7 +72,7 @@ describe('recorded code graph inspector', () => {
 		expect(view.document.querySelectorAll('#matching-nodes [data-node-id]')).toHaveLength(1);
 		expect(view.document.querySelector('#related-nodes')!.textContent).toContain('not additional matching nodes');
 		expect(view.document.querySelector('#selected-symbol')!.textContent).toBe('source.selected');
-		for (const evidence of ['Saved Graph Is Stale', 'Tracked source changed since indexing.', 'uncommitted tracked changes', 'head-revision', 'saved-revision', '14 nodes', 'complete impact or measured test coverage']) {
+		for (const evidence of ['Saved Graph Is Stale', 'Tracked source changed since indexing.', 'uncommitted changes', 'head-revision', 'saved-revision', '14 nodes', 'complete impact or measured test coverage']) {
 			expect(view.document.body.textContent).toContain(evidence);
 		}
 	});
@@ -162,7 +162,7 @@ describe('recorded code graph inspector', () => {
 		expect(view.document.querySelector('.relationship [data-source-id]')).toBeNull();
 		expect(view.document.querySelector('.relationship')!.textContent).toContain('Call site unavailable.');
 		expect(view.document.body.textContent).toContain('Saved Graph Is Current');
-		expect(view.document.body.textContent).toContain('Working tree has no uncommitted tracked changes.');
+		expect(view.document.body.textContent).toContain('Working tree has no uncommitted changes.');
 	});
 
 	it('ignores foreign-origin and obsolete errors and renders current errors as text', () => {

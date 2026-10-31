@@ -9,7 +9,7 @@ export const WORKFLOW_MAX_INPUT_BYTES = 64 * 1024;
 export const WORKFLOW_MAX_TOTAL_INPUT_BYTES = 256 * 1024;
 
 export type WorkflowInputResult = { ok: true; inputs: Record<string, unknown> }
-	| { ok: false; field?: string; reason: 'required' | 'invalid-json' | 'unknown-input' | 'too-large' | 'too-many' };
+	| { ok: false; field?: string; reason: 'required' | 'invalid-json' | 'unsafe-integer' | 'unknown-input' | 'too-large' | 'too-many' };
 
 /** Domain input types are opaque; preserve JSON values without guessing a schema or exposing parse contents. */
 export function parseWorkflowInputs(declarations: WorkflowCatalogEntry['inputs'], rawValues: Record<string, string>): WorkflowInputResult {
@@ -40,6 +40,9 @@ export function parseWorkflowInputs(declarations: WorkflowCatalogEntry['inputs']
 		while (remaining.length) {
 			const item = remaining.pop()!;
 			if (item.depth > 64 || typeof item.value === 'number' && !Number.isFinite(item.value)) { return { ok: false, field: name, reason: 'invalid-json' }; }
+			if (typeof item.value === 'number' && Number.isInteger(item.value) && !Number.isSafeInteger(item.value)) {
+				return { ok: false, field: name, reason: 'unsafe-integer' };
+			}
 			if (item.value && typeof item.value === 'object') {
 				for (const nested of Object.values(item.value)) { remaining.push({ value: nested, depth: item.depth + 1 }); }
 			}

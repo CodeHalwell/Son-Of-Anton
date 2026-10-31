@@ -9,7 +9,7 @@ import { createConnection } from 'node:net';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { credentialEnvironment } from './providerSetup.js';
-import { privateRuntimeEnvironment, resolveRuntimeEndpoint, sameRuntimeEndpoint, type RuntimeEndpoint } from './runtimeProfile.js';
+import { privateRuntimeEnvironment, resolveRuntimeEndpoint, sameRuntimeEndpoint, terminalRuntimeEnvironment, type RuntimeEndpoint } from './runtimeProfile.js';
 
 export type { RuntimeEndpoint } from './runtimeProfile.js';
 
@@ -24,11 +24,6 @@ export function getRuntimeEndpoint(): RuntimeEndpoint {
 
 function assertEndpoint(expected: RuntimeEndpoint): void {
 	if (!sameRuntimeEndpoint(expected, getRuntimeEndpoint())) { throw new Error(vscode.l10n.t('The agent runtime changed. Retry this action from the current connection.')); }
-}
-
-/** Stored Anton credentials are supplied only to Anton-owned child processes. */
-export async function getRuntimeEnvironment(context: RuntimeContext): Promise<NodeJS.ProcessEnv> {
-	return { ...privateRuntimeEnvironment(getRuntimeEndpoint()), ...await credentialEnvironment(context) };
 }
 
 async function runtimeDirectory(context: Pick<RuntimeContext, 'extensionPath'>): Promise<string> {
@@ -54,7 +49,7 @@ export async function runRuntimeCli(context: RuntimeContext, args: string[], exp
 	if (expected.mode !== 'local') { throw new Error(vscode.l10n.t('The connected external runtime manages its own configuration. Switch to the local Son of Anton runtime to configure it here.')); }
 	if (!vscode.workspace.isTrusted) { throw new Error(vscode.l10n.t('Trust this workspace before configuring the agent runtime.')); }
 	const directory = await runtimeDirectory(context);
-	const environment = await getRuntimeEnvironment(context);
+	const environment = { ...privateRuntimeEnvironment(expected), ...await credentialEnvironment(context) };
 	assertEndpoint(expected);
 	try {
 		const result = await promisify(execFile)(path.join(directory, 'codypendent'), args, { env: environment, timeout: 20_000, maxBuffer: 128 * 1024 });
@@ -100,11 +95,10 @@ export async function openTerminal(context: vscode.ExtensionContext): Promise<vo
 	const folder = folders.length === 1 ? folders[0] : await vscode.window.showWorkspaceFolderPick();
 	if (!folder || folder.uri.scheme !== 'file') { return; }
 	const directory = await runtimeDirectory(context);
-	const environment = await getRuntimeEnvironment(context);
 	assertEndpoint(endpoint);
 	const terminal = vscode.window.createTerminal({
 		name: vscode.l10n.t('Son of Anton Agent Terminal'), cwd: folder.uri,
-		shellPath: path.join(directory, 'codypendent'), shellArgs: [], env: { ...environment, CODYPENDENT_DATA_DIR: null, CODYPENDENT_CONFIG_DIR: null, CODYPENDENT_SOCKET: null }
+		shellPath: path.join(directory, 'codypendent'), shellArgs: [], env: terminalRuntimeEnvironment(endpoint)
 	});
 	context.subscriptions.push(terminal); terminal.show();
 }
@@ -117,7 +111,6 @@ export async function openCouncil(context: vscode.ExtensionContext, history = fa
 	await ensureDaemon(context, endpoint);
 	const directory = await runtimeDirectory(context);
 	const binary = path.join(directory, 'codypendent');
-	const env = await getRuntimeEnvironment(context);
 	const result = await runRuntimeCli(context, ['council', 'list', '--json'], endpoint);
 	const parsed: unknown = JSON.parse(result.stdout);
 	if (!Array.isArray(parsed)) { throw new Error(vscode.l10n.t('Codypendent returned an invalid council list.')); }
@@ -141,7 +134,7 @@ export async function openCouncil(context: vscode.ExtensionContext, history = fa
 	assertEndpoint(endpoint);
 	const terminal = vscode.window.createTerminal({
 		name: vscode.l10n.t('Son of Anton Council'), cwd: folder.uri, shellPath: binary, shellArgs: args,
-		env: { ...env, CODYPENDENT_DATA_DIR: null, CODYPENDENT_CONFIG_DIR: null, CODYPENDENT_SOCKET: null }
+		env: terminalRuntimeEnvironment(endpoint)
 	});
 	context.subscriptions.push(terminal); terminal.show();
 }
