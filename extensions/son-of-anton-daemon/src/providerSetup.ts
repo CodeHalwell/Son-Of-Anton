@@ -69,7 +69,7 @@ export async function configureProvider(context: SetupContext, request: Provider
 	}
 	const previous = operations.get(context) ?? Promise.resolve();
 	let result!: ProviderSetupResult;
-	const operation = previous.catch(() => {}).then(async () => {
+	const operation = previous.catch(() => { }).then(async () => {
 		const profile = profiles[provider];
 		// Read after earlier setup operations commit, so key rotation cannot reset their selection.
 		const savedModel = context.globalState.get<string>(modelKey(provider));

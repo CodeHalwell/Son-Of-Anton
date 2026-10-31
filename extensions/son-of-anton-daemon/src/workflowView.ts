@@ -46,7 +46,7 @@ export function renderWorkflowHtml(options: WorkflowViewOptions): string {
 		noInputs: 'This workflow declares no inputs.', tooMany: 'This workflow declares {0} inputs. This panel supports at most {1}; Start is unavailable here.', malformedInputs: 'Input declarations are unavailable. Refresh the catalog before starting this workflow.',
 		requiredHelp: 'Enter JSON for each required input before starting.', inputBounds: 'Up to {0} inputs, {1} KiB per value and {2} KiB total. Input types are domain names; this panel does not infer a schema or defaults.',
 		trust: 'Trust this workspace before starting or controlling a workflow.', pending: 'A Start request for {0} must be reconciled before another workflow is started.',
-		working: 'Waiting for the agent runtime…', ready: 'Ready. Starting a workflow may run agents and tools under the runtime’s approval policy.',
+		working: 'Waiting for the agent runtime…', ready: 'Ready. Starting a workflow may run agents and tools under the runtime\'s approval policy.',
 		diagnostics: 'Showing {0} of {1} catalog diagnostics.', diagnostic: '{0}: {1}', diagnosticWorkflow: '{0} · {1}: {2}',
 		runs: 'Showing {0} of {1} workflow runs started from this panel scope.', noRuns: 'No workflow runs have been opened in this panel scope.',
 		run: '{0} · {1} · Requested catalog version: {2}', chooseRun: 'Choose a run', phase: 'Recorded Phase: {0}', readAt: 'Last Snapshot Read: {0}',

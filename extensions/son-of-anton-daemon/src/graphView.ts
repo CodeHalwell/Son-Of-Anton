@@ -29,9 +29,9 @@ export function renderGraphLoadingHtml(repository: string, localize: GraphViewOp
 /** Render recorded graph evidence without granting the webview filesystem access. */
 export function renderGraphHtml(options: GraphViewOptions): string {
 	if (!Number.isSafeInteger(options.version) || options.version < 0) { throw new Error(options.localize('Invalid graph view version.')); }
-	const { page, status, selection, localize } = options;
+	const { page, status, selection } = options;
 	const escape = escapeGraphText;
-	const label = (text: string, ...args: Array<string | number>): string => escape(localize(text, ...args));
+	const label = (text: string, ...args: Array<string | number>): string => escape(options.localize(text, ...args));
 	const nonce = escape(options.nonce);
 	const nodes = new Map([...page.nodes, ...(page.related_nodes ?? [])].map(node => [node.id, node]));
 	const matchingIds = new Set(page.nodes.map(node => node.id));

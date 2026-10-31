@@ -39,8 +39,10 @@ export function privateRuntimeEnvironment(endpoint: RuntimeEndpoint, env: Env = 
 	delete result.CODYPENDENT_DATA_DIR;
 	delete result.CODYPENDENT_CONFIG_DIR;
 	delete result.CODYPENDENT_SOCKET;
-	return { ...result, AGENT_RUNTIME_PRODUCT: 'son-of-anton', SON_OF_ANTON_DATA_DIR: paths.dataDir,
-		SON_OF_ANTON_CONFIG_DIR: paths.configDir, SON_OF_ANTON_SOCKET: endpoint.socketPath };
+	return {
+		...result, AGENT_RUNTIME_PRODUCT: 'son-of-anton', SON_OF_ANTON_DATA_DIR: paths.dataDir,
+		SON_OF_ANTON_CONFIG_DIR: paths.configDir, SON_OF_ANTON_SOCKET: endpoint.socketPath
+	};
 }
 
 /** A captured endpoint must still be selected before a command can use it. */

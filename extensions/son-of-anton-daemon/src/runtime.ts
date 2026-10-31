@@ -139,7 +139,9 @@ export async function openCouncil(context: vscode.ExtensionContext, history = fa
 	}
 	// VS Code passes an argv array to the binary, never interpolated shell text.
 	assertEndpoint(endpoint);
-	const terminal = vscode.window.createTerminal({ name: vscode.l10n.t('Son of Anton Council'), cwd: folder.uri, shellPath: binary, shellArgs: args,
-		env: { ...env, CODYPENDENT_DATA_DIR: null, CODYPENDENT_CONFIG_DIR: null, CODYPENDENT_SOCKET: null } });
+	const terminal = vscode.window.createTerminal({
+		name: vscode.l10n.t('Son of Anton Council'), cwd: folder.uri, shellPath: binary, shellArgs: args,
+		env: { ...env, CODYPENDENT_DATA_DIR: null, CODYPENDENT_CONFIG_DIR: null, CODYPENDENT_SOCKET: null }
+	});
 	context.subscriptions.push(terminal); terminal.show();
 }

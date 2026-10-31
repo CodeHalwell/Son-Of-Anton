@@ -26,8 +26,10 @@ export function registerGraphCommands(context: vscode.ExtensionContext): void {
 		if (selected && (selected === '..' || selected.startsWith('../') || path.isAbsolute(selected))) { throw new Error(vscode.l10n.t('The selected file is outside this repository.')); }
 		const endpoint = getRuntimeEndpoint();
 		await ensureDaemon(context, endpoint);
-		const session = new NodeSession({ socketPath: endpoint.socketPath, clientName: 'son-of-anton-graph',
-			canWrite: () => vscode.workspace.isTrusted, onChange: () => { }, onError: () => { } });
+		const session = new NodeSession({
+			socketPath: endpoint.socketPath, clientName: 'son-of-anton-graph',
+			canWrite: () => vscode.workspace.isTrusted, onChange: () => { }, onError: () => { }
+		});
 		const panel = vscode.window.createWebviewPanel('sota.graphInspector', vscode.l10n.t('Code Graph'), vscode.ViewColumn.Active, { enableScripts: true, localResourceRoots: [] });
 		panels.add(panel);
 		let disposed = false;
@@ -45,11 +47,13 @@ export function registerGraphCommands(context: vscode.ExtensionContext): void {
 			returnPosition: GraphViewPosition = history.current.position, position = returnPosition): Promise<void> => {
 			checkEndpoint();
 			const statusReply = await session.readService({ type: 'ReadCodeGraphStatus', repository });
-			const graphReply = await session.readService({ type: 'ReadCodeGraph', repository, query: {
-				...(selection.nodeId ? { node_id: selection.nodeId } : { path: selection.path, name: selection.name }),
-				connected_view: !selection.nodeId && !selection.path && !selection.name,
-				include_neighbors: true, include_edges: true, include_nodes: true, limit: 200,
-			} });
+			const graphReply = await session.readService({
+				type: 'ReadCodeGraph', repository, query: {
+					...(selection.nodeId ? { node_id: selection.nodeId } : { path: selection.path, name: selection.name }),
+					connected_view: !selection.nodeId && !selection.path && !selection.name,
+					include_neighbors: true, include_edges: true, include_nodes: true, limit: 200,
+				}
+			});
 			checkEndpoint();
 			if (statusReply.type !== 'CodeGraphStatus' || graphReply.type !== 'CodeGraphPage') { throw new Error(vscode.l10n.t('The agent runtime did not return a code graph page and status.')); }
 			status = statusReply.status; page = graphReply.page;
@@ -60,12 +64,16 @@ export function registerGraphCommands(context: vscode.ExtensionContext): void {
 				if (location) { sources.set(`node:${node.id}`, location); }
 			}
 			page.edges.forEach((edge, index) => { if (edge.call_site) { sources.set(`edge:${index}`, edge.call_site); } });
-			panel.webview.html = renderGraphHtml({ nonce: randomBytes(24).toString('hex'), version: ++version, repository,
+			panel.webview.html = renderGraphHtml({
+				nonce: randomBytes(24).toString('hex'), version: ++version, repository,
 				selection: history.current.selection, canGoBack: !!history.previous, position: history.current.position,
-				status, page, localize: (text, ...args) => vscode.l10n.t(text, ...args) });
+				status, page, localize: (text, ...args) => vscode.l10n.t(text, ...args)
+			});
 		};
-		const listener = panel.webview.onDidReceiveMessage((message: { type?: string; version?: number; nodeId?: string; sourceId?: string;
-			path?: string; name?: string; position?: GraphViewPosition }) => {
+		const listener = panel.webview.onDidReceiveMessage((message: {
+			type?: string; version?: number; nodeId?: string; sourceId?: string;
+			path?: string; name?: string; position?: GraphViewPosition;
+		}) => {
 			if (!message || message.version !== version || !page || processing) { return; }
 			processing = true;
 			const position: GraphViewPosition = {

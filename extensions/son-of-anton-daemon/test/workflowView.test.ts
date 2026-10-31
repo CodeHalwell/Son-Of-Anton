@@ -64,7 +64,7 @@ describe('repository workflow panel', () => {
 		expect(view.document.querySelectorAll('img,svg,[onerror],[onload]')).toHaveLength(0);
 		expect(view.document.body.textContent).toContain(hostile);
 		expect(view.document.querySelector('#workflow-input-0')!.getAttribute('required')).toBe('');
-		expect(view.html).toContain("default-src 'none'; style-src 'nonce-workflow-fixture'; script-src 'nonce-workflow-fixture'");
+			expect(view.html).toContain('default-src \'none\'; style-src \'nonce-workflow-fixture\'; script-src \'nonce-workflow-fixture\'');
 		expect(view.document.querySelector('style')!.getAttribute('nonce')).toBe('workflow-fixture');
 	});
 
@@ -111,7 +111,7 @@ describe('repository workflow panel', () => {
 	it('keeps catalog reads available without trust and refuses Start and controls without a scoped receipt', () => {
 		const view = mount(); const state = fixture();
 		view.publish({ ...state, trusted: false, pendingStart: { workflowId: 'review-pr' } }); view.input('null');
-		for (const action of ['start', 'pause', 'resume', 'cancel', 'reconcile']) view.click(action);
+			for (const action of ['start', 'pause', 'resume', 'cancel', 'reconcile']) { view.click(action); }
 		view.document.querySelector<HTMLButtonElement>('[data-focus-key="retry:review"]')!.click();
 		expect(view.sent).toEqual([{ type: 'ready', version: 17 }]);
 		expect(view.document.querySelector<HTMLElement>('#workflow-trust')!.hidden).toBe(false);
@@ -133,7 +133,7 @@ describe('repository workflow panel', () => {
 		expect(view.document.querySelector('#run-count')!.textContent).toContain('Showing 20 of 25');
 		expect(view.document.querySelectorAll('#diagnostics li')).toHaveLength(100);
 		expect(view.document.querySelector('#diagnostic-count')!.textContent).toBe('Showing 100 of 150 catalog diagnostics.');
-		for (const evidence of ['Source: Repository', 'Catalog version: 2', 'Definition Digest: ' + 'a'.repeat(64), 'Requested catalog version: 2', 'Recorded Cost: 0', 'Recorded Cost: Unavailable', 'Last Snapshot Read:', 'do not establish test success', 'catalog is incomplete']) expect(view.document.querySelector('main')!.textContent).toContain(evidence);
+			for (const evidence of ['Source: Repository', 'Catalog version: 2', 'Definition Digest: ' + 'a'.repeat(64), 'Requested catalog version: 2', 'Recorded Cost: 0', 'Recorded Cost: Unavailable', 'Last Snapshot Read:', 'do not establish test success', 'catalog is incomplete']) { expect(view.document.querySelector('main')!.textContent).toContain(evidence); }
 	});
 
 	it('distinguishes unavailable catalogs, empty catalogs and schemas too large to launch', () => {

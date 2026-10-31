@@ -61,7 +61,7 @@ describe('recorded code graph inspector', () => {
 		expect(view.document.querySelectorAll('img, svg, [onerror], [onload], [onfocus], [autofocus]')).toHaveLength(0);
 		expect(view.document.querySelectorAll('script')).toHaveLength(1);
 		expect(view.document.body.textContent).toContain(hostile);
-		expect(view.html).toContain("default-src 'none'; style-src 'nonce-graph-fixture'; script-src 'nonce-graph-fixture'");
+			expect(view.html).toContain('default-src \'none\'; style-src \'nonce-graph-fixture\'; script-src \'nonce-graph-fixture\'');
 		expect(view.document.querySelector('style')!.getAttribute('nonce')).toBe('graph-fixture');
 	});
 

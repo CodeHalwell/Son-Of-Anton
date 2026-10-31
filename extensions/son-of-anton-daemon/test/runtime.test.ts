@@ -49,9 +49,9 @@ describe('private agent engine process boundary', () => {
 		await writeFile(path.join(directory, 'codypendent'), `#!${process.execPath}\nconst fs = require('node:fs');
 if (process.argv[2] === 'fail') { process.stderr.write(process.env.SOTA_RUNTIME_ANTHROPIC_API_KEY); process.exit(1); }
 const result = { args: process.argv.slice(2), product: process.env.AGENT_RUNTIME_PRODUCT,
- data: process.env.SON_OF_ANTON_DATA_DIR, config: process.env.SON_OF_ANTON_CONFIG_DIR, socket: process.env.SON_OF_ANTON_SOCKET,
- foreignPaths: ['CODYPENDENT_DATA_DIR','CODYPENDENT_CONFIG_DIR','CODYPENDENT_SOCKET'].filter(name => name in process.env),
- hasCredential: !!process.env.SOTA_RUNTIME_ANTHROPIC_API_KEY };
+	data: process.env.SON_OF_ANTON_DATA_DIR, config: process.env.SON_OF_ANTON_CONFIG_DIR, socket: process.env.SON_OF_ANTON_SOCKET,
+	foreignPaths: ['CODYPENDENT_DATA_DIR','CODYPENDENT_CONFIG_DIR','CODYPENDENT_SOCKET'].filter(name => name in process.env),
+	hasCredential: !!process.env.SOTA_RUNTIME_ANTHROPIC_API_KEY };
 fs.mkdirSync(result.data, {recursive:true}); fs.writeFileSync(result.data + '/probe.json', JSON.stringify(result));
 process.stdout.write(JSON.stringify(result));\n`, { mode: 0o755 });
 	}

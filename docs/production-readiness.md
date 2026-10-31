@@ -10,8 +10,8 @@ Full built-in extension compilation and the core TypeScript check now pass with
 the pinned Node 22.23.4 and the complete locked extension dependencies installed.
 `bootstrap:sota` alone does not install all inherited Code OSS extension dependencies.
 
-The private engine source archive has also been refreshed and verified against
-all 758 selected build inputs from the current Codypendent checkout. It includes
+The private engine source archive is verified against its selected build inputs,
+including the cross-root contracts used by Rust `include_str!` calls. It includes
 protocol 1.12, workflow catalogue discovery and atomic launch identity checks.
 Exact source and archive hashes are recorded in the
 [runtime manifest](../build/codypendent/vendor/manifest.json). This source check

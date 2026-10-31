@@ -44,7 +44,7 @@ function restorePending(pending: PendingStart | undefined): PendingStart | undef
 /** Browse and control daemon-owned workflows without creating a second executor or a chat session. */
 export function registerWorkflowCommands(context: vscode.ExtensionContext): void {
 	const panels = new Set<vscode.WebviewPanel>();
-	const scopes = new Map<string, Promise<vscode.WebviewPanel>>();
+	const scopes = new Map<string, { version: number; opening: Promise<vscode.WebviewPanel> }>();
 	let stopped = false;
 	context.subscriptions.push({ dispose: () => { stopped = true; for (const panel of panels) { panel.dispose(); } panels.clear(); scopes.clear(); } });
 	let nextVersion = 0;
@@ -56,7 +56,8 @@ export function registerWorkflowCommands(context: vscode.ExtensionContext): void
 		const endpoint = getRuntimeEndpoint();
 		const storageKey = `sota.daemon.workflows.${endpoint.identity}.${createHash('sha256').update(repository).digest('hex')}`;
 		const existing = scopes.get(storageKey);
-		if (existing) { const panel = await existing; if (panels.has(panel)) { panel.reveal(vscode.ViewColumn.Active); } return; }
+		if (existing) { const panel = await existing.opening; if (panels.has(panel)) { panel.reveal(vscode.ViewColumn.Active); } return; }
+		const version = ++nextVersion;
 		const opening = (async (): Promise<vscode.WebviewPanel> => {
 			const saved = restoreWorkflows(context.workspaceState.get<SavedWorkflows>(storageKey));
 			const secretKey = `${storageKey}.pending`;
@@ -70,9 +71,10 @@ export function registerWorkflowCommands(context: vscode.ExtensionContext): void
 				}
 			} catch { throw new Error(vscode.l10n.t('The protected pending workflow request could not be read. Reload this window before starting more work.')); }
 			if (stopped) { throw new Error(vscode.l10n.t('The workflow view was closed.')); }
-			const version = ++nextVersion;
-			const state: WorkflowPanelState = { catalogRevision: 0, loading: true, busy: false, trusted: vscode.workspace.isTrusted,
-				runs: saved.runs, selectedRunId: saved.runs[0]?.id, pendingStart: pending ? { workflowId: pending.workflowId } : undefined };
+			const state: WorkflowPanelState = {
+				catalogRevision: 0, loading: true, busy: false, trusted: vscode.workspace.isTrusted,
+				runs: saved.runs, selectedRunId: saved.runs[0]?.id, pendingStart: pending ? { workflowId: pending.workflowId } : undefined
+			};
 			const panel = vscode.window.createWebviewPanel('sota.workflowInspector', vscode.l10n.t('Workflows'), vscode.ViewColumn.Active,
 				{ enableScripts: true, localResourceRoots: [], retainContextWhenHidden: true });
 			panels.add(panel);
@@ -87,9 +89,11 @@ export function registerWorkflowCommands(context: vscode.ExtensionContext): void
 			const checkEndpoint = (): void => {
 				if (disposed || getRuntimeEndpoint().identity !== endpoint.identity) { throw new Error(vscode.l10n.t('The agent runtime connection changed. Close and reopen this workflow panel.')); }
 			};
-			const session = new NodeSession({ socketPath: endpoint.socketPath, clientName: 'son-of-anton-workflows',
+			const session = new NodeSession({
+				socketPath: endpoint.socketPath, clientName: 'son-of-anton-workflows',
 				canWrite: () => !disposed && vscode.workspace.isTrusted && getRuntimeEndpoint().identity === endpoint.identity,
-				onChange: () => {}, onError: () => { connected = false; } });
+				onChange: () => { }, onError: () => { connected = false; }
+			});
 			const persist = async (): Promise<void> => {
 				try { await context.workspaceState.update(storageKey, { runs: state.runs } satisfies SavedWorkflows); }
 				catch { throw new Error(vscode.l10n.t('The workflow receipt could not be saved. Its protected start request remains available for reconciliation.')); }
@@ -120,7 +124,7 @@ export function registerWorkflowCommands(context: vscode.ExtensionContext): void
 					connected = true;
 				})();
 				connecting = connection;
-				try { await connection; } finally { if (connecting === connection) { connecting = undefined; } }
+				try { await connection; } finally { if (attempt === connectionVersion) { connecting = undefined; } }
 			};
 			const report = (error: Error, origin: 'run' | 'other' = 'other'): void => {
 				if (!disposed) { state.error = error.message; errorOrigin = origin; publish(); }
@@ -199,9 +203,11 @@ export function registerWorkflowCommands(context: vscode.ExtensionContext): void
 							|| Object.values(message.inputValues).some(value => typeof value !== 'string')) { throw new Error(vscode.l10n.t('Choose a listed workflow and enter its declared inputs.')); }
 						const result = parseWorkflowInputs(entry.inputs, message.inputValues);
 						if (!result.ok) {
-							const errors = { required: vscode.l10n.t('Input {0} is required.', result.field ?? ''), 'invalid-json': vscode.l10n.t('Input {0} must be valid JSON.', result.field ?? ''),
+							const errors = {
+								required: vscode.l10n.t('Input {0} is required.', result.field ?? ''), 'invalid-json': vscode.l10n.t('Input {0} must be valid JSON.', result.field ?? ''),
 								'unknown-input': vscode.l10n.t('Input {0} is not declared by this workflow.', result.field ?? ''), 'too-large': vscode.l10n.t('Workflow inputs exceed the supported size limit.'),
-								'too-many': vscode.l10n.t('This workflow has more inputs than this panel supports.') };
+								'too-many': vscode.l10n.t('This workflow has more inputs than this panel supports.')
+							};
 							throw new Error(errors[result.reason]);
 						}
 						if (!/^[\da-f]{64}$/.test(entry.definition_digest)) { throw new Error(vscode.l10n.t('The workflow catalog has no valid definition identity. Refresh it before starting.')); }
@@ -229,12 +235,14 @@ export function registerWorkflowCommands(context: vscode.ExtensionContext): void
 			const disposal = panel.onDidDispose(() => {
 				disposed = true; panels.delete(panel); scopes.delete(storageKey); clearInterval(poll); listener.dispose(); visibility.dispose(); trust.dispose(); disposal.dispose(); session.disconnect();
 			});
-			panel.webview.html = renderWorkflowHtml({ nonce: randomBytes(24).toString('hex'), version, repository, endpointIdentity: endpoint.identity,
-				localize: (text, ...args) => vscode.l10n.t(text, ...args) });
+			panel.webview.html = renderWorkflowHtml({
+				nonce: randomBytes(24).toString('hex'), version, repository, endpointIdentity: endpoint.identity,
+				localize: (text, ...args) => vscode.l10n.t(text, ...args)
+			});
 			void loadCatalog().then(() => readRun()).catch(report);
 			return panel;
 		})();
-		scopes.set(storageKey, opening);
-		try { await opening; } catch (error) { if (scopes.get(storageKey) === opening) { scopes.delete(storageKey); } throw error; }
+		scopes.set(storageKey, { version, opening });
+		try { await opening; } catch (error) { if (scopes.get(storageKey)?.version === version) { scopes.delete(storageKey); } throw error; }
 	}));
 }
