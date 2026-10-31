@@ -6,7 +6,7 @@ import { strict as assert } from 'node:assert';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { NodeSession, type NodeSessionState, type NodeSessionOptions } from '@codypendent/protocol/node';
-import type { Payload, SessionSummary } from '@codypendent/protocol';
+import type { Payload, QuestionOutcome, SessionSummary } from '@codypendent/protocol';
 import { configureDaemonChat, DaemonChat, pickSharedConversation } from '../src/daemon/DaemonChat';
 import { requestDaemonText } from '../src/daemon/DaemonText';
 import { ConversationActions } from '../src/chat/ConversationActions';
@@ -25,6 +25,8 @@ class FakeSession extends NodeSession {
 	submissions: string[] = [];
 	profiles: Awaited<ReturnType<NodeSession['probeModels']>> = [];
 	cancelled: string[] = [];
+	approvals: Array<{ id: string; approve: boolean }> = [];
+	questions: Array<{ id: string; outcome: QuestionOutcome }> = [];
 	acceptGate?: Promise<void>;
 	connectGate?: Promise<void>;
 	connectFailure?: Error;
@@ -49,6 +51,8 @@ class FakeSession extends NodeSession {
 	}
 	override async readService(): Promise<Payload> { return { type: 'BlackboardItems', command_id: randomUUID(), items: [] }; }
 	override async cancelRun(id: string): Promise<void> { this.cancelled.push(id); this.finish(id, true); }
+	override async resolveApproval(id: string, approve: boolean): Promise<void> { this.approvals.push({ id, approve }); }
+	override async resolveQuestion(id: string, outcome: QuestionOutcome): Promise<void> { this.questions.push({ id, outcome }); }
 	finish(id: string, cancelled = false): void {
 		this.view.projection.activeRuns = this.view.projection.activeRuns.filter(run => run !== id);
 		const run = this.view.projection.runs!.find(run => run.id === id)!;
@@ -69,16 +73,26 @@ suite('Primary shared chat ownership', () => {
 	let endpoint: FixtureEndpoint;
 	let ensured: FixtureEndpoint[];
 	let connectFailure: Error | undefined;
+	let configurationListeners: Set<(event: vscode.ConfigurationChangeEvent) => void>;
+	const changeConfiguration = (setting: string): void => {
+		for (const listener of configurationListeners) { listener({ affectsConfiguration: section => section === setting }); }
+	};
 	setup(() => {
 		clients = []; links.clear(); reverseLinks.clear(); published = []; endpoint = localEndpoint(); ensured = []; connectFailure = undefined;
+		configurationListeners = new Set();
 		for (const id of ['first', 'second']) { links.set(`sota.daemon.session.${id}`, { sessionId: randomUUID(), repository: '/fixture/repository', title: id, runtimeIdentity: endpoint.identity }); }
-		const original = { configuration: mock.workspace.getConfiguration, command: mock.commands.executeCommand };
-		Object.assign(mock.workspace, { getConfiguration: () => ({ get: () => undefined }) });
+		const original = { configuration: mock.workspace.getConfiguration, changed: mock.workspace.onDidChangeConfiguration, command: mock.commands.executeCommand };
+		Object.assign(mock.workspace, {
+			getConfiguration: () => ({ get: () => undefined }),
+			onDidChangeConfiguration: (listener: (event: vscode.ConfigurationChangeEvent) => void) => {
+				configurationListeners.add(listener); return { dispose: () => { configurationListeners.delete(listener); } };
+			},
+		});
 		Object.assign(mock.commands, { executeCommand: async (command: string, expected?: FixtureEndpoint) => {
 			if (command === 'sota.daemon.endpoint') { return { ...endpoint }; }
 			assert.equal(command, 'sota.daemon.ensure'); assert.deepEqual(expected, endpoint); ensured.push({ ...endpoint }); return undefined;
 		} });
-		restore = () => { Object.assign(mock.workspace, { getConfiguration: original.configuration }); Object.assign(mock.commands, { executeCommand: original.command }); };
+		restore = () => { Object.assign(mock.workspace, { getConfiguration: original.configuration, onDidChangeConfiguration: original.changed }); Object.assign(mock.commands, { executeCommand: original.command }); };
 		configured = configureDaemonChat({ workspaceState: { get: (key: string) => links.get(key) ?? reverseLinks.get(key), update: async (key: string, value: FixtureSessionLink | string) => {
 			if (typeof value === 'string') { reverseLinks.set(key, value); } else { links.set(key, value); }
 		} } } as unknown as vscode.ExtensionContext);
@@ -132,6 +146,136 @@ suite('Primary shared chat ownership', () => {
 			clients: 1, ensures: 1, submissions: [], saved: before,
 		});
 		assert.equal(runtime.snapshot, undefined);
+	});
+
+	for (const setting of ['sota.daemon.connection', 'sota.daemon.socketPath', 'sota.runtime.backend']) {
+		test(`${setting} immediately revokes pending controls without cancelling the old runtime`, async () => {
+			await runtime.select('first'); const client = clients[0];
+			await client.submit('Owned by the original runtime');
+			const saved = structuredClone(links.get('sota.daemon.session.first'));
+			endpoint = { socketPath: '/fixture/external/daemon.sock', identity: 'external:fixture', mode: 'external' };
+			changeConfiguration(setting);
+			await assert.rejects(runtime.approve('pending-approval', true), /Reconnect/);
+			await assert.rejects(runtime.answer('pending-question', { type: 'Rejected' }), /Reconnect/);
+			await runtime.cancel();
+			assert.deepEqual({ snapshot: runtime.snapshot, canWrite: client.configuration.canWrite(), approvals: client.approvals,
+				questions: client.questions, cancelled: client.cancelled, clients: clients.length, saved: links.get('sota.daemon.session.first') }, {
+				snapshot: undefined, canWrite: false, approvals: [], questions: [], cancelled: [], clients: 1, saved,
+			});
+			assert.equal(published.findLast(message => message.type === 'daemonSnapshot')?.canWrite, false);
+		});
+	}
+
+	test('queued controls cannot write after an endpoint switch, even if their lookup returns the old endpoint', async () => {
+		await runtime.select('first'); const client = clients[0];
+		await client.submit('Keep running');
+		const oldEndpoint = endpoint;
+		let release!: (value: FixtureEndpoint) => void;
+		const delayed = new Promise<FixtureEndpoint>(resolve => { release = resolve; });
+		const execute = mock.commands.executeCommand;
+		Object.assign(mock.commands, { executeCommand: (command: string, expected?: FixtureEndpoint) => command === 'sota.daemon.endpoint' ? delayed : execute(command, expected) });
+		const actions = [runtime.approve('approval', true), runtime.answer('question', { type: 'Rejected' }), runtime.cancel()];
+		const rejected = actions.map(action => assert.rejects(action, /superseded/i));
+		endpoint = { socketPath: '/fixture/external/daemon.sock', identity: 'external:fixture', mode: 'external' };
+		changeConfiguration('sota.daemon.connection'); release(oldEndpoint);
+		await Promise.all(rejected);
+		assert.deepEqual({ approvals: client.approvals, questions: client.questions, cancelled: client.cancelled }, { approvals: [], questions: [], cancelled: [] });
+	});
+
+	test('an endpoint mismatch rejects controls even before a configuration notification arrives', async () => {
+		await runtime.select('first'); const client = clients[0];
+		endpoint = { ...endpoint, socketPath: '/fixture/changed/daemon.sock' };
+		await assert.rejects(runtime.approve('approval', true), /connection changed/i);
+		assert.deepEqual({ snapshot: runtime.snapshot, approvals: client.approvals, canWrite: client.configuration.canWrite() }, { snapshot: undefined, approvals: [], canWrite: false });
+	});
+
+	test('pending controls still resolve on their unchanged runtime', async () => {
+		await runtime.select('first'); const client = clients[0];
+		await runtime.approve('approval', true);
+		await runtime.answer('question', { type: 'Answered', answers: [['Selected option']] });
+		assert.deepEqual({ approvals: client.approvals, questions: client.questions, canWrite: client.configuration.canWrite() }, {
+			approvals: [{ id: 'approval', approve: true }], questions: [{ id: 'question', outcome: { type: 'Answered', answers: [['Selected option']] } }], canWrite: true,
+		});
+	});
+
+	test('a stale control lookup cannot invalidate a newly selected connection', async () => {
+		await runtime.select('first');
+		const oldEndpoint = endpoint;
+		const execute = mock.commands.executeCommand;
+		let release!: (value: FixtureEndpoint) => void;
+		const delayed = new Promise<FixtureEndpoint>(resolve => { release = resolve; });
+		let lookups = 0;
+		Object.assign(mock.commands, { executeCommand: (command: string, expected?: FixtureEndpoint) => {
+			if (command === 'sota.daemon.endpoint' && ++lookups === 1) { return delayed; }
+			return execute(command, expected);
+		} });
+		const rejected = assert.rejects(runtime.answer('question', { type: 'Rejected' }), /superseded/i);
+		endpoint = { socketPath: '/fixture/external/daemon.sock', identity: 'external:fixture', mode: 'external' };
+		changeConfiguration('sota.daemon.connection');
+		links.get('sota.daemon.session.second')!.runtimeIdentity = endpoint.identity;
+		await runtime.select('second'); release(oldEndpoint); await rejected;
+		assert.deepEqual({ session: runtime.sessionId, canWrite: clients.map(client => client.configuration.canWrite()), questions: clients.map(client => client.questions) }, {
+			session: links.get('sota.daemon.session.second')!.sessionId, canWrite: [false, true], questions: [[], []],
+		});
+	});
+
+	test('switching runtimes during model discovery prevents a subsequent submission', async () => {
+		await runtime.select('first'); const client = clients[0];
+		let release!: (value: typeof client.profiles) => void;
+		const delayed = new Promise<typeof client.profiles>(resolve => { release = resolve; });
+		let probing = false;
+		client.probeModels = () => { probing = true; return delayed; };
+		let accepted = false;
+		const rejected = assert.rejects(runtime.send('first', 'Keep this draft', 'Build', 'daemon:selected', 'request', new AbortController().signal,
+			() => { accepted = true; }), /superseded/i);
+		await until(() => probing);
+		endpoint = { socketPath: '/fixture/external/daemon.sock', identity: 'external:fixture', mode: 'external' };
+		changeConfiguration('sota.daemon.connection');
+		release([{ id: 'selected', probed: false, readiness: { state: 'unverified', detail: 'Not called yet' } }]); await rejected;
+		assert.deepEqual({ submissions: client.submissions, accepted }, { submissions: [], accepted: false });
+	});
+
+	for (const timing of ['before-receipt', 'on-acceptance']) {
+		test(`a runtime switch ${timing} prevents late Stop compensation on the former runtime`, async () => {
+			await runtime.select('first'); const client = clients[0];
+			let release!: () => void; client.acceptGate = new Promise<void>(resolve => { release = resolve; });
+			let accepted = false;
+			const switchRuntime = (): void => {
+				endpoint = { socketPath: '/fixture/external/daemon.sock', identity: 'external:fixture', mode: 'external' };
+				changeConfiguration('sota.daemon.connection');
+			};
+			const rejected = assert.rejects(runtime.send('first', 'Original prompt', 'Build', 'daemon:default', 'request', new AbortController().signal,
+				() => { accepted = true; if (timing === 'on-acceptance') { switchRuntime(); } }), /superseded/i);
+			await until(() => client.submissions.length === 1);
+			await runtime.cancel();
+			if (timing === 'before-receipt') { switchRuntime(); }
+			release(); await rejected;
+			assert.deepEqual({ accepted, cancelled: client.cancelled, active: client.snapshot.projection.activeRuns.length }, {
+				accepted: timing === 'on-acceptance', cancelled: [], active: 1,
+			});
+		});
+	}
+
+	test('an in-flight approval receipt cannot report success after its connection was invalidated', async () => {
+		await runtime.select('first'); const client = clients[0];
+		let release!: () => void;
+		const delayed = new Promise<void>(resolve => { release = resolve; });
+		client.resolveApproval = async (id, approve) => { client.approvals.push({ id, approve }); await delayed; };
+		const rejected = assert.rejects(runtime.approve('approval', true), /superseded/i);
+		await until(() => client.approvals.length === 1);
+		changeConfiguration('sota.daemon.connection'); release(); await rejected;
+		assert.deepEqual({ approvals: client.approvals, canWrite: client.configuration.canWrite(), clients: clients.length }, {
+			approvals: [{ id: 'approval', approve: true }], canWrite: false, clients: 1,
+		});
+	});
+
+	test('unrelated configuration preserves the connection and disposal removes its listener', async () => {
+		await runtime.select('first'); const snapshot = runtime.snapshot;
+		changeConfiguration('editor.fontSize');
+		assert.equal(runtime.snapshot, snapshot);
+		runtime.dispose(); const messages = published.length;
+		changeConfiguration('sota.daemon.connection');
+		assert.deepEqual({ listeners: configurationListeners.size, messages: published.length, canWrite: clients[0].configuration.canWrite() }, { listeners: 0, messages, canWrite: false });
 	});
 
 	test('a delayed endpoint lookup cannot replace a newer conversation selection', async () => {

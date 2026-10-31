@@ -78,10 +78,19 @@ export class DaemonChat implements vscode.Disposable {
 	private pendingSubmission?: { cancelled: boolean };
 	private waiters = new Set<() => void>();
 	private readonly trustListener?: vscode.Disposable;
+	private readonly configurationListener?: vscode.Disposable;
 	constructor(private readonly options: DaemonChatOptions) {
 		if (!context) { throw new Error(vscode.l10n.t('The shared runtime has not been initialized.')); }
 		this.trustListener = vscode.workspace.onDidGrantWorkspaceTrust?.(() => {
 			void this.reconnect().catch(error => this.post({ type: 'daemonStatus', error: String(error) }));
+		});
+		this.configurationListener = vscode.workspace.onDidChangeConfiguration?.(event => {
+			if (event.affectsConfiguration('sota.daemon.connection') || event.affectsConfiguration('sota.daemon.socketPath') || event.affectsConfiguration('sota.runtime.backend')) {
+				const state = this.snapshot;
+				this.invalidateConnection();
+				if (state) { this.post({ type: 'daemonSnapshot', state: { ...state, status: 'closed' }, canWrite: false }); }
+				this.post({ type: 'daemonRuntime', connected: false, error: vscode.l10n.t('The agent runtime connection changed. Reconnect this conversation to continue.') });
+			}
 		});
 	}
 
@@ -108,7 +117,8 @@ export class DaemonChat implements vscode.Disposable {
 		}
 		const session = (this.options.createSession ?? (options => new NodeSession(options)))({
 			socketPath: endpoint.socketPath,
-			clientName: 'son-of-anton-chat', clientVersion: '0.1.0', canWrite: () => vscode.workspace.isTrusted,
+			clientName: 'son-of-anton-chat', clientVersion: '0.1.0',
+			canWrite: () => vscode.workspace.isTrusted && !this.stopped && this.session === session && generation === this.generation,
 			onEvent: event => { if (this.session === session && generation === this.generation) { this.options.onEvent?.(event); } },
 			onChange: () => { if (this.session === session && generation === this.generation) { this.schedulePublish(); this.wake(); } },
 			onError: error => { if (this.session === session && generation === this.generation) { this.post({ type: 'daemonStatus', error }); } },
@@ -162,6 +172,7 @@ export class DaemonChat implements vscode.Disposable {
 			const savedTitle = this.options.title(conversationId);
 			const title = !savedTitle || ['New conversation', vscode.l10n.t('New conversation')].includes(savedTitle)
 				? text.trim().split('\n')[0].slice(0, 80) : savedTitle;
+			await this.assertEndpointCurrent(session, generation, signal);
 			const id = await session.createSession(title, workspaceId(repository), repository,
 				{ idempotencyKey: `anton-session:${createHash('sha256').update(`${repository}\0${conversationId}`).digest('hex')}` });
 			this.assertCurrent(session, generation, signal);
@@ -179,12 +190,14 @@ export class DaemonChat implements vscode.Disposable {
 			if (!models.some(item => item.id === selectedModel)) { throw new Error(vscode.l10n.t('This model is no longer configured in the active agent runtime. Refresh the model list.')); }
 		}
 		const previous = [...session.snapshot.projection.activeRuns];
+		await this.assertEndpointCurrent(session, generation, signal);
 		const run = await session.submit(text, mode, { model: selectedModel, idempotencyKey: `anton-prompt:${this.link!.sessionId}:${requestId}` });
-		this.assertCurrent(session, generation, signal);
+		await this.assertEndpointCurrent(session, generation, signal);
 		const runId = run ?? (previous.length === 1 ? previous[0] : undefined);
 		if (!runId) { throw new Error(vscode.l10n.t('The daemon accepted this prompt without a run identity. Reconnect to reconcile its outcome before retrying.')); }
 		accepted(runId);
 		if (pending.cancelled && runId && !session.snapshot.projection.runs?.find(item => item.id === runId)?.disposition) {
+			await this.assertEndpointCurrent(session, generation, signal);
 			try { await session.cancelRun(runId); }
 			catch (error) { if (!session.snapshot.projection.runs?.find(item => item.id === runId)?.disposition) { throw error; } }
 		}
@@ -193,12 +206,30 @@ export class DaemonChat implements vscode.Disposable {
 
 	async cancel(): Promise<void> {
 		if (this.pendingSubmission) { this.pendingSubmission.cancelled = true; }
-		const session = this.session;
-		if (session) { await Promise.all(session.snapshot.projection.activeRuns.map(id => session.cancelRun(id))); }
+		const session = this.session; const generation = this.generation;
+		if (session) {
+			await this.assertEndpointCurrent(session, generation);
+			await Promise.all(session.snapshot.projection.activeRuns.map(id => {
+				this.assertCurrent(session, generation); return session.cancelRun(id);
+			}));
+			this.assertCurrent(session, generation);
+		}
 	}
 
-	async approve(id: string, approve: boolean): Promise<void> { await this.session?.resolveApproval(id, approve); }
-	async answer(id: string, outcome: QuestionOutcome): Promise<void> { await this.session?.resolveQuestion(id, outcome); }
+	async approve(id: string, approve: boolean): Promise<void> {
+		const session = this.session; const generation = this.generation;
+		if (!session) { throw new Error(vscode.l10n.t('Reconnect this conversation before resolving a pending action.')); }
+		await this.assertEndpointCurrent(session, generation);
+		await session.resolveApproval(id, approve);
+		this.assertCurrent(session, generation);
+	}
+	async answer(id: string, outcome: QuestionOutcome): Promise<void> {
+		const session = this.session; const generation = this.generation;
+		if (!session) { throw new Error(vscode.l10n.t('Reconnect this conversation before resolving a pending action.')); }
+		await this.assertEndpointCurrent(session, generation);
+		await session.resolveQuestion(id, outcome);
+		this.assertCurrent(session, generation);
+	}
 
 	async refreshModels(): Promise<void> {
 		const session = this.session;
@@ -227,7 +258,8 @@ export class DaemonChat implements vscode.Disposable {
 			if (this.session !== session || reply.type !== 'BlackboardItems') { return; }
 			const tasks = reply.items.filter(item => item.kind === 'task').map(item => {
 				const payload = item.payload && typeof item.payload === 'object' && !Array.isArray(item.payload) ? item.payload : {};
-				const state = ({ todo: 'backlog', doing: 'in-progress', review: 'review', done: 'done', failed: 'failed' } as Record<string, string>)[item.status ?? 'todo'] ?? 'backlog';
+				const states: Record<string, string> = { todo: 'backlog', doing: 'in-progress', review: 'review', done: 'done', failed: 'failed' };
+				const state = states[item.status ?? 'todo'] ?? 'backlog';
 				return { id: item.id, instruction: typeof payload.title === 'string' ? payload.title : JSON.stringify(item.payload), state,
 					assignee: item.assignee, dependencies: [], scopeFiles: [], summary: typeof payload.description === 'string' ? payload.description : undefined };
 			});
@@ -251,8 +283,26 @@ export class DaemonChat implements vscode.Disposable {
 			this.waiters.add(check); signal.addEventListener('abort', aborted, { once: true }); check();
 		});
 	}
-	private assertCurrent(session: NodeSession, generation: number, signal: AbortSignal): void {
-		if (this.stopped || this.session !== session || generation !== this.generation || signal.aborted) { throw new Error(vscode.l10n.t('This chat request was superseded.')); }
+	private assertCurrent(session: NodeSession, generation: number, signal?: AbortSignal): void {
+		if (this.stopped || this.session !== session || generation !== this.generation || signal?.aborted) { throw new Error(vscode.l10n.t('This chat request was superseded.')); }
+	}
+	private async assertEndpointCurrent(session: NodeSession, generation: number, signal?: AbortSignal): Promise<void> {
+		this.assertCurrent(session, generation, signal);
+		const expected = this.endpoint!;
+		const current = await getDaemonEndpoint();
+		this.assertCurrent(session, generation, signal);
+		if (expected.identity !== current.identity || expected.socketPath !== current.socketPath || expected.mode !== current.mode) {
+			this.invalidateConnection();
+			throw new Error(vscode.l10n.t('The agent runtime connection changed. Reconnect this conversation to continue.'));
+		}
+	}
+	private invalidateConnection(): void {
+		this.selectionSequence++; this.generation++;
+		const session = this.session;
+		this.session = undefined; this.endpoint = undefined; this.link = undefined; this.connecting = undefined; this.pendingSubmission = undefined;
+		clearTimeout(this.publishTimer); this.publishTimer = undefined;
+		clearInterval(this.boardTimer); this.boardTimer = undefined; this.boardPendingFor = undefined; this.boardReadAfter = 0;
+		session?.disconnect(); this.wake();
 	}
 	private post(message: Record<string, unknown>): void { if (!this.stopped) { this.options.post({ ...message, conversationId: this.conversationId }); } }
 	private wake(): void { for (const waiter of [...this.waiters]) { waiter(); } }
@@ -270,6 +320,7 @@ export class DaemonChat implements vscode.Disposable {
 		this.stopped = true; this.generation++; clearTimeout(this.publishTimer);
 		clearInterval(this.boardTimer);
 		this.trustListener?.dispose();
+		this.configurationListener?.dispose();
 		this.session?.disconnect(); this.wake();
 	}
 }
