@@ -5,7 +5,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -79,4 +80,27 @@ test('the actual client-resolved matcher version is checked before writing', asy
 	for (const [name, source] of contents) {
 		assert.equal(await readFile(path.join(client, name), 'utf8'), source);
 	}
+});
+
+test('nonregular sources fail before writing any compatibility change', async t => {
+	const { root, client, contents } = await fixture(t);
+	const [first, second] = Array.from(contents.keys());
+	const source = path.join(client, second);
+	await rm(source);
+	await mkdir(source);
+	assert.throws(() => patchLanguageClientGlobs(root), /requires a regular file|EISDIR|EPERM/);
+	assert.equal(await readFile(path.join(client, first), 'utf8'), contents.get(first));
+});
+
+test('source symlinks cannot bypass regular-file validation', { skip: !constants.O_NOFOLLOW }, async t => {
+	const { root, client, contents } = await fixture(t);
+	const [first, second] = Array.from(contents.keys());
+	const source = path.join(client, second);
+	const outside = path.join(path.dirname(root), 'outside.js');
+	await writeFile(outside, contents.get(second));
+	await rm(source);
+	await symlink(outside, source);
+	assert.throws(() => patchLanguageClientGlobs(root), /ELOOP|EMLINK/);
+	assert.equal(await readFile(path.join(client, first), 'utf8'), contents.get(first));
+	assert.equal(await readFile(outside, 'utf8'), contents.get(second));
 });

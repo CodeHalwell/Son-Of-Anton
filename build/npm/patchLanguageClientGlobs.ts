@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import { createHash, randomUUID } from 'node:crypto';
-import { lstatSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
@@ -22,29 +22,38 @@ const versions: Record<string, typeof nextFiles> = {
 	],
 };
 
+function readRegularFile(filename: string): string {
+	const descriptor = openSync(filename, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+	try {
+		if (!fstatSync(descriptor).isFile()) {
+			throw new Error(`Language client glob compatibility requires a regular file: ${filename}`);
+		}
+		return readFileSync(descriptor, 'utf8');
+	} finally {
+		closeSync(descriptor);
+	}
+}
+
 /** Adapt only reviewed language-client validation guards to minimatch 11's bounded matcher. */
 export function patchLanguageClientGlobs(extensionDirectory: string): void {
 	if (!extensions.has(path.basename(extensionDirectory))) {
 		return;
 	}
 	const client = path.join(extensionDirectory, 'node_modules', 'vscode-languageclient');
-	const manifest = JSON.parse(readFileSync(path.join(client, 'package.json'), 'utf8')) as { version: string };
+	const manifest = JSON.parse(readRegularFile(path.join(client, 'package.json'))) as { version: string };
 	const files = Object.hasOwn(versions, manifest.version) ? versions[manifest.version] : undefined;
 	if (!files) {
 		throw new Error(`Unreviewed language client glob compatibility version: ${manifest.version}`);
 	}
 	const matcherManifest = createRequire(path.join(client, 'package.json')).resolve('minimatch/package.json');
-	const matcher = JSON.parse(readFileSync(matcherManifest, 'utf8')) as { version: string };
+	const matcher = JSON.parse(readRegularFile(matcherManifest)) as { version: string };
 	if (matcher.version !== '11.0.1') {
 		throw new Error(`Unreviewed language client minimatch compatibility version: ${matcher.version}`);
 	}
 	const changes: { filename: string; content: string; original: string; patched: string }[] = [];
 	for (const file of files) {
 		const filename = path.join(client, file.file);
-		if (!lstatSync(filename).isFile()) {
-			throw new Error(`Language client glob compatibility requires a regular file: ${filename}`);
-		}
-		const content = readFileSync(filename, 'utf8');
+		const content = readRegularFile(filename);
 		const digest = createHash('sha256').update(content).digest('hex');
 		if (digest === file.patched) {
 			continue;
@@ -60,7 +69,7 @@ export function patchLanguageClientGlobs(extensionDirectory: string): void {
 	}
 	// Validate every input before writing any patch; known patched states are idempotent.
 	for (const change of changes) {
-		const current = createHash('sha256').update(readFileSync(change.filename)).digest('hex');
+		const current = createHash('sha256').update(readRegularFile(change.filename)).digest('hex');
 		if (current === change.patched) {
 			continue;
 		}
