@@ -490,7 +490,7 @@ function trivia3(pattern: string, options: IGlobOptionsInternal): ParsedStringPa
 		parsedPattern.allBasenames = withBasenames.allBasenames;
 	}
 
-	const allPaths = parsedPatterns.reduce((all, current) => current.allPaths ? all.concat(current.allPaths) : all, [] as string[]);
+	const allPaths = parsedPatterns.flatMap(current => current.allPaths || []);
 	if (allPaths.length) {
 		parsedPattern.allPaths = allPaths;
 	}
@@ -674,7 +674,7 @@ function parsedExpression(expression: IExpression, options: IGlobOptions): Parse
 			resultExpression.allBasenames = withBasenames.allBasenames;
 		}
 
-		const allPaths = parsedPatterns.reduce((all, current) => current.allPaths ? all.concat(current.allPaths) : all, [] as string[]);
+		const allPaths = parsedPatterns.flatMap(current => current.allPaths || []);
 		if (allPaths.length) {
 			resultExpression.allPaths = allPaths;
 		}
@@ -739,7 +739,7 @@ function parsedExpression(expression: IExpression, options: IGlobOptions): Parse
 		resultExpression.allBasenames = withBasenames.allBasenames;
 	}
 
-	const allPaths = parsedPatterns.reduce((all, current) => current.allPaths ? all.concat(current.allPaths) : all, [] as string[]);
+	const allPaths = parsedPatterns.flatMap(current => current.allPaths || []);
 	if (allPaths.length) {
 		resultExpression.allPaths = allPaths;
 	}
@@ -794,11 +794,11 @@ function aggregateBasenameMatches(parsedPatterns: Array<ParsedStringPattern | Pa
 		return parsedPatterns;
 	}
 
-	const basenames = basenamePatterns.reduce<string[]>((all, current) => {
+	const basenames = basenamePatterns.flatMap<string>(current => {
 		const basenames = (<ParsedStringPattern>current).basenames;
 
-		return basenames ? all.concat(basenames) : all;
-	}, [] as string[]);
+		return basenames || [];
+	});
 
 	let patterns: string[];
 	if (result) {
@@ -808,11 +808,11 @@ function aggregateBasenameMatches(parsedPatterns: Array<ParsedStringPattern | Pa
 			patterns.push(result);
 		}
 	} else {
-		patterns = basenamePatterns.reduce((all, current) => {
+		patterns = basenamePatterns.flatMap(current => {
 			const patterns = (<ParsedStringPattern>current).patterns;
 
-			return patterns ? all.concat(patterns) : all;
-		}, [] as string[]);
+			return patterns || [];
+		});
 	}
 
 	const aggregate: ParsedStringPattern = function (path: string, basename?: string) {

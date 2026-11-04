@@ -54,3 +54,6 @@
 ## 2026-08-17 - O(N*M) nested iterations in array filtering for recursive extension checking
 **Learning:** Checking for element presence with `Array.prototype.indexOf()` inside an `Array.prototype.filter()` callback over another growing tracking array (passed by reference in a recursive function like `getExtensionsToEnableRecursively`) creates an O(N*M) time complexity bottleneck. This occurs in extension resolution logic, blocking the main thread when many elements are involved.
 **Action:** When filtering an array against another array that acts as a tracking list in recursive calls, initialize a tracking `Set` alongside the array to use `Set.has()`, and ensure you `Set.add()` whenever `Array.push()`ing to the original array to keep state synchronized. This reduces time complexity to O(N+M).
+## 2024-05-18 - Avoid array.reduce().concat() anti-pattern
+**Learning:** The O(N^2) anti-pattern `array.reduce((a, b) => a.concat(b), [])` creates intermediate arrays for every concatenation, which causes unnecessary heap allocation and is slow for large arrays. Replacing it with `array.flat()` natively flattens the array in O(N) and prevents performance bottlenecks, especially in hot paths like text model searching and debug visualization.
+**Action:** Always replace `reduce((a, b) => a.concat(b), [])` with `array.flat()` or `array.flatMap()`.

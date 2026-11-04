@@ -153,7 +153,7 @@ export class DisassemblyView extends EditorPane {
 	get currentInstructionAddresses() {
 		return this._debugService.getModel().getSessions(false).
 			map(session => session.getAllThreads()).
-			reduce((prev, curr) => prev.concat(curr), []).
+			flat().
 			map(thread => thread.getTopStackFrame()).
 			map(frame => frame?.instructionPointerReference).
 			map(ref => ref ? this.getReferenceAddress(ref) : undefined);
