@@ -47,3 +47,7 @@
 ## 2024-08-12 - Accessible Button Roles for Interactive Links in Tables
 **Learning:** Custom interactive links (like `<a>` tags with `tabindex: 0`) dynamically rendered inside list/table rows (e.g. extension sources in Keyboard Shortcuts) that act as clickable buttons (handling `CLICK`, `Enter` and `Space`) must have `role="button"` for screen reader users to identify them properly as actionable items. Furthermore, if their text content alone might not provide enough context (or just for completeness matching a tooltip), an explicit `aria-label` provides a better accessible name.
 **Action:** When appending custom `<a>` elements serving as action buttons within dynamic list/table cells, always set `role: 'button'` and assign a localized `aria-label` to ensure users relying on screen readers understand they can interact with the element like a button.
+
+## 2026-11-04 - Tri-state Checkbox ARIA State
+**Learning:** For custom tri-state checkboxes, explicitly set `aria-checked="mixed"` when in the mixed state, as screen readers will otherwise announce them incorrectly as 'unchecked'. Ensure you explicitly map undefined or boolean states to `"true"`, `"false"`, or `"mixed"`, avoiding `String(state)` which may output the invalid ARIA value `"undefined"`.
+**Action:** When creating or modifying tri-state checkboxes, always ensure the `aria-checked` attribute accurately reflects all three possible states, particularly `mixed`.

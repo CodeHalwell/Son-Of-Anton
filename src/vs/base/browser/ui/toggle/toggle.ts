@@ -391,6 +391,8 @@ export class TriStateCheckbox extends BaseCheckbox {
 			this.applyStyles();
 			this._onChange.fire(keyboard);
 		}));
+
+		this.applyStyles();
 	}
 
 	get checked(): boolean | 'mixed' {
@@ -406,6 +408,9 @@ export class TriStateCheckbox extends BaseCheckbox {
 	}
 
 	protected override applyStyles(enabled?: boolean): void {
+		if (this.domNode) {
+			this.domNode.setAttribute('aria-checked', this._state === 'mixed' ? 'mixed' : this._state ? 'true' : 'false');
+		}
 		switch (this._state) {
 			case true:
 				this.checkbox.setIcon(Codicon.check);
