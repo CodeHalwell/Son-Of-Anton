@@ -29,7 +29,7 @@ export class TerminalGroupService extends Disposable implements ITerminalGroupSe
 	groups: ITerminalGroup[] = [];
 	activeGroupIndex: number = -1;
 	get instances(): ITerminalInstance[] {
-		return this.groups.reduce((p, c) => p.concat(c.terminalInstances), [] as ITerminalInstance[]);
+		return this.groups.flatMap(c => c.terminalInstances);
 	}
 
 	lastAccessedMenu: 'inline-tab' | 'tab-list' = 'inline-tab';
