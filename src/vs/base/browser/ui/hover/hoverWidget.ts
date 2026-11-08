@@ -92,9 +92,11 @@ export class HoverAction extends Disposable {
 		if (enabled) {
 			this.actionContainer.classList.remove('disabled');
 			this.actionContainer.removeAttribute('aria-disabled');
+			this.actionContainer.tabIndex = 0;
 		} else {
 			this.actionContainer.classList.add('disabled');
 			this.actionContainer.setAttribute('aria-disabled', 'true');
+			this.actionContainer.tabIndex = -1;
 		}
 	}
 }
@@ -109,7 +111,9 @@ export class ClickAction extends Disposable {
 		this._register(dom.addDisposableListener(container, dom.EventType.CLICK, e => {
 			e.stopPropagation();
 			e.preventDefault();
-			run(container);
+			if (!container.classList.contains('disabled')) {
+				run(container);
+			}
 		}));
 	}
 }
@@ -122,7 +126,9 @@ export class KeyDownAction extends Disposable {
 			if (keyCodes.some(keyCode => event.equals(keyCode))) {
 				e.stopPropagation();
 				e.preventDefault();
-				run(container);
+				if (!container.classList.contains('disabled')) {
+					run(container);
+				}
 			}
 		}));
 	}
