@@ -84,7 +84,7 @@ export function consolidate(groups: IRangedGroup[]): IRangedGroup[] {
  * collection.
  */
 function concat(...groups: IRangedGroup[][]): IRangedGroup[] {
-	return consolidate(groups.reduce((r, g) => r.concat(g), []));
+	return consolidate(groups.flat());
 }
 
 export interface IRangeMap {
